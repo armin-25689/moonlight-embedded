@@ -219,8 +219,20 @@ void* wl_get_display(const char *device) {
 }
 
 void wl_close_display() {
-  if (wl_display != NULL)
+  if (wl_display != NULL) {
+    wl_output_destroy(wl_output);
+    wl_pointer_destroy(wl_pointer);
+    wl_seat_destroy(wl_seat);
+    xdg_toplevel_destroy(xdg_toplevel);
+    xdg_surface_destroy(xdg_surface);
+    xdg_wm_base_destroy(xdg_wm_base);
+    wl_surface_destroy(wlsurface);
+    wl_compositor_destroy(compositor);
+    wl_registry_destroy(registry);
+    wl_egl_window_destroy(wl_window);
     wl_display_disconnect(wl_display);
+    wl_display = NULL;
+  }
 }
 
 void wl_dispatch_event() {
