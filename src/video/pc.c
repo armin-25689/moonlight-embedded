@@ -29,6 +29,7 @@
 #include "wayland.h"
 #endif
 
+#include "../input/evdev.h"
 #include "../loop.h"
 #include "../util.h"
 
@@ -55,9 +56,23 @@ static size_t ffmpeg_buffer_size = 0;
 static void *display = NULL;
 
 static int pipefd[2];
+static int windowpipefd[2];
 
 static int display_width = 0;
 static int display_height = 0;
+
+static int window_op_handle (int pipefd) {
+  char *opCode = NULL;
+
+  while (read(pipefd, &opCode, sizeof(char *)) > 0);
+  if (strcmp(opCode, QUITCODE) == 0) {
+    return LOOP_RETURN;
+  } else if (strcmp(opCode, GRABCODE) == 0) {
+  } else if (strcmp(opCode, UNGRABCODE) == 0) {
+  }
+
+  return LOOP_OK;
+}
 
 static int (*render_handler) (AVFrame* frame);
 
@@ -206,13 +221,22 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
     isTenBit = videoFormat & VIDEO_FORMAT_MASK_10BIT;
   }
 
-  if (pipe(pipefd) == -1) {
+  if (pipe(pipefd) == -1 || pipe(windowpipefd) == -1) {
     fprintf(stderr, "Can't create communication channel between threads\n");
     return -2;
   }
 
   loop_add_fd(pipefd[0], &frame_handle, POLLIN);
   fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
+
+  loop_add_fd(windowpipefd[0], &window_op_handle, POLLIN);
+  fcntl(windowpipefd[0], F_SETFL, O_NONBLOCK);
+
+  evdev_trans_op_fd(windowpipefd[1]);
+#ifdef HAVE_WAYLAND
+  if (isWayland)
+    wl_trans_op_fd(windowpipefd[1]);
+#endif
 
   return 0;
 }

@@ -55,8 +55,6 @@
 #include <arpa/inet.h>
  
 bool isNoSdl = false;
-extern void is_use_kbdmux();
-extern bool x11_sdl_init(char* mappings);
 
 static void applist(PSERVER_DATA server) {
   PAPP_LIST list = NULL;
@@ -385,7 +383,7 @@ int main(int argc, char* argv[]) {
         udev_init(!inputAdded, mappings, config.debug_level > 0, config.rotate);
         evdev_init(config.mouse_emulation);
         #ifdef HAVE_SDL
-	if (config.inputsCount > 0 || !x11_sdl_init(config.mapping)) {
+	if (config.inputsCount > 0 || x11_sdl_init(config.mapping) != 0) {
           if (config.inputsCount > 0)
             printf("Using evdev to drive gamepads because of '-input device' option in command.\n");
           else

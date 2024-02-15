@@ -30,6 +30,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static struct wl_display *wl_display = NULL;
 static struct wl_surface *wlsurface;
@@ -43,8 +44,11 @@ static struct xdg_wm_base *xdg_wm_base;
 static struct xdg_toplevel *xdg_toplevel;
 static struct xdg_surface *xdg_surface;
 
+static const char *quitCode = QUITCODE;
+
 static int display_width = 0;
 static int display_height = 0;
+static int window_op_fd = -1;
 static int32_t outputScaleFactor = 0;
 
 static void noop() {};
@@ -141,9 +145,13 @@ static const struct wl_registry_listener registry_listener= {
   .global_remove = registry_remover
 };
 
+static void window_close(void *data, struct xdg_toplevel *xdg_toplevel) {
+  write(window_op_fd, &quitCode, sizeof(char *));
+}
+
 static const struct xdg_toplevel_listener xdg_toplevel_listener = {
   .configure = noop,
-  .close = noop,
+  .close = window_close,
 };
 
 static const struct xdg_surface_listener xdg_surface_listener = {
@@ -246,6 +254,10 @@ void wl_dispatch_event() {
 void wl_get_resolution(int *width, int *height) {
   *width = display_width;
   *height = display_height;
+}
+
+void wl_trans_op_fd(int fd) {
+  window_op_fd = fd;
 }
 
 EGLSurface wl_get_egl_surface(EGLDisplay display, EGLConfig config, void *data) {

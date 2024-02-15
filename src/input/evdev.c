@@ -45,8 +45,14 @@
 #endif
 #include <math.h>
 
-void grab_window(bool grabstat);
+#define QUITCODE "quit"
+
 extern bool isNoSdl;
+
+static int keyboardpipefd = -1;
+static const char *quitstate = QUITCODE;
+static const char *grabcode = GRABCODE;
+static const char *ungrabcode = UNGRABCODE;
 
 static bool waitingToSwitchGrabOnModifierUp = false;
 static bool iskeyboardgrab = false;
@@ -155,6 +161,7 @@ int evdev_gamepads = 0;
 #define GRAB_KEY KEY_Z
 #define QUIT_BUTTONS (PLAY_FLAG|BACK_FLAG|LB_FLAG|RB_FLAG)
 
+static void grab_window(bool grabstat);
 static bool (*handler) (struct input_event*, struct input_device*);
 
 static int evdev_get_map(int* map, int length, int value) {
@@ -486,13 +493,13 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
         if (dev->modifiers == 0 && isgrabkeyrelease) {
           waitingToSwitchGrabOnModifierUp = false;
           isgrabkeyrelease = false;
-	  freeallkey();
+          freeallkey();
           grab_window(!iskeyboardgrab);
           return true;
         }
         return true;
       } else if (waitingToExitOnModifiersUp && dev->modifiers == 0) {
-	freeallkey();
+        freeallkey();
         grab_window(false);
         return false;
       }
@@ -532,9 +539,9 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
       case BTN_TOUCH:
         if (ev->value == 1) {
           dev->touchDownTime = ev->time;
-	  if (dev->is_mouse && dev->mtSlot == -1) {
-	    dev->fingersNum = 1;
-	    dev->maxFingersNum = 1;
+          if (dev->is_mouse && dev->mtSlot == -1) {
+            dev->fingersNum = 1;
+            dev->maxFingersNum = 1;
           }
         } else {
           if (dev->touchDownX != TOUCH_UP && dev->touchDownY != TOUCH_UP) {
@@ -588,52 +595,52 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
       case BTN_TOOL_FINGER:
         if (dev->mtPalm <= 0)
           break;
-	if (ev->value == 1) {
-	  dev->fingersNum = 1;
-	}
+        if (ev->value == 1) {
+          dev->fingersNum = 1;
+        }
         break;
       case BTN_TOOL_DOUBLETAP:
         if (dev->mtPalm <= 0)
           break;
-	if (ev->value == 1) {
+        if (ev->value == 1) {
           if (dev->maxFingersNum < 2)
-	    dev->maxFingersNum = 2;
-	  dev->fingersNum = 2;
-	}
+            dev->maxFingersNum = 2;
+          dev->fingersNum = 2;
+        }
         break;
       case BTN_TOOL_TRIPLETAP:
         if (dev->mtPalm <= 0)
           break;
         if (ev->value == 1) {
-	  dev->isDraging = true;
+          dev->isDraging = true;
           if (dev->maxFingersNum < 3)
-	    dev->maxFingersNum = 3;
-	  dev->fingersNum = 3;
+            dev->maxFingersNum = 3;
+          dev->fingersNum = 3;
         } else {
-	  if (dev->isDraged) {
+          if (dev->isDraged) {
             LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
-	  }
-	  dev->isDraging = false;
-	  dev->isDraged = false;
+          }
+          dev->isDraging = false;
+          dev->isDraged = false;
         }
         break;
       case BTN_TOOL_QUADTAP:
         if (dev->mtPalm <= 0)
           break;
-	if (ev->value == 1) {
+        if (ev->value == 1) {
           if (dev->maxFingersNum < 4)
-	    dev->maxFingersNum = 4;
-	  dev->fingersNum = 4;
-	}
+            dev->maxFingersNum = 4;
+          dev->fingersNum = 4;
+        }
         break;
       case BTN_TOOL_QUINTTAP:
         if (dev->mtPalm <= 0)
           break;
-	if (ev->value == 1) {
+        if (ev->value == 1) {
           if (dev->maxFingersNum < 5)
-	    dev->maxFingersNum = 5;
-	  dev->fingersNum = 5;
-	}
+            dev->maxFingersNum = 5;
+          dev->fingersNum = 5;
+        }
         break;
       default:
         gamepadModified = true;
@@ -804,9 +811,9 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
           if (!dev->isMoving && abs(ev->value - dev->touchDownX) >= dev->mtPalm)
             dev->isMoving = true;
           if (dev->isMoving) {
-	    if (dev->fingersNum == 2)
+            if (dev->fingersNum == 2)
               LiSendHighResHScrollEvent((short)nowdistance);
-	    else
+            else
               dev->mouseDeltaX += nowdistance;
           }
           dev->touchX = ev->value;
@@ -823,9 +830,9 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
           if (!dev->isMoving && abs(ev->value - dev->touchDownY) >= dev->mtPalm)
             dev->isMoving = true;
           if (dev->isMoving) {
-	    if (dev->fingersNum == 2)
+            if (dev->fingersNum == 2)
               LiSendHighResScrollEvent((short)nowdistance);
-	    else
+            else
               dev->mouseDeltaY += nowdistance;
           }
           dev->touchY = ev->value;
@@ -986,8 +993,8 @@ static int evdev_handle(int fd) {
         if (rc == LIBEVDEV_READ_STATUS_SYNC)
           fprintf(stderr, "Error:%s(%d) cannot keep up\n", libevdev_get_name(devices[i].dev), i);
         else if (rc == LIBEVDEV_READ_STATUS_SUCCESS) {
-	  if (!iskeyboardgrab && ev.type != EV_KEY)
-	    break;
+          if (!iskeyboardgrab && ev.type != EV_KEY)
+            break;
           if (!handler(&ev, &devices[i]))
             return LOOP_RETURN;
         }
@@ -1434,9 +1441,15 @@ void grab_window(bool grabstat) {
     if (iskeyboardgrab) {
       grabnum = 0;
       iskeyboardgrab = false;
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND)
+      write(keyboardpipefd, &ungrabcode, sizeof(char *));
+#endif
     } else {
       grabnum = 1;
       iskeyboardgrab = true;
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND)
+      write(keyboardpipefd, &grabcode, sizeof(char *));
+#endif
     }
 
     evdev_drain();
@@ -1450,6 +1463,10 @@ void grab_window(bool grabstat) {
   }
 }
 
+void evdev_trans_op_fd(int pipefd) {
+  keyboardpipefd = pipefd;
+}
+
 #ifdef HAVE_SDL
 
 #include <SDL.h>
@@ -1461,7 +1478,6 @@ void grab_window(bool grabstat) {
 
 extern int sdl_gamepads;
 
-static int pipefd[2];
 static SDL_Thread *thread = NULL;
 
 static const int SDL_TO_LI_BUTTON_MAP[] = {
@@ -1764,12 +1780,13 @@ static void x11_sdl_stop () {
 static int x11_sdl_event_handle(void *pointer) {
   SDL_Event event;
   bool done = false;
-  char *quitstate = "q";
 
   while (!done && SDL_WaitEvent(&event)) {
     switch (x11_sdlinput_handle_event(&event)) {
     case SDL_QUIT_APPLICATION:
-      write(pipefd[1], quitstate, sizeof(char));
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND)
+      write(keyboardpipefd, &quitstate, sizeof(char *));
+#endif
       done = true;
       break;
     default:
@@ -1783,15 +1800,7 @@ static int x11_sdl_event_handle(void *pointer) {
   return 0;
 }
 
-static int sdl_event_state_handle(int pipefd) {
-  char stateBuffer[2];
-  if (read(pipefd, stateBuffer, sizeof(char)) > 0)
-    return LOOP_RETURN;
-  else
-    return LOOP_OK;
-}
-
-bool x11_sdl_init (char* mappings) {
+int x11_sdl_init (char* mappings) {
   sdl_gamepads = 0;
   sdlinput_init(mappings);
 
@@ -1807,17 +1816,10 @@ bool x11_sdl_init (char* mappings) {
   if (thread == NULL) {
     fprintf(stderr, "Can't create sdl poll event thread.\n");
     SDL_Quit();
-    return false;
+    return -1;
   }
 
-  if (pipe(pipefd) == -1) {
-    fprintf(stderr, "Can't create sdl poll event channel.\n");
-    return false;
-  }
-  loop_add_fd(pipefd[0], &sdl_event_state_handle, POLLIN);
-  fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
-
-  return true;
+  return 0;
 }
 
 #endif /* HAVE_SDL */
