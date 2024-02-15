@@ -1,0 +1,67 @@
+--- docs/README.pod.orig	2023-11-03 06:08:34 UTC
++++ docs/README.pod
+@@ -138,7 +138,7 @@ Select platform for audio and video output and input.
+ =item B<-platform> [I<PLATFORM>]
+ 
+ Select platform for audio and video output and input.
+-<PLATFORM> can be pi, imx, aml, x11, x11_vdpau, sdl or fake.
++<PLATFORM> can be vaapi, sdl, x11_vaapi, wayland_vaapi, pi or fake etc.
+ 
+ =item B<-nounsupported>
+ 
+@@ -182,21 +182,50 @@ Only available when X11 or SDL platform is used.
+ 
+ =back
+ 
++=head1 EXAMPLE
++
++Pair:
++  # moonlight pair 192.168.0.1
++
++Connect:
++ The following cmd means to connect 192.168.0.1 with a resolution 2560x1600.
++  # moonlight stream -app Desktop -width 2560 -height 1600 192.168.0.1
++ The following cmd means to connect 192.168.0.1 with a resolution 1080p and the fps 120.And try to decoding with GPU.
++  # moonlight stream -app Steam -width 1920 -height 1080 -fps 120 -platform 'x11_vaapi' 192.168.0.1
++
+ =head1 CONFIG FILE
+ 
+-Moonlight Embedded will load a confiuration file from:
++Moonlight Embedded will load a configuration file from:
+ 
+-  $XDG_CONFIG_HOME/moonligt/moonlight.conf (fallback to ~/.config/moonligt/moonlight.conf)
++  $XDG_CONFIG_HOME/moonlight/moonlight.conf (fallback to ~/.config/moonlight/moonlight.conf)
+ 
+ If no user specified configuration file is available the configuration will be loaded from:
+ 
+-  /etc/moonlight/moonlight.conf
++  /usr/local/etc/moonlight/moonlight.conf
+ 
+-A documented example configuration file can be found at /etc/moonlight/moonlight.conf.
++A documented example configuration file can be found at /usr/local/etc/moonlight/moonlight.conf.
+ 
++=head1 KEYBOARD SHORTCUTS
++
++ Use Ctrl+Alt+Shift+Q or Play+Back+LeftShoulder+RightShoulder to quit the streaming session.
++ Use Ctrl+Alt+Shift+Z to Grab/Ungrab keyboard.
++ It could not grab the keyboard Using sdl platform.
++
++=head1 GAMEPAD
++
++FreeBSD supports fewer controllers.Please see hgame(4) xb360gp(4) ps4dshock(4) and FreeBSD forums...
++SDL has better behavior for gamepad.
++
+ =head1 COMMENTS
+ 
+-Use Ctrl+Alt+Shift+Q or Play+Back+LeftShoulder+RightShoulder to quit the streaming session.
++Platform 'sdl' and 'x11' is soft decoding.'x11' is deprecated.
++Platform '*vaapi' is hard accel decoding.
++If you want to use GPU decoding for intel gpu,you must do:
++  1.Use platform 'x11_vaapi' or 'wayland_vaapi' or 'vaapi'
++  2.Install package:libva-intel-driver/libva-intel-media-driver.
++
++Multi keyboard may meet bugs.Please man kbdmux or kbdcontrol.
++And try to disable kbdmux.
+ 
+ =head1 AUTHOR
+ 
