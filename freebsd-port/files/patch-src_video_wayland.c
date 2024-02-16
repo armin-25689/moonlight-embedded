@@ -1,6 +1,6 @@
---- src/video/wayland.c.orig	2024-02-15 11:36:00 UTC
+--- src/video/wayland.c.orig	2024-02-16 02:24:16 UTC
 +++ src/video/wayland.c
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,273 @@
 +/*
 + * This file is part of Moonlight Embedded.
 + *
@@ -53,6 +53,7 @@
 +static int display_height = 0;
 +static int window_op_fd = -1;
 +static int32_t outputScaleFactor = 0;
++static bool isFullscreen = false;
 +
 +static void noop() {};
 +
@@ -174,7 +175,8 @@
 +  wl_display_dispatch(wl_display);
 +  wl_display_roundtrip(wl_display);
 + 
-+  if (!(drFlags & DISPLAY_FULLSCREEN) || display_width <= 0 || display_height <= 0) {
++  isFullscreen = ((drFlags & DISPLAY_FULLSCREEN) == DISPLAY_FULLSCREEN);
++  if (!isFullscreen || display_width <= 0 || display_height <= 0) {
 +    display_width = width;
 +    display_height = height;
 +  }
@@ -206,7 +208,8 @@
 +  xdg_toplevel_add_listener(xdg_toplevel, &xdg_toplevel_listener, NULL);
 +
 +  xdg_toplevel_set_max_size(xdg_toplevel, display_width, display_height);
-+  xdg_toplevel_set_fullscreen(xdg_toplevel, NULL);
++  if (isFullscreen)
++    xdg_toplevel_set_fullscreen(xdg_toplevel, NULL);
 +
 +  wl_window = wl_egl_window_create(wlsurface, display_width, display_height);
 +  if (wl_window == NULL) {

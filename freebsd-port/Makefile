@@ -47,6 +47,7 @@ post-patch:
 	@${REINPLACE_CMD} -e 's@/usr/local@${PREFIX}@' \
 		${WRKSRC}/docs/README.pod
 	@${REINPLACE_CMD} -e 's@/usr/local@${PREFIX}@' \
+		-e 's@/etc@${PREFIX}/etc@' \
 		${WRKSRC}/src/config.c
 
 post-install:
