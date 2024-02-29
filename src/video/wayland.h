@@ -9,5 +9,6 @@ void wl_show_picture();
 void wl_dispatch_event();
 void wl_get_resolution(int *width, int *height);
 void wl_trans_op_fd(int fd);
+void wl_change_cursor(const char *op);
 EGLSurface wl_get_egl_surface(EGLDisplay display, EGLConfig config, void *data);
 EGLDisplay wl_get_egl_display();

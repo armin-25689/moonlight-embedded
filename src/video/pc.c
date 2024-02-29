@@ -48,7 +48,6 @@
 extern bool isUseGlExt;
 static bool isTenBit;
 static bool isWayland = false;
-static bool isYUV444;
 
 static void* ffmpeg_buffer = NULL;
 static size_t ffmpeg_buffer_size = 0;
@@ -67,8 +66,14 @@ static int window_op_handle (int pipefd) {
   while (read(pipefd, &opCode, sizeof(char *)) > 0);
   if (strcmp(opCode, QUITCODE) == 0) {
     return LOOP_RETURN;
+#ifdef HAVE_WAYLAND
   } else if (strcmp(opCode, GRABCODE) == 0) {
+    if (isWayland)
+      wl_change_cursor("hide");
   } else if (strcmp(opCode, UNGRABCODE) == 0) {
+    if (isWayland)
+      wl_change_cursor("display");
+#endif
   }
 
   return LOOP_OK;
@@ -86,7 +91,7 @@ static int frame_handle (int pipefd) {
 }
 
 static int software_draw (AVFrame* frame) {
-  egl_draw(frame->data);
+  egl_draw(frame, frame->data);
   return LOOP_OK;
 }
 
@@ -120,9 +125,8 @@ static int test_vaapi_va_put (AVFrame* frame) {
 
   if (successTimes <= 0) {
     int dcFlag;
-    dcFlag = isYUV444 ? (ffmpeg_decoder | YUV444) : ffmpeg_decoder;
 #ifdef HAVE_WAYLAND
-    dcFlag = isWayland ? (dcFlag | WAYLAND) : dcFlag;
+    dcFlag = isWayland ? (ffmpeg_decoder | WAYLAND) : ffmpeg_decoder;
 #endif
     egl_init(display, display_width, display_height, dcFlag);
 
@@ -209,14 +213,18 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   else
     avc_flags = SLICE_THREADING;
 
+  if (drFlags & YUV444)
+    isYUV444 = true;
+
   if (ffmpeg_init(videoFormat, width, height, avc_flags, 2, SLICES_PER_FRAME) < 0) {
     fprintf(stderr, "Couldn't initialize video decoding\n");
     return -1;
   }
 
-  if (ffmpeg_decoder == SOFTWARE)
+  if (ffmpeg_decoder == SOFTWARE) {
+    egl_init(display, width, height, SOFTWARE);
     render_handler = software_draw;
-  else {
+  } else {
     render_handler = test_vaapi_va_put;
     isTenBit = videoFormat & VIDEO_FORMAT_MASK_10BIT;
   }

@@ -1,6 +1,6 @@
---- src/config.c.orig	2023-11-03 06:08:34 UTC
+--- src/config.c.orig	2024-02-20 04:01:31 UTC
 +++ src/config.c
-@@ -36,12 +36,14 @@
+@@ -37,12 +37,14 @@
  #define USER_PATHS "."
  #define DEFAULT_CONFIG_DIR "/.config"
  #define DEFAULT_CACHE_DIR "/.cache"
@@ -15,7 +15,25 @@
  
  static struct option long_options[] = {
    {"720", no_argument, NULL, 'a'},
-@@ -280,19 +282,34 @@ bool config_file_parse(char* filename, PCONFIGURATION 
+@@ -50,6 +52,7 @@ static struct option long_options[] = {
+   {"4k", no_argument, NULL, '0'},
+   {"width", required_argument, NULL, 'c'},
+   {"height", required_argument, NULL, 'd'},
++  {"yuv444", no_argument, NULL, 'f'},
+   {"bitrate", required_argument, NULL, 'g'},
+   {"packetsize", required_argument, NULL, 'h'},
+   {"app", required_argument, NULL, 'i'},
+@@ -151,6 +154,9 @@ static void parse_argument(int c, char* value, PCONFIG
+   case 'd':
+     config->stream.height = atoi(value);
+     break;
++  case 'f':
++    config->yuv444 = true;
++    break;
+   case 'g':
+     config->stream.bitrate = atoi(value);
+     break;
+@@ -281,19 +287,34 @@ bool config_file_parse(char* filename, PCONFIGURATION 
  
    char *line = NULL;
    size_t len = 0;
@@ -54,7 +72,7 @@
              else if (strcmp("true", value) == 0)
                parse_argument(long_options[i].val, NULL, config);
            }
-@@ -387,7 +404,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATI
+@@ -387,7 +408,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATI
    config->mapping = get_path("gamecontrollerdb.txt", getenv("XDG_DATA_DIRS"));
    config->key_dir[0] = 0;
  
@@ -63,10 +81,12 @@
    if (config_file)
      config_file_parse(config_file, config);
  
-@@ -438,5 +455,12 @@ void config_parse(int argc, char* argv[], PCONFIGURATI
+@@ -438,5 +459,14 @@ void config_parse(int argc, char* argv[], PCONFIGURATI
      } else /* if (config->stream.width * config->stream.height <= 3840 * 2160) */ {
        config->stream.bitrate = (int)(40000 * (config->stream.fps / 30.0));
      }
++    if (config->yuv444)
++      config->stream.bitrate = config->stream.bitrate * 2;
 +  }
 +}
 +

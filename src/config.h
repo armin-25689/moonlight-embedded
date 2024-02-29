@@ -48,6 +48,7 @@ typedef struct _CONFIGURATION {
   bool hdr;
   int pin;
   unsigned short port;
+  bool yuv444;
 } CONFIGURATION, *PCONFIGURATION;
 
 extern bool inputAdded;

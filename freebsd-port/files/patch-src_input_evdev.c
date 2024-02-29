@@ -1,14 +1,7 @@
---- src/input/evdev.c.orig	2023-11-03 06:08:34 UTC
+--- src/input/evdev.c.orig	2024-02-20 04:01:31 UTC
 +++ src/input/evdev.c
-@@ -38,9 +38,27 @@
- #include <limits.h>
- #include <unistd.h>
- #include <pthread.h>
-+#ifdef __linux__
- #include <endian.h>
-+#else
-+#include <sys/endian.h>
-+#endif
+@@ -45,6 +45,20 @@
+ #endif
  #include <math.h>
  
 +#define QUITCODE "quit"
@@ -28,17 +21,10 @@
  #if __BYTE_ORDER == __LITTLE_ENDIAN
  #define int16_to_le(val) val
  #else
-@@ -66,8 +84,20 @@ struct input_device {
-   int hats_state[3][2];
-   int fd;
-   char modifiers;
-+  #ifdef __linux__
-   __s32 mouseDeltaX, mouseDeltaY, mouseVScroll, mouseHScroll;
-   __s32 touchDownX, touchDownY, touchX, touchY;
-+  #else
-+  int32_t mouseDeltaX, mouseDeltaY, mouseVScroll, mouseHScroll;
-+  int32_t touchDownX, touchDownY, touchX, touchY;
-+  #endif
+@@ -77,6 +91,13 @@ struct input_device {
+   int32_t mouseDeltaX, mouseDeltaY, mouseVScroll, mouseHScroll;
+   int32_t touchDownX, touchDownY, touchX, touchY;
+   #endif
 +  int fingersNum;
 +  int maxFingersNum;
 +  int mtPalm;
@@ -49,7 +35,7 @@
    struct timeval touchDownTime;
    struct timeval btnDownTime;
    short controllerId;
-@@ -123,12 +153,15 @@ static bool waitingToExitOnModifiersUp = false;
+@@ -132,12 +153,15 @@ static bool waitingToExitOnModifiersUp = false;
  
  static bool waitingToExitOnModifiersUp = false;
  
@@ -65,7 +51,7 @@
  static bool (*handler) (struct input_event*, struct input_device*);
  
  static int evdev_get_map(int* map, int length, int value) {
-@@ -139,6 +172,32 @@ static int evdev_get_map(int* map, int length, int val
+@@ -148,6 +172,32 @@ static int evdev_get_map(int* map, int length, int val
    return -1;
  }
  
@@ -98,7 +84,7 @@
  static bool evdev_init_parms(struct input_device *dev, struct input_abs_parms *parms, int code) {
    int abs = evdev_get_map(dev->abs_map, ABS_MAX, code);
  
-@@ -343,7 +402,7 @@ static bool evdev_handle_event(struct input_event *ev,
+@@ -352,7 +402,7 @@ static bool evdev_handle_event(struct input_event *ev,
      if (dev->mouseHScroll != 0) {
        LiSendHScrollEvent(dev->mouseHScroll);
        dev->mouseHScroll = 0;
@@ -107,7 +93,7 @@
      if (dev->gamepadModified) {
        if (dev->controllerId < 0) {
          for (int i = 0; i < MAX_GAMEPADS; i++) {
-@@ -366,6 +425,24 @@ static bool evdev_handle_event(struct input_event *ev,
+@@ -375,6 +425,24 @@ static bool evdev_handle_event(struct input_event *ev,
          LiSendMultiControllerEvent(dev->controllerId, assignedControllerIds, dev->buttonFlags, dev->leftTrigger, dev->rightTrigger, dev->leftStickX, dev->leftStickY, dev->rightStickX, dev->rightStickY);
        dev->gamepadModified = false;
      }
@@ -132,7 +118,7 @@
      break;
    case EV_KEY:
      if (ev->code > KEY_MAX)
-@@ -398,16 +475,47 @@ static bool evdev_handle_event(struct input_event *ev,
+@@ -407,16 +475,47 @@ static bool evdev_handle_event(struct input_event *ev,
        }
  
        // After the quit key combo is pressed, quit once all keys are raised
@@ -184,7 +170,7 @@
        int mouseCode = 0;
        int gamepadCode = 0;
        int index = dev->key_map[ev->code];
-@@ -431,24 +539,109 @@ static bool evdev_handle_event(struct input_event *ev,
+@@ -440,24 +539,109 @@ static bool evdev_handle_event(struct input_event *ev,
        case BTN_TOUCH:
          if (ev->value == 1) {
            dev->touchDownTime = ev->time;
@@ -299,7 +285,7 @@
        default:
          gamepadModified = true;
          if (dev->map == NULL)
-@@ -599,6 +792,55 @@ static bool evdev_handle_event(struct input_event *ev,
+@@ -608,6 +792,55 @@ static bool evdev_handle_event(struct input_event *ev,
        }
        break;
      }
@@ -355,7 +341,7 @@
  
      if (dev->map == NULL)
        break;
-@@ -749,8 +991,10 @@ static int evdev_handle(int fd) {
+@@ -758,8 +991,10 @@ static int evdev_handle(int fd) {
        struct input_event ev;
        while ((rc = libevdev_next_event(devices[i].dev, LIBEVDEV_READ_FLAG_NORMAL, &ev)) >= 0) {
          if (rc == LIBEVDEV_READ_STATUS_SYNC)
@@ -367,7 +353,7 @@
            if (!handler(&ev, &devices[i]))
              return LOOP_RETURN;
          }
-@@ -766,6 +1010,39 @@ static int evdev_handle(int fd) {
+@@ -775,6 +1010,39 @@ static int evdev_handle(int fd) {
    return LOOP_OK;
  }
  
@@ -407,7 +393,7 @@
  void evdev_create(const char* device, struct mapping* mappings, bool verbose, int rotate) {
    int fd = open(device, O_RDWR|O_NONBLOCK);
    if (fd <= 0) {
-@@ -814,8 +1091,9 @@ void evdev_create(const char* device, struct mapping* 
+@@ -823,8 +1091,9 @@ void evdev_create(const char* device, struct mapping* 
      mappings = xwc_mapping;
  
    bool is_keyboard = libevdev_has_event_code(evdev, EV_KEY, KEY_Q);
@@ -419,7 +405,7 @@
  
    // This classification logic comes from SDL
    bool is_accelerometer =
-@@ -840,7 +1118,34 @@ void evdev_create(const char* device, struct mapping* 
+@@ -851,7 +1120,34 @@ void evdev_create(const char* device, struct mapping* 
       libevdev_has_event_code(evdev, EV_ABS, ABS_WHEEL) ||
       libevdev_has_event_code(evdev, EV_ABS, ABS_GAS) ||
       libevdev_has_event_code(evdev, EV_ABS, ABS_BRAKE));
@@ -454,7 +440,7 @@
    if (is_accelerometer) {
      if (verbose)
        printf("Ignoring accelerometer: %s\n", name);
-@@ -850,6 +1155,17 @@ void evdev_create(const char* device, struct mapping* 
+@@ -861,6 +1157,17 @@ void evdev_create(const char* device, struct mapping* 
    }
  
    if (is_gamepad) {
@@ -472,7 +458,7 @@
      evdev_gamepads++;
  
      if (mappings == NULL) {
-@@ -889,7 +1205,15 @@ void evdev_create(const char* device, struct mapping* 
+@@ -900,7 +1207,15 @@ void evdev_create(const char* device, struct mapping* 
    devices[dev].rotate = rotate;
    devices[dev].touchDownX = TOUCH_UP;
    devices[dev].touchDownY = TOUCH_UP;
@@ -488,7 +474,7 @@
    int nbuttons = 0;
    /* Count joystick buttons first like SDL does */
    for (int i = BTN_JOYSTICK; i < KEY_MAX; ++i) {
-@@ -1054,11 +1378,7 @@ void evdev_start() {
+@@ -1065,11 +1380,7 @@ void evdev_start() {
    // code looks for. For this reason, we wait to grab until
    // we're ready to take input events. Ctrl+C works up until
    // this point.
@@ -501,7 +487,7 @@
  
    // Any new input devices detected after this point will be grabbed immediately
    grabbingDevices = true;
-@@ -1068,6 +1388,8 @@ void evdev_stop() {
+@@ -1079,6 +1390,8 @@ void evdev_stop() {
  
  void evdev_stop() {
    evdev_drain();
@@ -510,7 +496,7 @@
  }
  
  void evdev_init(bool mouse_emulation_enabled) {
-@@ -1112,3 +1434,392 @@ void evdev_rumble(unsigned short controller_id, unsign
+@@ -1123,3 +1436,392 @@ void evdev_rumble(unsigned short controller_id, unsign
    write(device->fd, (const void*) &event, sizeof(event));
    device->haptic_effect_id = effect.id;
  }

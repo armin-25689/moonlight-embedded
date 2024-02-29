@@ -26,7 +26,10 @@
 #include "wayland.h"
 #include "video.h"
 #include "xdg-shell-client-protocol.h"
+#include "wp-viewporter.h"
+#include "wlr-output-management.h"
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -37,27 +40,64 @@ static struct wl_surface *wlsurface;
 static struct wl_egl_window *wl_window;
 static struct wl_compositor *compositor;
 static struct wl_registry *registry;
-static struct wl_output *wl_output;
-static struct wl_seat *wl_seat;
-static struct wl_pointer *wl_pointer;
+static struct wl_output *wl_output = NULL;
+static struct wl_seat *wl_seat = NULL;
+static struct wl_pointer *wl_pointer = NULL;
 static struct xdg_wm_base *xdg_wm_base;
 static struct xdg_toplevel *xdg_toplevel;
 static struct xdg_surface *xdg_surface;
+static struct wp_viewporter *wp_viewporter = NULL;
+static struct wp_viewport *wp_viewport = NULL;
+static struct zwlr_output_manager_v1 *wlr_output_manager = NULL;
 
 static const char *quitCode = QUITCODE;
 
-static int display_width = 0;
-static int display_height = 0;
+static int display_width = 0, display_height = 0;
+static int output_width = 0, output_height = 0;
 static int window_op_fd = -1;
 static int32_t outputScaleFactor = 0;
+static uint32_t pointerSerial = 0;
+static double fractionalScale = 0;
 static bool isFullscreen = false;
+static bool isGrabing = true;
 
 static void noop() {};
 
+static void wlr_output_get_scale (void *data,
+                             struct zwlr_output_head_v1 *zwlr_output_head_v1,
+                             wl_fixed_t scale) {
+  fractionalScale = wl_fixed_to_double(scale);
+}
+
+static const struct zwlr_output_head_v1_listener wlr_output_head_listener = {
+  .name = noop,
+  .description = noop,
+  .physical_size = noop,
+  .mode = noop,
+  .enabled = noop,
+  .current_mode = noop,
+  .position = noop,
+  .transform = noop,
+  .scale = wlr_output_get_scale,
+  .finished = noop,
+};
+
+static void add_head_listener (void *data,
+                               struct zwlr_output_manager_v1 *zwlr_output_manager_v1,
+                               struct zwlr_output_head_v1 *head) {
+  zwlr_output_head_v1_add_listener(head, &wlr_output_head_listener, NULL);
+}
+
+static const struct zwlr_output_manager_v1_listener wlr_output_manager_listener = {
+  .head = add_head_listener,
+  .done = noop,
+  .finished = noop,
+};
+
 static void wl_output_get_mode (void *data, struct wl_output *wl_output, uint32_t flags,
                                 int32_t width, int32_t height, int32_t refresh) {
-  display_width = width;
-  display_height = height;
+  output_width = width;
+  output_height = height;
 }
 
 static void wl_output_get_scale (void *data, struct wl_output *wl_output, int32_t factor) {
@@ -75,7 +115,9 @@ static const struct wl_output_listener wl_output_listener = {
 
 static void pointer_enter(void *data, struct wl_pointer *wl_pointer, uint32_t serial, struct wl_surface *pointer_surface, wl_fixed_t pointer_x, wl_fixed_t pointer_y) {
   // NULL is hidden cursor
-  wl_pointer_set_cursor(wl_pointer, serial, NULL, 0, 0);
+  if (isGrabing)
+    wl_pointer_set_cursor(wl_pointer, serial, NULL, 0, 0);
+  pointerSerial = serial;
 }
 
 static void pointer_leave(void *data, struct wl_pointer *wl_pointer, uint32_t serial, struct wl_surface *wl_surface) {
@@ -130,6 +172,11 @@ static void registry_handler(void *data,struct wl_registry *registry, uint32_t i
   } else if (strcmp(interface, wl_seat_interface.name) == 0) {
     wl_seat = wl_registry_bind(registry, id, &wl_seat_interface, 5);
     wl_seat_add_listener(wl_seat, &wl_seat_listener, NULL);
+  } else if (strcmp(interface, wp_viewporter_interface.name) == 0) {
+    wp_viewporter = wl_registry_bind(registry, id, &wp_viewporter_interface, 1);
+  } else if (strcmp(interface, zwlr_output_manager_v1_interface.name) == 0) {
+    wlr_output_manager = wl_registry_bind(registry, id, &zwlr_output_manager_v1_interface, 1);
+    zwlr_output_manager_v1_add_listener(wlr_output_manager, &wlr_output_manager_listener, NULL);
   }
 }
 
@@ -150,8 +197,21 @@ static void window_close(void *data, struct xdg_toplevel *xdg_toplevel) {
   write(window_op_fd, &quitCode, sizeof(char *));
 }
 
+static void window_configure(void *data,
+                            struct xdg_toplevel *xdg_toplevel,
+                            int32_t width, int32_t height,
+                            struct wl_array *states) {
+/*
+  int *pos;
+  wl_array_for_each(pos, states) {
+  }
+*/
+  if (width != 0 && height != 0)
+    wp_viewport_set_destination(wp_viewport, width, height);
+}
+
 static const struct xdg_toplevel_listener xdg_toplevel_listener = {
-  .configure = noop,
+  .configure = window_configure,
   .close = window_close,
 };
 
@@ -173,13 +233,17 @@ int wayland_setup(int width, int height, int drFlags) {
   wl_display_roundtrip(wl_display);
  
   isFullscreen = ((drFlags & DISPLAY_FULLSCREEN) == DISPLAY_FULLSCREEN);
-  if (!isFullscreen || display_width <= 0 || display_height <= 0) {
+  if (!isFullscreen && width > 0 && height > 0) {
     display_width = width;
     display_height = height;
+  } else if (output_width > 0 && output_height > 0) {
+    display_width = output_width;
+    display_height = output_height;
+    isFullscreen = true;
   }
 
-  if (compositor == NULL || xdg_wm_base == NULL) {
-    fprintf(stderr, "Can't find compositor or shell\n");
+  if (compositor == NULL || xdg_wm_base == NULL || wp_viewporter == NULL) {
+    fprintf(stderr, "Can't find compositor or xdg_wm_base or wp_viewporter\n");
     return -1;
   }
 
@@ -188,10 +252,19 @@ int wayland_setup(int width, int height, int drFlags) {
     fprintf(stderr, "Can't create surface\n");
     return -1;
   }
-  if (outputScaleFactor > 0 ) {
-    wl_surface_commit(wlsurface);
-    wl_surface_set_buffer_scale(wlsurface, outputScaleFactor);
+
+  wp_viewport = wp_viewporter_get_viewport(wp_viewporter, wlsurface);
+  if (wp_viewport == NULL) {
+    fprintf(stderr, "Can't create wp_viewport\n");
+    return -1;
   }
+
+  if (fractionalScale > 0 ) {
+    wp_viewport_set_destination(wp_viewport, (int)(display_width / fractionalScale), (int)(display_height / fractionalScale));
+  } else if (outputScaleFactor > 0) {
+    wp_viewport_set_destination(wp_viewport, (int)(display_width / outputScaleFactor), (int)(display_height / outputScaleFactor));
+  }
+  wl_surface_commit(wlsurface);
 
   xdg_surface = xdg_wm_base_get_xdg_surface(xdg_wm_base, wlsurface);
   xdg_toplevel = xdg_surface_get_toplevel(xdg_surface);
@@ -199,12 +272,12 @@ int wayland_setup(int width, int height, int drFlags) {
     fprintf(stderr, "Can't create xdg surface or toplevel");
     return -1;
   }
+  xdg_toplevel_set_app_id(xdg_toplevel, "moonlight");
+  xdg_toplevel_set_title(xdg_toplevel, "moonlight");
 
   xdg_surface_add_listener(xdg_surface, &xdg_surface_listener, NULL);
-  xdg_surface_set_window_geometry(xdg_surface, 0, 0, display_width, display_height);
   xdg_toplevel_add_listener(xdg_toplevel, &xdg_toplevel_listener, NULL);
 
-  xdg_toplevel_set_max_size(xdg_toplevel, display_width, display_height);
   if (isFullscreen)
     xdg_toplevel_set_fullscreen(xdg_toplevel, NULL);
 
@@ -231,12 +304,20 @@ void* wl_get_display(const char *device) {
 
 void wl_close_display() {
   if (wl_display != NULL) {
-    wl_output_destroy(wl_output);
-    wl_pointer_destroy(wl_pointer);
-    wl_seat_destroy(wl_seat);
+    if (wl_output != NULL)
+      wl_output_destroy(wl_output);
+    if (wlr_output_manager != NULL)
+      zwlr_output_manager_v1_destroy(wlr_output_manager);
+    if (wl_pointer != NULL)
+      wl_pointer_destroy(wl_pointer);
+    if (wl_seat != NULL)
+      wl_seat_destroy(wl_seat);
     xdg_toplevel_destroy(xdg_toplevel);
     xdg_surface_destroy(xdg_surface);
     xdg_wm_base_destroy(xdg_wm_base);
+    wp_viewport_destroy(wp_viewport);
+    wp_viewporter_destroy(wp_viewporter);
+    wl_surface_commit(wlsurface);
     wl_surface_destroy(wlsurface);
     wl_compositor_destroy(compositor);
     wl_registry_destroy(registry);
@@ -257,6 +338,15 @@ void wl_dispatch_event() {
 void wl_get_resolution(int *width, int *height) {
   *width = display_width;
   *height = display_height;
+}
+
+void wl_change_cursor(const char *op) {
+  if (strcmp(op, "hide") == 0) {
+    isGrabing  = true;
+    wl_pointer_set_cursor(wl_pointer, pointerSerial, NULL, 0, 0);
+  } else {
+    isGrabing  = false;
+  }
 }
 
 void wl_trans_op_fd(int fd) {

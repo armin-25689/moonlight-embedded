@@ -435,6 +435,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   char* pairing_secret = NULL;
   char* client_pairing_secret = NULL;
   char* client_pairing_secret_hex = NULL;
+  PHTTP_DATA data = NULL;
 
   if (server->paired) {
     gs_error = "Already paired";
@@ -450,7 +451,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&phrase=getservercert&salt=%s&clientcert=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, salt_hex, cert_hex);
-  PHTTP_DATA data = http_create_data();
+  data = http_create_data();
   if (data == NULL)
     return GS_OUT_OF_MEMORY;
   else if ((ret = http_request(url, data)) != GS_OK)
@@ -538,7 +539,15 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   RAND_bytes(client_secret_data, sizeof(client_secret_data));
 
   const ASN1_BIT_STRING *asnSignature;
+#ifdef __FreeBSD__
+ #if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
   X509_get0_signature(&asnSignature, NULL, cert);
+ #else
+  asnSignature = cert->signature;
+ #endif
+#else
+  X509_get0_signature(&asnSignature, NULL, cert);
+#endif
 
   challenge_response = malloc(16 + asnSignature->length + sizeof(client_secret_data));
   char challenge_response_hash[32];
@@ -740,9 +749,10 @@ int gs_start_app(PSERVER_DATA server, STREAM_CONFIGURATION *config, int appId, b
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   int surround_info = SURROUNDAUDIOINFO_FROM_AUDIO_CONFIGURATION(config->audioConfiguration);
-  snprintf(url, sizeof(url), "https://%s:%u/%s?uniqueid=%s&uuid=%s&appid=%d&mode=%dx%dx%d&additionalStates=1&sops=%d&rikey=%s&rikeyid=%d&localAudioPlayMode=%d&surroundAudioInfo=%d&remoteControllersBitmap=%d&gcmap=%d%s",
+  snprintf(url, sizeof(url), "https://%s:%u/%s?uniqueid=%s&uuid=%s&appid=%d&mode=%dx%dx%d&additionalStates=1&sops=%d&rikey=%s&rikeyid=%d&localAudioPlayMode=%d&surroundAudioInfo=%d&remoteControllersBitmap=%d&gcmap=%d%s%s",
            server->serverInfo.address, server->httpsPort, server->currentGame ? "resume" : "launch", unique_id, uuid_str, appId, config->width, config->height, fps, sops, rikey_hex, rikeyid, localaudio, surround_info, gamepad_mask, gamepad_mask,
-           (config->supportedVideoFormats & VIDEO_FORMAT_MASK_10BIT) ? "&hdrMode=1&clientHdrCapVersion=0&clientHdrCapSupportedFlagsInUint32=0&clientHdrCapMetaDataId=NV_STATIC_METADATA_TYPE_1&clientHdrCapDisplayData=0x0x0x0x0x0x0x0x0x0x0" : "");
+           (config->supportedVideoFormats & VIDEO_FORMAT_MASK_10BIT) ? "&hdrMode=1&clientHdrCapVersion=0&clientHdrCapSupportedFlagsInUint32=0&clientHdrCapMetaDataId=NV_STATIC_METADATA_TYPE_1&clientHdrCapDisplayData=0x0x0x0x0x0x0x0x0x0x0" : "",
+           LiGetLaunchUrlQueryParameters());
   if ((ret = http_request(url, data)) == GS_OK)
     server->currentGame = appId;
   else

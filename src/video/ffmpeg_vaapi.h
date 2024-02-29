@@ -22,6 +22,8 @@
 #include <X11/Xlib.h>
 #include <stdbool.h>
 
+extern bool isYUV444;
+
 int vaapi_init_lib(const char *device);
 int vaapi_init(AVCodecContext* decoder_ctx);
 void vaapi_queue(AVFrame* dec_frame, Window win, int width, int height);

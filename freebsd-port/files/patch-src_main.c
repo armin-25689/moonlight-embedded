@@ -1,4 +1,4 @@
---- src/main.c.orig	2023-11-03 06:08:34 UTC
+--- src/main.c.orig	2024-02-20 04:01:31 UTC
 +++ src/main.c
 @@ -42,6 +42,7 @@
  #include <client.h>
@@ -18,7 +18,17 @@
  
  static void applist(PSERVER_DATA server) {
    PAPP_LIST list = NULL;
-@@ -166,6 +168,7 @@ static void stream(PSERVER_DATA server, PCONFIGURATION
+@@ -134,6 +136,9 @@ static void stream(PSERVER_DATA server, PCONFIGURATION
+     printf("Ignoring invalid rotation value: %d\n", config->rotate);
+   }
+ 
++  if (config->yuv444)
++    drFlags |= YUV444;
++
+   if (config->debug_level > 0) {
+     printf("Stream %d x %d, %d fps, %d kbps\n", config->stream.width, config->stream.height, config->stream.fps, config->stream.bitrate);
+     connection_debug = true;
+@@ -166,6 +171,7 @@ static void stream(PSERVER_DATA server, PCONFIGURATION
    }
  
    platform_stop(system);
@@ -26,7 +36,7 @@
  }
  
  static void help() {
-@@ -202,7 +205,6 @@ static void help() {
+@@ -202,7 +208,6 @@ static void help() {
    printf("\t-bitrate <bitrate>\tSpecify the bitrate in Kbps\n");
    printf("\t-packetsize <size>\tSpecify the maximum packetsize in bytes\n");
    printf("\t-codec <codec>\t\tSelect used codec: auto/h264/h265/av1 (default auto)\n");
@@ -34,7 +44,7 @@
    printf("\t-remote <yes/no/auto>\t\t\tEnable optimizations for WAN streaming (default auto)\n");
    printf("\t-app <app>\t\tName of app to stream\n");
    printf("\t-nosops\t\t\tDon't allow GFE to modify game settings\n");
-@@ -238,7 +240,10 @@ int main(int argc, char* argv[]) {
+@@ -238,7 +243,10 @@ int main(int argc, char* argv[]) {
  int main(int argc, char* argv[]) {
    CONFIGURATION config;
    config_parse(argc, argv, &config);
@@ -46,7 +56,7 @@
    if (config.action == NULL || strcmp("help", config.action) == 0)
      help();
  
-@@ -251,6 +256,7 @@ int main(int argc, char* argv[]) {
+@@ -251,6 +259,7 @@ int main(int argc, char* argv[]) {
        exit(-1);
      }
  
@@ -54,7 +64,7 @@
      evdev_create(config.inputs[0], NULL, config.debug_level > 0, config.rotate);
      evdev_map(config.inputs[0]);
      exit(0);
-@@ -322,19 +328,19 @@ int main(int argc, char* argv[]) {
+@@ -322,19 +331,19 @@ int main(int argc, char* argv[]) {
      config.stream.supportedVideoFormats = VIDEO_FORMAT_H264;
      if (config.codec == CODEC_HEVC || (config.codec == CODEC_UNSPECIFIED && platform_prefers_codec(system, CODEC_HEVC))) {
        config.stream.supportedVideoFormats |= VIDEO_FORMAT_H265;
@@ -82,7 +92,7 @@
  
      #ifdef HAVE_SDL
      if (system == SDL)
-@@ -362,16 +368,38 @@ int main(int argc, char* argv[]) {
+@@ -362,16 +371,38 @@ int main(int argc, char* argv[]) {
            mappings = map;
          }
  
@@ -121,7 +131,7 @@
          #ifdef HAVE_LIBCEC
          cec_init();
          #endif /* HAVE_LIBCEC */
-@@ -398,7 +426,8 @@ int main(int argc, char* argv[]) {
+@@ -398,7 +429,8 @@ int main(int argc, char* argv[]) {
      if (config.pin > 0 && config.pin <= 9999) {
        sprintf(pin, "%04d", config.pin);
      } else {
@@ -131,7 +141,7 @@
      }
      printf("Please enter the following PIN on the target PC: %s\n", pin);
      fflush(stdout);
-@@ -406,6 +435,7 @@ int main(int argc, char* argv[]) {
+@@ -406,6 +438,7 @@ int main(int argc, char* argv[]) {
        fprintf(stderr, "Failed to pair to server: %s\n", gs_error);
      } else {
        printf("Succesfully paired\n");

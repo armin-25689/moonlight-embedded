@@ -136,6 +136,9 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
     printf("Ignoring invalid rotation value: %d\n", config->rotate);
   }
 
+  if (config->yuv444)
+    drFlags |= YUV444;
+
   if (config->debug_level > 0) {
     printf("Stream %d x %d, %d fps, %d kbps\n", config->stream.width, config->stream.height, config->stream.fps, config->stream.bitrate);
     connection_debug = true;
@@ -198,7 +201,7 @@ static void help() {
   printf("\t-4k\t\t\tUse 3840x2160 resolution\n");
   printf("\t-width <width>\t\tHorizontal resolution (default 1280)\n");
   printf("\t-height <height>\tVertical resolution (default 720)\n");
-  #if defined(HAVE_PI) | defined(HAVE_MMAL)
+  #ifdef HAVE_EMBEDDED
   printf("\t-rotate <angle>\tRotate display: 0/90/180/270 (default 0)\n");
   #endif
   printf("\t-fps <fps>\t\tSpecify the fps to use (default 60)\n");

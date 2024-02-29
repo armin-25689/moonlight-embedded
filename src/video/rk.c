@@ -28,7 +28,6 @@
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/ioctl.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -159,33 +158,34 @@ void *display_thread(void *param) {
   while (!frm_eos) {
     int _fb_id;
 
-    ret = pthread_mutex_lock(&mutex);
-    assert(!ret);
+    pthread_mutex_lock(&mutex);
     while (fb_id == 0) {
       pthread_cond_wait(&cond, &mutex);
-      assert(!ret);
       if (fb_id == 0 && frm_eos) {
-        ret = pthread_mutex_unlock(&mutex);
-        assert(!ret);
+        pthread_mutex_unlock(&mutex);
         return NULL;
       }
     }
     _fb_id = fb_id;
 
     fb_id = 0;
-    ret = pthread_mutex_unlock(&mutex);
-    assert(!ret);
+    pthread_mutex_unlock(&mutex);
 
     if (atomic) {
       // We may need to modeset to apply colorspace changes when toggling HDR
       set_property(plane_id, DRM_MODE_OBJECT_PLANE, plane_props, "FB_ID", _fb_id);
       ret = drmModeAtomicCommit(fd, drm_request, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+      if (ret) {
+        perror("drmModeAtomicCommit");
+      }
     } else {
       ret = drmModeSetPlane(fd, plane_id, crtc_id, _fb_id, 0,
                             fb_x, fb_y, fb_width, fb_height,
                             0, 0, frm_width << 16, frm_height << 16);
+      if (ret) {
+        perror("drmModeSetPlane");
+      }
     }
-    assert(!ret);
   }
 
   return NULL;
@@ -248,10 +248,11 @@ void *frame_thread(void *param) {
           dmcd.bpp = 8; // hor_stride is already adjusted for 10 vs 8 bit
           dmcd.width = hor_stride;
           dmcd.height = ver_stride * 2; // documentation say not v*2/3 but v*2 (additional info included)
-          do {
-            ret = ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &dmcd);
-          } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
-          assert(!ret);
+          ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &dmcd);
+          if (ret) {
+            perror("drmIoctl(DRM_IOCTL_MODE_CREATE_DUMB)");
+            exit(EXIT_FAILURE);
+          }
           assert(dmcd.pitch == dmcd.width);
           assert(dmcd.size == dmcd.pitch * dmcd.height);
           frame_to_drm[i].handle = dmcd.handle;
@@ -260,10 +261,11 @@ void *frame_thread(void *param) {
           struct drm_prime_handle dph = {0};
           dph.handle = dmcd.handle;
           dph.fd = -1;
-          do {
-            ret = ioctl(fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &dph);
-          } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
-          assert(!ret);
+          ret = drmIoctl(fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &dph);
+          if (ret) {
+            perror("drmIoctl(DRM_IOCTL_PRIME_HANDLE_TO_FD)");
+            exit(EXIT_FAILURE);
+          }
           MppBufferInfo info = {0};
           info.type = MPP_BUFFER_TYPE_DRM;
           info.size = dmcd.width * dmcd.height;
@@ -281,7 +283,10 @@ void *frame_thread(void *param) {
           offsets[1] = pitches[0] * ver_stride;
           pitches[1] = dmcd.pitch;
           ret = drmModeAddFB2(fd, frm_width, frm_height, pixel_format, handles, pitches, offsets, &frame_to_drm[i].fb_id, 0);
-          assert(!ret);
+          if (ret) {
+            perror("drmModeAddFB2");
+            exit(EXIT_FAILURE);
+          }
         }
         // register external frame group
         ret = mpi_api->control(mpi_ctx, MPP_DEC_SET_EXT_BUF_GROUP, mpi_frm_grp);
@@ -318,14 +323,10 @@ void *frame_thread(void *param) {
           }
           assert(i != MAX_FRAMES);
           // send DRM FB to display thread
-          ret = pthread_mutex_lock(&mutex);
-          assert(!ret);
+          pthread_mutex_lock(&mutex);
           fb_id = frame_to_drm[i].fb_id;
-          ret = pthread_cond_signal(&cond);
-          assert(!ret);
-          ret = pthread_mutex_unlock(&mutex);
-          assert(!ret);
-
+          pthread_cond_signal(&cond);
+          pthread_mutex_unlock(&mutex);
         } else {
           fprintf(stderr, "Frame no buff\n");
         }
@@ -382,7 +383,10 @@ int rk_setup(int videoFormat, int width, int height, int redrawRate, void* conte
   }
 
   resources = drmModeGetResources(fd);
-  assert(resources);
+  if (!resources) {
+    perror("drmModeGetResources");
+    return -1;
+  }
 
   // find active monitor
   for (i = 0; i < resources->count_connectors; ++i) {
@@ -430,7 +434,10 @@ int rk_setup(int videoFormat, int width, int height, int redrawRate, void* conte
   for (i = 0; i < resources->count_crtcs; ++i) {
     if (resources->crtcs[i] == encoder->crtc_id) {
       crtc = drmModeGetCrtc(fd, resources->crtcs[i]);
-      assert(crtc);
+      if (!crtc) {
+        perror("drmModeGetCrtc");
+        continue;
+      }
       break;
     }
   }
@@ -441,15 +448,25 @@ int rk_setup(int videoFormat, int width, int height, int redrawRate, void* conte
   uint32_t crtc_bit = (1 << i);
 
   ret = drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
-  assert(!ret);
+  if (ret) {
+    perror("drmSetClientCap(DRM_CLIENT_CAP_UNIVERSAL_PLANES)");
+  }
   if (atomic) {
     ret = drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1);
-    assert(!ret);
-    drm_request = drmModeAtomicAlloc();
-    assert(drm_request);
+    if (ret) {
+      perror("drmSetClientCap(DRM_CLIENT_CAP_ATOMIC)");
+      atomic = false;
+    }
+    else {
+      drm_request = drmModeAtomicAlloc();
+      assert(drm_request);
+    }
   }
   plane_resources = drmModeGetPlaneResources(fd);
-  assert(plane_resources);
+  if (!plane_resources) {
+    perror("drmModeGetPlaneResources");
+    return -1;
+  }
 
   // search for OVERLAY (for active connector, unused, NV12 support)
   for (i = 0; i < plane_resources->count_planes; i++) {
@@ -487,6 +504,7 @@ int rk_setup(int videoFormat, int width, int height, int redrawRate, void* conte
         }
         plane_props[j] = prop;
         if (!strcmp(prop->name, "type") && (props->prop_values[j] == DRM_PLANE_TYPE_OVERLAY ||
+                                            props->prop_values[j] == DRM_PLANE_TYPE_CURSOR ||
                                             props->prop_values[j] == DRM_PLANE_TYPE_PRIMARY)) {
           plane_id = ovr->plane_id;
         }
@@ -504,7 +522,29 @@ int rk_setup(int videoFormat, int width, int height, int redrawRate, void* conte
     }
     drmModeFreePlane(ovr);
   }
-  assert(plane_id);
+
+  if (!plane_id) {
+    fprintf(stderr, "Unable to find suitable plane\n");
+    return -1;
+  }
+
+  // DRM defines rotation in degrees counter-clockwise while we define
+  // rotation in degrees clockwise, so we swap the 90 and 270 cases
+  int displayRotation = drFlags & DISPLAY_ROTATE_MASK;
+  switch (displayRotation) {
+  case DISPLAY_ROTATE_90:
+    set_property(plane_id, DRM_MODE_OBJECT_PLANE, plane_props, "rotation", DRM_MODE_ROTATE_270);
+    break;
+  case DISPLAY_ROTATE_180:
+    set_property(plane_id, DRM_MODE_OBJECT_PLANE, plane_props, "rotation", DRM_MODE_ROTATE_180);
+    break;
+  case DISPLAY_ROTATE_270:
+    set_property(plane_id, DRM_MODE_OBJECT_PLANE, plane_props, "rotation", DRM_MODE_ROTATE_90);
+    break;
+  default:
+    set_property(plane_id, DRM_MODE_OBJECT_PLANE, plane_props, "rotation", DRM_MODE_ROTATE_0);
+    break;
+  }
 
   // hide cursor by move in left lower corner
   drmModeMoveCursor(fd, crtc_id, 0, crtc_height);
@@ -537,15 +577,11 @@ int rk_setup(int videoFormat, int width, int height, int redrawRate, void* conte
   ret = mpi_api->control(mpi_ctx, MPP_SET_OUTPUT_BLOCK, &param);
   assert(!ret);
 
-  ret = pthread_mutex_init(&mutex, NULL);
-  assert(!ret);
-  ret = pthread_cond_init(&cond, NULL);
-  assert(!ret);
+  pthread_mutex_init(&mutex, NULL);
+  pthread_cond_init(&cond, NULL);
 
-  ret = pthread_create(&tid_frame, NULL, frame_thread, NULL);
-  assert(!ret);
-  ret = pthread_create(&tid_display, NULL, display_thread, NULL);
-  assert(!ret);
+  pthread_create(&tid_frame, NULL, frame_thread, NULL);
+  pthread_create(&tid_display, NULL, display_thread, NULL);
 
   return 0;
 }
@@ -556,26 +592,19 @@ void rk_cleanup() {
   int ret;
 
   frm_eos = 1;
-  ret = pthread_mutex_lock(&mutex);
-  assert(!ret);
-  ret = pthread_cond_signal(&cond);
-  assert(!ret);
-  ret = pthread_mutex_unlock(&mutex);
-  assert(!ret);
+  pthread_mutex_lock(&mutex);
+  pthread_cond_signal(&cond);
+  pthread_mutex_unlock(&mutex);
 
-  ret = pthread_join(tid_display, NULL);
-  assert(!ret);
+  pthread_join(tid_display, NULL);
 
-  ret = pthread_cond_destroy(&cond);
-  assert(!ret);
-  ret = pthread_mutex_destroy(&mutex);
-  assert(!ret);
+  pthread_cond_destroy(&cond);
+  pthread_mutex_destroy(&mutex);
 
   ret = mpi_api->reset(mpi_ctx);
   assert(!ret);
 
-  ret = pthread_join(tid_frame, NULL);
-  assert(!ret);
+  pthread_join(tid_frame, NULL);
 
   if (mpi_frm_grp) {
     ret = mpp_buffer_group_put(mpi_frm_grp);
@@ -583,13 +612,15 @@ void rk_cleanup() {
     mpi_frm_grp = NULL;
     for (i = 0; i < MAX_FRAMES; i++) {
       ret = drmModeRmFB(fd, frame_to_drm[i].fb_id);
-      assert(!ret);
+      if (ret) {
+        perror("drmModeRmFB");
+      }
       struct drm_mode_destroy_dumb dmdd = {0};
       dmdd.handle = frame_to_drm[i].handle;
-      do {
-        ret = ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmdd);
-      } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
-      assert(!ret);
+      ret = drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmdd);
+      if (ret) {
+        perror("drmIoctl(DRM_IOCTL_MODE_DESTROY_DUMB)");
+      }
     }
   }
 

@@ -1,5 +1,5 @@
 PORTNAME=	moonlight-embedded
-DISTVERSION=	2.6.2
+DISTVERSION=	2.7.0
 CATEGORIES=	games
 MASTER_SITES=	https://github.com/moonlight-stream/moonlight-embedded/releases/download/v${DISTVERSION}/
 
@@ -47,7 +47,6 @@ post-patch:
 	@${REINPLACE_CMD} -e 's@/usr/local@${PREFIX}@' \
 		${WRKSRC}/docs/README.pod
 	@${REINPLACE_CMD} -e 's@/usr/local@${PREFIX}@' \
-		-e 's@/etc@${PREFIX}/etc@' \
 		${WRKSRC}/src/config.c
 
 post-install:

@@ -1,6 +1,6 @@
---- src/video/ffmpeg_vaapi.h.orig	2023-11-03 06:08:34 UTC
+--- src/video/ffmpeg_vaapi.h.orig	2024-02-20 04:01:31 UTC
 +++ src/video/ffmpeg_vaapi.h
-@@ -17,9 +17,20 @@
+@@ -17,9 +17,22 @@
   * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
   */
  
@@ -10,6 +10,8 @@
 +#include <stdbool.h>
  
 -int vaapi_init_lib();
++extern bool isYUV444;
++
 +int vaapi_init_lib(const char *device);
  int vaapi_init(AVCodecContext* decoder_ctx);
  void vaapi_queue(AVFrame* dec_frame, Window win, int width, int height);

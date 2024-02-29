@@ -20,6 +20,7 @@
 #include "platform.h"
 #include "config.h"
 #include "util.h"
+#include "cpu.h"
 
 #include "input/evdev.h"
 #include "audio/audio.h"
@@ -51,6 +52,7 @@ static struct option long_options[] = {
   {"4k", no_argument, NULL, '0'},
   {"width", required_argument, NULL, 'c'},
   {"height", required_argument, NULL, 'd'},
+  {"yuv444", no_argument, NULL, 'f'},
   {"bitrate", required_argument, NULL, 'g'},
   {"packetsize", required_argument, NULL, 'h'},
   {"app", required_argument, NULL, 'i'},
@@ -151,6 +153,9 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
     break;
   case 'd':
     config->stream.height = atoi(value);
+    break;
+  case 'f':
+    config->yuv444 = true;
     break;
   case 'g':
     config->stream.bitrate = atoi(value);
@@ -365,20 +370,19 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->stream.streamingRemotely = STREAM_CFG_AUTO;
   config->stream.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
   config->stream.supportedVideoFormats = SCM_H264;
-  config->stream.encryptionFlags = ENCFLG_AUDIO;
 
-#ifdef __arm__
-  char cpuinfo[4096] = {};
-  if (read_file("/proc/cpuinfo", cpuinfo, sizeof(cpuinfo) - 1) > 0) {
-    // If this is a ARMv6 CPU (like the Pi 1), we'll assume it's not
-    // powerful enough to handle audio encryption. The Pi 1 could
-    // barely handle Opus decoding alone.
-    if (strstr(cpuinfo, "ARMv6")) {
-      config->stream.encryptionFlags = ENCFLG_NONE;
-      printf("Disabling audio encryption on low performance CPU\n");
-    }
+  // Opt in for video encryption if the CPU has good AES performance
+  if (has_fast_aes()) {
+    config->stream.encryptionFlags = ENCFLG_ALL;
   }
-#endif
+  else if (has_slow_aes()) {
+    // For extremely slow CPUs, opt out of audio encryption
+    config->stream.encryptionFlags = ENCFLG_NONE;
+    printf("Disabling encryption on low performance CPU\n");
+  }
+  else {
+    config->stream.encryptionFlags = ENCFLG_AUDIO;
+  }
 
   config->debug_level = 0;
   config->platform = "auto";
@@ -455,6 +459,8 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
     } else /* if (config->stream.width * config->stream.height <= 3840 * 2160) */ {
       config->stream.bitrate = (int)(40000 * (config->stream.fps / 30.0));
     }
+    if (config->yuv444)
+      config->stream.bitrate = config->stream.bitrate * 2;
   }
 }
 

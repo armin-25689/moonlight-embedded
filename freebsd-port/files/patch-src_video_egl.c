@@ -1,6 +1,6 @@
---- src/video/egl.c.orig	2023-11-03 06:08:34 UTC
+--- src/video/egl.c.orig	2024-02-20 04:01:31 UTC
 +++ src/video/egl.c
-@@ -18,17 +18,51 @@
+@@ -18,19 +18,55 @@
   */
  
  #include "egl.h"
@@ -34,14 +34,16 @@
 +#define EGL_PLATFORM_GBM_KHR 0x31D7
 +#endif
 +#define SOFTWARE 0
-+#define NV12_PARAM_YUVMAT 0
-+#define NV12_PARAM_OFFSET 1
++#define FRAG_PARAM_YUVMAT 0
++#define FRAG_PARAM_OFFSET 1
 +#define NV12_PARAM_PLANE1 2
 +#define NV12_PARAM_PLANE2 3
++#define THREE_PLANEPARAM_YMAP 2
++#define THREE_PLANEPARAM_UMAP 3
++#define THREE_PLANEPARAM_VMAP 4
 +
 +bool isUseGlExt = false;
 +static bool isWayland = false;
-+static bool isYUV444 = false;
 +
 +static struct EXTSTATE {
 +  bool eglIsSupportExtDmaBuf;
@@ -52,18 +54,26 @@
 +} ExtState;
 +
  static const EGLint context_attributes[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
- static const char* texture_mappings[] = { "ymap", "umap", "vmap" };
+-static const char* texture_mappings[] = { "ymap", "umap", "vmap" };
++//static const char* texture_mappings[] = { "ymap", "umap", "vmap" };
  static const char* vertex_source = "\
-@@ -41,23 +75,43 @@ void main() {\
+ attribute vec2 position;\
+ varying mediump vec2 tex_position;\
+@@ -41,23 +77,48 @@ void main() {\
  }\
  ";
  
 -static const char* fragment_source = "\
-+static const char* fragment_source_420p = "\
++static const char* fragment_source_3plane = "\
++precision mediump float;\
++\
++uniform mat3 yuvmat;\
++uniform vec3 offset;\
  uniform lowp sampler2D ymap;\
  uniform lowp sampler2D umap;\
  uniform lowp sampler2D vmap;\
- varying mediump vec2 tex_position;\
+-varying mediump vec2 tex_position;\
++varying vec2 tex_position;\
  \
  void main() {\
 -  mediump float y = texture2D(ymap, tex_position).r;\
@@ -72,13 +82,15 @@
 -  lowp float r = y + 1.28033 * v;\
 -  lowp float g = y - .21482 * u - .38059 * v;\
 -  lowp float b = y + 2.12798 * u;\
-+  mediump float y = texture2D(ymap, tex_position).r - .0627;\
-+  mediump float u = texture2D(umap, tex_position).r - .5;\
-+  mediump float v = texture2D(vmap, tex_position).r - .5;\
-+  lowp float r = clamp(y * 1.1644 + 1.5960 * v, 0.0, 1.0);\
-+  lowp float g = clamp(y * 1.1644 - .3917 * u - .8129 * v, 0.0, 1.0);\
-+  lowp float b = clamp(y * 1.1644 + 2.0172 * u, 0.0 ,1.0);\
-   gl_FragColor = vec4(r, g, b, 1.0);\
+-  gl_FragColor = vec4(r, g, b, 1.0);\
++  vec3 YCbCr = vec3(\
++    texture2D(ymap, tex_position).r,\
++    texture2D(umap, tex_position).r,\
++    texture2D(vmap, tex_position).r\
++  );\
++\
++  YCbCr -= offset;\
++  gl_FragColor = vec4(clamp(yuvmat * YCbCr, 0.0, 1.0), 1.0f);\
  }\
  ";
  
@@ -105,7 +117,7 @@
  static const float vertices[] = {
    -1.f,  1.f,
    -1.f, -1.f,
-@@ -70,6 +124,39 @@ static const GLuint elements[] = {
+@@ -70,6 +131,39 @@ static const GLuint elements[] = {
    2, 3, 0
  };
  
@@ -145,13 +157,12 @@
  static EGLDisplay display;
  static EGLSurface surface;
  static EGLContext context;
-@@ -77,16 +164,137 @@ static bool current;
+@@ -77,16 +171,136 @@ static bool current;
  static int width, height;
  static bool current;
  
 -static GLuint texture_id[3], texture_uniform[3];
-+static GLint vaapi_texture_uniform[4];
-+static GLuint texture_id[4], texture_uniform[3];
++static GLuint texture_id[4], texture_uniform[5];
  static GLuint shader_program;
  
 -void egl_init(EGLNativeDisplayType native_display, NativeWindowType native_window, int display_width, int display_height) {
@@ -260,11 +271,11 @@
    height = display_height;
 +  int ffmpeg_decoder = 0;
  
-+  isYUV444 = (dcFlag & YUV444) == YUV444 ? true : false;
-+  ffmpeg_decoder = isYUV444 ? (dcFlag - YUV444) : dcFlag;
 +#ifdef HAVE_WAYLAND
 +  isWayland = (dcFlag & WAYLAND) == WAYLAND ? true : false;
-+  ffmpeg_decoder = isWayland ? (ffmpeg_decoder - WAYLAND) : ffmpeg_decoder;
++  ffmpeg_decoder = isWayland ? (dcFlag - WAYLAND) : dcFlag;
++#else
++  ffmpeg_decoder = dcFlag;
 +#endif
 +
    // get an EGL display connection
@@ -286,7 +297,7 @@
      fprintf( stderr, "EGL: error get display\n" );
      exit(EXIT_FAILURE);
    }
-@@ -125,27 +333,41 @@ void egl_init(EGLNativeDisplayType native_display, Nat
+@@ -125,27 +339,41 @@ void egl_init(EGLNativeDisplayType native_display, Nat
    }
  
    // finally we can create a new surface using this config and window
@@ -305,7 +316,7 @@
  
 -  glEnable(GL_TEXTURE_2D);
 +  // try to point if can use extensions for egl
-+  if (isUseExt(&ExtState) && ffmpeg_decoder != SOFTWARE) {
++  if (ffmpeg_decoder != SOFTWARE && isUseExt(&ExtState)) {
 +    isUseGlExt = true;
 +  }
  
@@ -330,10 +341,10 @@
 +
    glShaderSource(vertex_shader, 1, &vertex_source, NULL);
 -  glCompileShader(vertex_shader);
-+  if (ffmpeg_decoder != SOFTWARE)
-+    glShaderSource(fragment_shader, 1, &fragment_source_nv12, NULL);
++  if (ffmpeg_decoder == SOFTWARE || isYUV444)
++    glShaderSource(fragment_shader, 1, &fragment_source_3plane, NULL);
 +  else
-+    glShaderSource(fragment_shader, 1, &fragment_source_420p, NULL);
++    glShaderSource(fragment_shader, 1, &fragment_source_nv12, NULL);
  
 -  GLuint fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
 -  glShaderSource(fragment_shader, 1, &fragment_source, NULL);
@@ -341,7 +352,7 @@
    glCompileShader(fragment_shader);
  
    shader_program = glCreateProgram();
-@@ -153,17 +375,42 @@ void egl_init(EGLNativeDisplayType native_display, Nat
+@@ -153,24 +381,55 @@ void egl_init(EGLNativeDisplayType native_display, Nat
    glAttachShader(shader_program, fragment_shader);
  
    glLinkProgram(shader_program);
@@ -367,13 +378,19 @@
 -    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, i > 0 ? width / 2 : width, i > 0 ? height / 2 : height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, 0);
 +  int egl_max_planes;
 +  if (ffmpeg_decoder != SOFTWARE) {
-+    vaapi_texture_uniform[NV12_PARAM_YUVMAT] = glGetUniformLocation(shader_program, "yuvmat");
-+    vaapi_texture_uniform[NV12_PARAM_OFFSET] = glGetUniformLocation(shader_program, "offset");
-+    vaapi_texture_uniform[NV12_PARAM_PLANE1] = glGetUniformLocation(shader_program, "plane1");
-+    vaapi_texture_uniform[NV12_PARAM_PLANE2] = glGetUniformLocation(shader_program, "plane2");
 +    egl_max_planes = 4;
 +  } else {
 +    egl_max_planes = 3;
++  }
++  texture_uniform[FRAG_PARAM_YUVMAT] = glGetUniformLocation(shader_program, "yuvmat");
++  texture_uniform[FRAG_PARAM_OFFSET] = glGetUniformLocation(shader_program, "offset");
++  if (isYUV444 || ffmpeg_decoder == SOFTWARE) {
++    texture_uniform[THREE_PLANEPARAM_YMAP] = glGetUniformLocation(shader_program, "ymap");
++    texture_uniform[THREE_PLANEPARAM_UMAP] = glGetUniformLocation(shader_program, "umap");
++    texture_uniform[THREE_PLANEPARAM_VMAP] = glGetUniformLocation(shader_program, "vmap");
++  } else {
++    texture_uniform[NV12_PARAM_PLANE1] = glGetUniformLocation(shader_program, "plane1");
++    texture_uniform[NV12_PARAM_PLANE2] = glGetUniformLocation(shader_program, "plane2");
 +  }
  
 -    texture_uniform[i] = glGetUniformLocation(shader_program, texture_mappings[i]);
@@ -386,19 +403,32 @@
 +      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 +      if (ffmpeg_decoder == SOFTWARE) {
 +        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, i > 0 ? width / 2 : width, i > 0 ? height / 2 : height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, 0);
-+        texture_uniform[i] = glGetUniformLocation(shader_program, texture_mappings[i]);
 +      }
    }
  
    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-@@ -182,12 +429,52 @@ void egl_draw(uint8_t* image[3]) {
+ }
+ 
+-void egl_draw(uint8_t* image[3]) {
++void egl_draw(AVFrame* frame, uint8_t* image[3]) {
+   if (!current) {
++    chooseColorConfig(frame);
+     eglMakeCurrent(display, surface, surface, context);
+     current = true;
+   }
+@@ -182,12 +441,61 @@ void egl_draw(uint8_t* image[3]) {
      glActiveTexture(GL_TEXTURE0 + i);
      glBindTexture(GL_TEXTURE_2D, texture_id[i]);
      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, i > 0 ? width / 2 : width, i > 0 ? height / 2 : height, GL_LUMINANCE, GL_UNSIGNED_BYTE, image[i]);
-+
-     glUniform1i(texture_uniform[i], i);
+-    glUniform1i(texture_uniform[i], i);
    }
  
++  glUniformMatrix3fv(texture_uniform[FRAG_PARAM_YUVMAT], 1, GL_FALSE, colorspace);
++  glUniform3fv(texture_uniform[FRAG_PARAM_OFFSET], 1, colorOffsets);
++  glUniform1i(texture_uniform[THREE_PLANEPARAM_YMAP], 0);
++  glUniform1i(texture_uniform[THREE_PLANEPARAM_UMAP], 1);
++  glUniform1i(texture_uniform[THREE_PLANEPARAM_VMAP], 2);
++
    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
  
    eglSwapBuffers(display, surface);
@@ -430,11 +460,16 @@
 +
 +
 +  // Bind parameters for the shaders
-+  // for nv12 or p101
-+  glUniformMatrix3fv(vaapi_texture_uniform[NV12_PARAM_YUVMAT], 1, GL_FALSE, colorspace);
-+  glUniform3fv(vaapi_texture_uniform[NV12_PARAM_OFFSET], 1, colorOffsets);
-+  glUniform1i(vaapi_texture_uniform[NV12_PARAM_PLANE1], 0);
-+  glUniform1i(vaapi_texture_uniform[NV12_PARAM_PLANE2], 1);
++  glUniformMatrix3fv(texture_uniform[FRAG_PARAM_YUVMAT], 1, GL_FALSE, colorspace);
++  glUniform3fv(texture_uniform[FRAG_PARAM_OFFSET], 1, colorOffsets);
++  if (!isYUV444) {
++    glUniform1i(texture_uniform[NV12_PARAM_PLANE1], 0);
++    glUniform1i(texture_uniform[NV12_PARAM_PLANE2], 1);
++  } else {
++    glUniform1i(texture_uniform[THREE_PLANEPARAM_YMAP], 0);
++    glUniform1i(texture_uniform[THREE_PLANEPARAM_UMAP], 1);
++    glUniform1i(texture_uniform[THREE_PLANEPARAM_VMAP], 2);
++  }
 +
 +  glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 +

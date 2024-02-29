@@ -80,11 +80,33 @@ typedef struct VAAPIDevicePriv {
 
 #define MAX_SURFACES 16
 
+bool isYUV444 = false;
+
 static Display *x11_display = NULL;
 static int drm_fd = -1;
 
 static AVBufferRef* device_ref;
 static VADRMPRIMESurfaceDescriptor primeDescriptor;
+
+static bool is_support_yuv444() {
+  int format_num = 0;
+  AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
+  AVVAAPIDeviceContext *va_ctx = device->hwctx;
+  int num = vaMaxNumImageFormats(va_ctx->display);
+  VAImageFormat formats[num];
+
+  VAStatus status = vaQueryImageFormats(va_ctx->display, formats, &format_num);
+  if (status == VA_STATUS_SUCCESS) {
+    for (int i = 0;i < format_num; i++) {
+      if (formats[i].fourcc == VA_FOURCC_444P) {
+        return true;
+        break;
+      }
+    }
+  }
+
+  return false;
+}
 
 static enum AVPixelFormat va_get_format(AVCodecContext* context, const enum AVPixelFormat* pixel_format) {
   AVBufferRef* hw_ctx = av_hwframe_ctx_alloc(device_ref);
@@ -95,7 +117,13 @@ static enum AVPixelFormat va_get_format(AVCodecContext* context, const enum AVPi
 
   AVHWFramesContext* fr_ctx = (AVHWFramesContext*) hw_ctx->data;
   fr_ctx->format = AV_PIX_FMT_VAAPI;
-  fr_ctx->sw_format = AV_PIX_FMT_NV12;
+  if (isYUV444 && !is_support_yuv444())
+    isYUV444 = false;
+  if (isYUV444) {
+    printf("Using YUV444 format to decode!It's need host support!\n");
+    fr_ctx->sw_format = AV_PIX_FMT_YUV444P;
+  } else
+    fr_ctx->sw_format = AV_PIX_FMT_NV12;
   fr_ctx->width = context->coded_width;
   fr_ctx->height = context->coded_height;
   fr_ctx->initial_pool_size = MAX_SURFACES + 1;
@@ -192,11 +220,19 @@ bool canExportSurfaceHandle(bool isTenBit) {
   attrs[attributeCount].type = VASurfaceAttribPixelFormat;
   attrs[attributeCount].flags = VA_SURFACE_ATTRIB_SETTABLE;
   attrs[attributeCount].value.type = VAGenericValueTypeInteger;
-  attrs[attributeCount].value.value.i = isTenBit ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+  if (isYUV444)
+    attrs[attributeCount].value.value.i = isTenBit ? VA_FOURCC_Y410 : VA_FOURCC_444P;
+  else
+    attrs[attributeCount].value.value.i = isTenBit ? VA_FOURCC_P010 : VA_FOURCC_NV12;
   attributeCount++;
 
+  unsigned int rtformat = 0;
+  if (isYUV444)
+    rtformat = isTenBit ? VA_RT_FORMAT_YUV444_10 : VA_RT_FORMAT_YUV444;
+  else
+    rtformat = isTenBit ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420;
   st = vaCreateSurfaces(va_ctx->display,
-              isTenBit ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420,
+              rtformat,
               1280,
               720,
               &surfaceId,
@@ -263,8 +299,8 @@ ssize_t exportEGLImages(AVFrame *frame, EGLDisplay dpy, bool eglIsSupportExtDmaB
     // Max 30 attributes (1 key + 1 value for each)
     EGLAttrib attribs[EGL_ATTRIB_COUNT] = {
       EGL_LINUX_DRM_FOURCC_EXT, primeDescriptor.layers[i].drm_format,
-      EGL_WIDTH, i == 0 ? frame->width : frame->width / 2,
-      EGL_HEIGHT, i == 0 ? frame->height : frame->height / 2,
+      EGL_WIDTH, i == 0 ? frame->width : (isYUV444 ? frame->width : frame->width / 2),
+      EGL_HEIGHT, i == 0 ? frame->height : (isYUV444 ? frame->height : frame->height / 2),
     };
 
     int attribIndex = 6;
@@ -344,7 +380,7 @@ ssize_t exportEGLImages(AVFrame *frame, EGLDisplay dpy, bool eglIsSupportExtDmaB
                    EGL_LINUX_DMA_BUF_EXT,
                    NULL, attribs);
     if (!images[i]) {
-      printf("eglCreateImage() Failed: %d\n", eglGetError());
+      fprintf(stderr, "eglCreateImage() Failed: %d\n", eglGetError());
       goto create_image_fail;
     }
 
