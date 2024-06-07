@@ -136,9 +136,6 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
     printf("Ignoring invalid rotation value: %d\n", config->rotate);
   }
 
-  if (config->yuv444)
-    drFlags |= YUV444;
-
   if (config->debug_level > 0) {
     printf("Stream %d x %d, %d fps, %d kbps\n", config->stream.width, config->stream.height, config->stream.fps, config->stream.bitrate);
     connection_debug = true;
@@ -208,6 +205,7 @@ static void help() {
   printf("\t-bitrate <bitrate>\tSpecify the bitrate in Kbps\n");
   printf("\t-packetsize <size>\tSpecify the maximum packetsize in bytes\n");
   printf("\t-codec <codec>\t\tSelect used codec: auto/h264/h265/av1 (default auto)\n");
+  printf("\t-yuv444\t\t\tTry to use yuv444 format\n");
   printf("\t-remote <yes/no/auto>\t\t\tEnable optimizations for WAN streaming (default auto)\n");
   printf("\t-app <app>\t\tName of app to stream\n");
   printf("\t-nosops\t\t\tDon't allow GFE to modify game settings\n");
@@ -215,7 +213,7 @@ static void help() {
   printf("\t-surround <5.1/7.1>\t\tStream 5.1 or 7.1 surround sound\n");
   printf("\t-keydir <directory>\tLoad encryption keys from directory\n");
   printf("\t-mapping <file>\t\tUse <file> as gamepad mappings configuration file\n");
-  printf("\t-platform <system>\tSpecify system used for audio, video and input: pi/imx/aml/rk/x11/x11_vdpau/sdl/fake (default auto)\n");
+  printf("\t-platform <system>\tSpecify system used for audio, video and input: rk/x11/x11_vaapi/sdl (default auto)\n");
   printf("\t-nounsupported\t\tDon't stream if resolution is not officially supported by the server\n");
   printf("\t-quitappafter\t\tSend quit app request to remote after quitting session\n");
   printf("\t-viewonly\t\tDisable all input processing (view-only mode)\n");
@@ -229,7 +227,9 @@ static void help() {
   printf("\t-input <device>\t\tUse <device> as input. Can be used multiple times\n");
   printf("\t-audio <device>\t\tUse <device> as audio output device\n");
   #endif
-  printf("\nUse Ctrl+Alt+Shift+Q or Play+Back+LeftShoulder+RightShoulder to exit streaming session\n\n");
+  printf("\nUse Ctrl+Alt+Shift+Q or Play+Back+LeftShoulder+RightShoulder to exit streaming session\n");
+  printf("\nUse Ctrl+Alt+Shift+Z to exit ungrab keyboard and mouse\n");
+  printf("\nUse Ctrl+Alt+Shift+M to enter fake grab mode(as ungrab keyboard and mouse)\n\n");
   exit(0);
 }
 
@@ -343,7 +343,19 @@ int main(int argc, char* argv[]) {
     //if (config.hdr && !(config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_10BIT)) {
     //  fprintf(stderr, "HDR streaming requires HEVC or AV1 codec\n");
     //  exit(-1);
-    //}    
+    //}
+
+    // set yuv444 depend on config
+    if (config.yuv444 && (system == X11_VAAPI || system == X11_VDPAU || system == X11)) {
+      if (config.stream.supportedVideoFormats == VIDEO_FORMAT_H264) {
+	// some encoder dose not support yuv444 when using h264,so try use h265 instead of h264
+	config.stream.supportedVideoFormats |= VIDEO_FORMAT_H265;
+      }
+      config.stream.supportedVideoFormats |= VIDEO_FORMAT_MASK_YUV444;
+      printf("Try to use yuv444 mode\n");
+    }
+    else if (config.yuv444)
+      printf("YUV444 is not supported because of platform: %d .\n", (int)system);
 
     #ifdef HAVE_SDL
     if (system == SDL)
@@ -372,7 +384,7 @@ int main(int argc, char* argv[]) {
         }
 
         bool storeIsNoSdl = isNoSdl;
-        is_use_kbdmux();
+        is_use_kbdmux(config.fakegrab);
         // Use evdev to drive gamepad listed in command
         isNoSdl = true;
         for (int i=0;i<config.inputsCount;i++) {

@@ -1,5 +1,12 @@
 --- CMakeLists.txt.orig	2024-02-20 04:01:31 UTC
 +++ CMakeLists.txt
+@@ -1,5 +1,5 @@ cmake_minimum_required(VERSION 3.6)
+ cmake_minimum_required(VERSION 3.6)
+-project(moonlight-embedded VERSION 2.7.0 LANGUAGES C)
++project(moonlight-embedded VERSION 2.7.1 LANGUAGES C)
+ SET(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+ SET(CMAKE_C_STANDARD 99)
+ include(${CMAKE_ROOT}/Modules/GNUInstallDirs.cmake)
 @@ -26,6 +26,7 @@ option(ENABLE_X11 "Compile X11 support (requires ENABL
  option(ENABLE_SDL "Compile SDL support" ON)
  option(ENABLE_FFMPEG "Compile FFMPEG support" ON)

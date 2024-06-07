@@ -18,6 +18,7 @@
  */
 
 #include "x11.h"
+#include "evdev.h"
 
 #include "../loop.h"
 
@@ -32,6 +33,8 @@
 
 static Display *display;
 static Window window;
+static int displayFd = -1;
+static bool isMapedWindow = false;
 
 static Atom wm_deletemessage;
 
@@ -45,12 +48,25 @@ static int x11_handler(int fd) {
   while (XPending(display)) {
     XNextEvent(display, &event);
     switch (event.type) {
+    case MapNotify:
+      if (!isMapedWindow) {
+        grab_window(true);
+        isMapedWindow = true;
+      }
+      break;
+    case DestroyNotify:
+      grab_window(false);
+      break;
+    case EnterNotify:
+    case LeaveNotify:
     case FocusIn:
     case FocusOut:
-      if (event.type == FocusIn) {
+      if (event.type == FocusIn || event.type == EnterNotify) {
         grabbed = true;
+        fake_grab_window(true);
       } else {
         grabbed = false;
+        fake_grab_window(false);
       }
       XDefineCursor(display, window, grabbed ? cursor : 0);
       break;
@@ -79,5 +95,16 @@ void x11_input_init(Display* x11_display, Window x11_window) {
   XFreePixmap(display, blank);
   XDefineCursor(display, window, cursor);
 
-  loop_add_fd(ConnectionNumber(display), x11_handler, POLLIN | POLLERR | POLLHUP);
+  displayFd = ConnectionNumber(display);
+  if (displayFd > -1)
+    loop_add_fd(displayFd, x11_handler, POLLIN | POLLERR | POLLHUP);
+
+  isMapedWindow = false;
+}
+
+void x11_input_remove () {
+  if (displayFd > -1) {
+    loop_remove_fd(displayFd);
+    displayFd = -1;
+  }
 }

@@ -53,6 +53,7 @@ static struct option long_options[] = {
   {"width", required_argument, NULL, 'c'},
   {"height", required_argument, NULL, 'd'},
   {"yuv444", no_argument, NULL, 'f'},
+  {"fakegrab", no_argument, NULL, 'F'},
   {"bitrate", required_argument, NULL, 'g'},
   {"packetsize", required_argument, NULL, 'h'},
   {"app", required_argument, NULL, 'i'},
@@ -156,6 +157,9 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
     break;
   case 'f':
     config->yuv444 = true;
+    break;
+  case 'F':
+    config->fakegrab = true;
     break;
   case 'g':
     config->stream.bitrate = atoi(value);

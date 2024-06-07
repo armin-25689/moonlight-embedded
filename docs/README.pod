@@ -103,6 +103,21 @@ Can be 'auto', 'h264', 'h265', 'hevc', or 'av1'.
 Not all video decoders support H.265/HEVC or AV1.
 Will still use H.264 if server doesn't support HEVC or AV1.
 
+=item B<-yuv444>
+
+Try to use yuv444 format.Better color display but not efficiency.
+Note:Now only support hevc(h265) with xvuy format use vaapi platform.
+Need sunshine host support and just support vaapi platform.
+If meet h264+YUV444P, use 'x11' platform instead.
+See games/moonlight-embedded-devel source code directory:
+'sunshine-yuv444-diff'.
+
+=item B<-fakegrab>
+
+Fake grab keyboard and mouse when use not SDL platform.
+Used for not need grab window feature and grab bugs.
+Use Ctrl+Alt+Shift+M to switch.
+
 =item B<-remote> [I<yes/no/auto>]
 
 Enable optimizations for LAN or WAN streaming.
@@ -172,7 +187,7 @@ Only evdev devices /dev/input/event* are supported.
 
 =item B<-audio> [I<DEVICE>]
 
-Use <DEVICE> as audio output device.
+Use <DEVICE> as audio output device on embedded system such as Raspberry Pi.
 The default value is 'sysdefault' for ALSA and 'hdmi' for OMX on the Raspberry Pi.
 
 =item B<-windowed>
@@ -209,12 +224,15 @@ A documented example configuration file can be found at /usr/local/etc/moonlight
 
  Use Ctrl+Alt+Shift+Q or Play+Back+LeftShoulder+RightShoulder to quit the streaming session.
  Use Ctrl+Alt+Shift+Z to Grab/Ungrab keyboard.
+ Use Ctrl+Alt+Shift+M to fakeGrab/normalGrab keyboard.
  It could not grab the keyboard Using sdl platform.
 
 =head1 GAMEPAD
 
 FreeBSD supports fewer controllers.Please see hgame(4) xb360gp(4) ps4dshock(4) and FreeBSD forums...
 SDL has better behavior for gamepad.
+Use 'moonlight map -input /dev/input/eventN' or use 'x11/antimicrox' to create mapping.
+$HOME/.config/moonlight/gamecontrollerdb.txt could be created and used by default.
 
 =head1 COMMENTS
 

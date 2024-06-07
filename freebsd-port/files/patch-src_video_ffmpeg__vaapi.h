@@ -1,6 +1,6 @@
 --- src/video/ffmpeg_vaapi.h.orig	2024-02-20 04:01:31 UTC
 +++ src/video/ffmpeg_vaapi.h
-@@ -17,9 +17,22 @@
+@@ -17,9 +17,26 @@
   * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
   */
  
@@ -11,6 +11,8 @@
  
 -int vaapi_init_lib();
 +extern bool isYUV444;
++extern int tryTimes;
++extern enum AVPixelFormat sharedFmt;
 +
 +int vaapi_init_lib(const char *device);
  int vaapi_init(AVCodecContext* decoder_ctx);
@@ -24,3 +26,5 @@
 +bool isFrameFullRange(const AVFrame* frame);
 +int getFrameColorspace(const AVFrame* frame);
 +void *get_display_from_vaapi(bool isXDisplay);
++int get_plane_number(enum AVPixelFormat pix_fmt);
++char *get_yuv_order(enum AVPixelFormat pix_fmt);

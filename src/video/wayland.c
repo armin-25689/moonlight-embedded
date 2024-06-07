@@ -28,6 +28,7 @@
 #include "xdg-shell-client-protocol.h"
 #include "wp-viewporter.h"
 #include "wlr-output-management.h"
+#include "../input/evdev.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -118,9 +119,11 @@ static void pointer_enter(void *data, struct wl_pointer *wl_pointer, uint32_t se
   if (isGrabing)
     wl_pointer_set_cursor(wl_pointer, serial, NULL, 0, 0);
   pointerSerial = serial;
+  fake_grab_window(true);
 }
 
 static void pointer_leave(void *data, struct wl_pointer *wl_pointer, uint32_t serial, struct wl_surface *wl_surface) {
+  fake_grab_window(false);
 }
 
 static const struct wl_pointer_listener wl_pointer_listener = {
@@ -324,6 +327,7 @@ void wl_close_display() {
     wl_egl_window_destroy(wl_window);
     wl_display_disconnect(wl_display);
     wl_display = NULL;
+    wl_window = NULL;
   }
 }
 
@@ -336,8 +340,8 @@ void wl_dispatch_event() {
 }
 
 void wl_get_resolution(int *width, int *height) {
-  *width = display_width;
-  *height = display_height;
+  *width = output_width;
+  *height = output_height;
 }
 
 void wl_change_cursor(const char *op) {

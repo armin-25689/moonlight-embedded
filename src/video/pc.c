@@ -24,6 +24,7 @@
 #endif
 #include "video.h"
 
+#include "../input/x11.h"
 #include "x11.h"
 #ifdef HAVE_WAYLAND
 #include "wayland.h"
@@ -45,9 +46,14 @@
 #define X11_VAAPI_ACCELERATION ENABLE_HARDWARE_ACCELERATION_2
 #define SLICES_PER_FRAME 4
 
+#ifndef HAVE_VAAPI
+static bool isYUV444 = false;
+#endif
+
 extern bool isUseGlExt;
 static bool isTenBit;
 static bool isWayland = false;
+static bool isStarted = false;
 
 static void* ffmpeg_buffer = NULL;
 static size_t ffmpeg_buffer_size = 0;
@@ -57,8 +63,20 @@ static void *display = NULL;
 static int pipefd[2];
 static int windowpipefd[2];
 
-static int display_width = 0;
-static int display_height = 0;
+static int display_width = 0, display_height = 0;
+static int frame_width, frame_height, screen_width, screen_height;
+static const char *quitRequest = QUITCODE;
+
+typedef struct Setupargs {
+  int videoFormat;
+  int width;
+  int height;
+  int avc_flags;
+  int buffer_count;
+  int thread_count;
+  int drFlags;
+}SetupArgs;
+static SetupArgs ffmpegArgs;
 
 static int window_op_handle (int pipefd) {
   char *opCode = NULL;
@@ -92,6 +110,10 @@ static int frame_handle (int pipefd) {
 
 static int software_draw (AVFrame* frame) {
   egl_draw(frame, frame->data);
+  #ifdef HAVE_WAYLAND
+  if (isWayland)
+    wl_dispatch_event();
+  #endif
   return LOOP_OK;
 }
 
@@ -116,7 +138,7 @@ static int vaapi_va_put (AVFrame* frame) {
 }
 
 static int test_vaapi_va_put (AVFrame* frame) {
-  #ifdef HAVE_VAAPI
+#ifdef HAVE_VAAPI
   static int successTimes = 0;
   if (!isWayland && x_test_vaapi_draw(frame, display_width, display_height))
     successTimes++;
@@ -124,23 +146,18 @@ static int test_vaapi_va_put (AVFrame* frame) {
     successTimes--;
 
   if (successTimes <= 0) {
-    int dcFlag;
-#ifdef HAVE_WAYLAND
+    int dcFlag = 0;
+  #ifdef HAVE_WAYLAND
     dcFlag = isWayland ? (ffmpeg_decoder | WAYLAND) : ffmpeg_decoder;
-#endif
-    egl_init(display, display_width, display_height, dcFlag);
+  #endif
+    egl_init(display, frame_width, frame_height, screen_width, screen_height, dcFlag);
 
     if (!canExportSurfaceHandle(isTenBit) ||
-        !isVaapiCanDirectRender() || isTenBit) {
+        !isVaapiCanDirectRender()) {
       isUseGlExt = false;
     }
 
     if (isUseGlExt) {
-#ifdef HAVE_WAYLAND
-      if (isWayland)
-        wl_setup_post();
-#endif
-
       render_handler = vaapi_egl_draw;
     } else {
       fprintf(stderr, "Render failed and Please try another platform!\n");
@@ -150,7 +167,7 @@ static int test_vaapi_va_put (AVFrame* frame) {
     render_handler = vaapi_va_put;
   }
   return LOOP_OK;
-  #endif
+#endif
   return LOOP_RETURN;
 }
 
@@ -165,17 +182,26 @@ int x11_init(bool vdpau, bool vaapi) {
     if (!isWayland)
       x_muilti_threads();
     if (vaapi_init_lib(isWayland ? NULL : displayDevice) != -1) {
-#ifdef HAVE_WAYLAND
+    #ifdef HAVE_WAYLAND
       display = isWayland ? wl_get_display(NULL) : x_get_display(displayDevice);
-#else
+    #else
       display = x_get_display(displayDevice);
-#endif
-      if (display != NULL) {
-        return INIT_VAAPI;
-      }
+    #endif
+      return INIT_VAAPI;
     }
   #endif
   }
+
+  #ifdef HAVE_WAYLAND
+  if (isWayland) {
+    display = wl_get_display(NULL);
+    if (!display)
+      return 0;
+    else {
+      return INIT_EGL;
+    }
+  }
+  #endif
   isWayland = false;
   x_muilti_threads();
 
@@ -187,23 +213,30 @@ int x11_init(bool vdpau, bool vaapi) {
 }
 
 int x11_setup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
+  ffmpegArgs.drFlags = drFlags;
+
   ensure_buf_size(&ffmpeg_buffer, &ffmpeg_buffer_size, INITIAL_DECODER_BUFFER_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
 
   if (!isWayland) {
     if (x_setup(width, height, drFlags) == -1)
       return -1;
-    x_get_resolution(&display_width, &display_height);
+    x_get_resolution(&screen_width, &screen_height);
   } else {
 #ifdef HAVE_WAYLAND
     if (wayland_setup(width, height, drFlags) == -1)
       return -1;
-    wl_get_resolution(&display_width, &display_height);
+    wl_get_resolution(&screen_width, &screen_height);
 #endif
   }
-  if (display_width == 0 || display_height == 0) {
+  if (drFlags & DISPLAY_FULLSCREEN) {
+    display_width = screen_width;
+    display_height = screen_height;
+  } else {
     display_width = width;
     display_height = height;
   }
+  frame_width = width;
+  frame_height = height;
 
   int avc_flags;
   if (drFlags & X11_VDPAU_ACCELERATION)
@@ -213,21 +246,35 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   else
     avc_flags = SLICE_THREADING;
 
-  if (drFlags & YUV444)
+  if (videoFormat & VIDEO_FORMAT_MASK_YUV444)
     isYUV444 = true;
 
-  if (ffmpeg_init(videoFormat, width, height, avc_flags, 2, SLICES_PER_FRAME) < 0) {
+  if (ffmpeg_init(videoFormat, frame_width, frame_height, avc_flags, 2, SLICES_PER_FRAME) < 0) {
     fprintf(stderr, "Couldn't initialize video decoding\n");
     return -1;
   }
+  ffmpegArgs.videoFormat = videoFormat;
+  ffmpegArgs.width = frame_width;
+  ffmpegArgs.height = frame_height;
+  ffmpegArgs.avc_flags = avc_flags;
+  ffmpegArgs.buffer_count = 2;
+  ffmpegArgs.thread_count = SLICES_PER_FRAME;
 
   if (ffmpeg_decoder == SOFTWARE) {
-    egl_init(display, width, height, SOFTWARE);
+    int dcFlag = ffmpeg_decoder;
+    #ifdef HAVE_WAYLAND
+    dcFlag = isWayland ? (ffmpeg_decoder | WAYLAND) : ffmpeg_decoder;
+    #endif
+    #define FULLSCREEN 0x08
+    if (drFlags & DISPLAY_FULLSCREEN)
+      dcFlag |= FULLSCREEN;
+    egl_init(display, frame_width, frame_height, screen_width, screen_height, dcFlag);
+    #undef FULLSCREEN
     render_handler = software_draw;
   } else {
     render_handler = test_vaapi_va_put;
-    isTenBit = videoFormat & VIDEO_FORMAT_MASK_10BIT;
   }
+  isTenBit = videoFormat & VIDEO_FORMAT_MASK_10BIT;
 
   if (pipe(pipefd) == -1 || pipe(windowpipefd) == -1) {
     fprintf(stderr, "Can't create communication channel between threads\n");
@@ -242,9 +289,13 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
 
   evdev_trans_op_fd(windowpipefd[1]);
 #ifdef HAVE_WAYLAND
-  if (isWayland)
+  if (isWayland) {
     wl_trans_op_fd(windowpipefd[1]);
+    wl_setup_post();
+  }
 #endif
+
+  isStarted = true;
 
   return 0;
 }
@@ -265,12 +316,12 @@ void x11_cleanup() {
   egl_destroy();
   #endif
   ffmpeg_destroy();
-  if (ffmpeg_decoder == SOFTWARE)
-    x_close_display();
-#ifdef HAVE_WAYLAND
+  #ifdef HAVE_WAYLAND
   if (isWayland)
     wl_close_display();
-#endif
+  else
+  #endif
+    x_close_display();
 }
 
 int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
@@ -285,7 +336,28 @@ int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     entry = entry->next;
   }
 
-  ffmpeg_decode(ffmpeg_buffer, length);
+  int err = ffmpeg_decode(ffmpeg_buffer, length);
+
+  if (err < 0) {
+    if (ffmpeg_decoder == SOFTWARE) {
+      write(windowpipefd[1], &quitRequest, sizeof(char *));
+      return DR_NEED_IDR;
+    }
+#ifdef HAVE_VAAPI
+    // try to change sw_format for gpu decoder
+    if (!isWayland) {
+      grab_window(false);
+      x11_input_remove();
+      x_close_display();
+    }
+    ffmpeg_destroy();
+    usleep(10000);
+    tryTimes--;
+    if (x11_init(true, true) <= INIT_EGL || (!isWayland && x_setup(ffmpegArgs.width, ffmpegArgs.height, ffmpegArgs.drFlags) <= -1) || ffmpeg_init(ffmpegArgs.videoFormat, ffmpegArgs.width, ffmpegArgs.height, ffmpegArgs.avc_flags, ffmpegArgs.buffer_count, ffmpegArgs.thread_count) < 0 || tryTimes <= 0)
+#endif
+      write(windowpipefd[1], &quitRequest, sizeof(char *));
+    return DR_NEED_IDR;
+  }
 
   AVFrame* frame = ffmpeg_get_frame(true);
 

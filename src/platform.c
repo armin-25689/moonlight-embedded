@@ -74,7 +74,7 @@ enum platform platform_check(char* name) {
   }
   #endif
   #ifdef HAVE_X11
-  bool x11 = strcmp(name, "x11") == 0;
+  bool x11 = strcmp(name, "x11") == 0 || strcmp(name, "wayland") == 0;
   bool vdpau = strcmp(name, "x11_vdpau") == 0;
   bool vaapi = strcmp(name, "x11_vaapi") == 0 || strcmp(name, "vaapi") == 0 || strcmp(name, "wayland_vaapi") == 0;
   if (std || x11 || vdpau || vaapi) {
@@ -87,11 +87,7 @@ enum platform platform_check(char* name) {
     if (init == INIT_VDPAU)
       return X11_VDPAU;
     #endif
-    #ifdef HAVE_SDL
-    return SDL;
-    #else
     return X11;
-    #endif
   }
   #endif
   #ifdef HAVE_SDL

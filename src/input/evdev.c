@@ -55,9 +55,11 @@ static const char *grabcode = GRABCODE;
 static const char *ungrabcode = UNGRABCODE;
 
 static bool waitingToSwitchGrabOnModifierUp = false;
-static bool iskeyboardgrab = false;
 static bool isgrabkeyrelease = false;
 static bool isUseKbdmux = false;
+static bool fakeGrab = false;
+static bool fakeGrabKey = false;
+static bool iskeyboardgrab = false;
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 #define int16_to_le(val) val
@@ -153,15 +155,14 @@ static bool mouseEmulationEnabled;
 
 static bool waitingToExitOnModifiersUp = false;
 
-static int gamepadsfds[MAX_GAMEPADS + 1] = {0};
 int evdev_gamepads = 0;
 
 #define ACTION_MODIFIERS (MODIFIER_SHIFT|MODIFIER_ALT|MODIFIER_CTRL)
 #define QUIT_KEY KEY_Q
 #define GRAB_KEY KEY_Z
+#define FAKE_GRAB_KEY KEY_M
 #define QUIT_BUTTONS (PLAY_FLAG|BACK_FLAG|LB_FLAG|RB_FLAG)
 
-static void grab_window(bool grabstat);
 static bool (*handler) (struct input_event*, struct input_device*);
 
 static int evdev_get_map(int* map, int length, int value) {
@@ -186,16 +187,6 @@ static void freeallkey () {
       LiSendKeyboardEvent(0x80 << 8 | keyCodes[i], KEY_ACTION_UP, 0);
     }
   }
-}
-
-static void closegamepads() {
-  for (int i = 1; i < (MAX_GAMEPADS + 1); i++) {
-    if (gamepadsfds[i] > 0) {
-      close(gamepadsfds[i]);
-      gamepadsfds[i] = 0;
-    }
-  }
-  gamepadsfds[0] = 0;
 }
 
 static bool evdev_init_parms(struct input_device *dev, struct input_abs_parms *parms, int code) {
@@ -479,13 +470,24 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
         if (ev->code == QUIT_KEY) {
           waitingToExitOnModifiersUp = true;
           return true;
-        } else if (ev->code == GRAB_KEY) {
+        } else if (ev->code == GRAB_KEY || ev->code == FAKE_GRAB_KEY) {
+          if (ev->code == GRAB_KEY) {
+            if (fakeGrab) {
+              fakeGrab = false;
+              fakeGrabKey = true;
+            }
+          }
+          else if (ev->code == FAKE_GRAB_KEY) {
+            fakeGrab = !fakeGrab;
+            fakeGrabKey = true;
+          }
           waitingToSwitchGrabOnModifierUp = true;
           return true;
         }
       }
       if (waitingToSwitchGrabOnModifierUp) {
-        if (ev->code == GRAB_KEY && ev->value == 0) {
+        if ((ev->code == GRAB_KEY && ev->value == 0) || 
+            (ev->code == FAKE_GRAB_KEY && ev->value == 0)) {
           isgrabkeyrelease = true;
           if (dev->modifiers != 0)
             return true;
@@ -494,7 +496,16 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
           waitingToSwitchGrabOnModifierUp = false;
           isgrabkeyrelease = false;
           freeallkey();
-          grab_window(!iskeyboardgrab);
+          if (fakeGrabKey && fakeGrab) {
+            grab_window(false);
+          }
+          else if (fakeGrabKey && !fakeGrab) {
+            grab_window(true);
+          }
+          else {
+            grab_window(!iskeyboardgrab);
+          }
+          fakeGrabKey = false;
           return true;
         }
         return true;
@@ -1010,7 +1021,8 @@ static int evdev_handle(int fd) {
   return LOOP_OK;
 }
 
-void is_use_kbdmux() {
+void is_use_kbdmux(bool fakegrab) {
+  fakeGrab = fakegrab;
   const char* tryFirstInput = "/dev/input/event0";
   const char* trySecondInput = "/dev/input/event1";
 
@@ -1157,23 +1169,21 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
   }
 
   if (is_gamepad) {
-    if (!isNoSdl) {
-      libevdev_free(evdev);
-      // sdl may lead freebsd recognized as android when open some gamepads.
-      // so open gamepads first and do not close it until exit.
-      //close(fd);
-      if (gamepadsfds[0] >= MAX_GAMEPADS)
-        closegamepads();
-      gamepadsfds[0] = gamepadsfds[0] + 1;
-      gamepadsfds[gamepadsfds[0]] = fd;
-      return;
-    }
-    evdev_gamepads++;
 
     if (mappings == NULL) {
       fprintf(stderr, "No mapping available for %s (%s) on %s\n", name, str_guid, device);
       mappings = default_mapping;
     }
+
+    if (!isNoSdl) {
+      if (verbose)
+        printf("Ignoring gamepad by evdev,instead by using sdl: %s\n", name);
+      libevdev_free(evdev);
+      close(fd);
+      return;
+    }
+
+    evdev_gamepads++;
   } else {
     if (verbose)
       printf("Not mapping %s as a gamepad\n", name);
@@ -1254,7 +1264,7 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
       fprintf(stderr, "Mapping for %s (%s) on %s is incorrect\n", name, str_guid, device);
   }
 
-  if (grabbingDevices && (is_keyboard || is_mouse || is_touchscreen)) {
+  if (grabbingDevices && !fakeGrab && (is_keyboard || is_mouse || is_touchscreen)) {
     if (ioctl(fd, EVIOCGRAB, 1) < 0) {
       fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
     }
@@ -1390,8 +1400,6 @@ void evdev_start() {
 
 void evdev_stop() {
   evdev_drain();
-  if (!isNoSdl)
-    closegamepads();
 }
 
 void evdev_init(bool mouse_emulation_enabled) {
@@ -1437,30 +1445,60 @@ void evdev_rumble(unsigned short controller_id, unsigned short low_freq_motor, u
   device->haptic_effect_id = effect.id;
 }
 
-void grab_window(bool grabstat) {
-  if (grabstat != iskeyboardgrab) {
-    int grabnum;
-    if (iskeyboardgrab) {
-      grabnum = 0;
-      iskeyboardgrab = false;
+void fake_grab_window(bool grabstat) {
+  freeallkey();
+  evdev_drain();
 #if defined(HAVE_X11) || defined(HAVE_WAYLAND)
-      write(keyboardpipefd, &ungrabcode, sizeof(char *));
+  write(keyboardpipefd, !grabstat ? &ungrabcode : &grabcode, sizeof(char *));
 #endif
+  iskeyboardgrab = grabstat;
+}
+
+void grab_window(bool grabstat) {
+  int grabnum;
+
+  evdev_drain();
+
+  if (fakeGrab && fakeGrabKey) {
+    iskeyboardgrab = true;
+    grabnum = 0;
+    goto grab;
+  }
+  else if (!fakeGrab && fakeGrabKey) {
+    iskeyboardgrab = true;
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND)
+    write(keyboardpipefd, &grabcode, sizeof(char *));
+#endif
+    grabnum = 1;
+    goto grab;
+  }
+  else if (fakeGrab && !fakeGrabKey) {
+    iskeyboardgrab = true;
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND)
+    write(keyboardpipefd, &grabcode, sizeof(char *));
+#endif
+    return;
+  }
+
+  if (grabstat != iskeyboardgrab) {
+    if (!grabstat) {
+      grabnum = 0;
     } else {
       grabnum = 1;
-      iskeyboardgrab = true;
-#if defined(HAVE_X11) || defined(HAVE_WAYLAND)
-      write(keyboardpipefd, &grabcode, sizeof(char *));
-#endif
     }
+    iskeyboardgrab = grabstat;
 
-    evdev_drain();
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND)
+    write(keyboardpipefd, !grabstat ? &ungrabcode : &grabcode, sizeof(char *));
+#endif
+    goto grab;
+  }
 
-    for (int i = 0; i < numDevices; i++) {
-      if (devices[i].is_keyboard || devices[i].is_mouse || devices[i].is_touchscreen) {
-        if (ioctl(devices[i].fd, EVIOCGRAB, grabnum) < 0)
-          fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
-      }
+grab:
+  for (int i = 0; i < numDevices; i++) {
+    if (devices[i].is_keyboard || devices[i].is_mouse || devices[i].is_touchscreen) {
+      if (ioctl(devices[i].fd, EVIOCGRAB, grabnum) < 0)
+        fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
     }
   }
 }

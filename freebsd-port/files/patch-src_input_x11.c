@@ -1,14 +1,15 @@
---- src/input/x11.c.orig	2023-11-03 06:08:34 UTC
+--- src/input/x11.c.orig	2024-02-20 04:01:31 UTC
 +++ src/input/x11.c
-@@ -18,7 +18,6 @@
+@@ -18,7 +18,7 @@
   */
  
  #include "x11.h"
 -#include "keyboard.h"
++#include "evdev.h"
  
  #include "../loop.h"
  
-@@ -31,116 +30,29 @@
+@@ -31,116 +31,44 @@
  #include <stdlib.h>
  #include <poll.h>
  
@@ -17,6 +18,8 @@
 -
  static Display *display;
  static Window window;
++static int displayFd = -1;
++static bool isMapedWindow = false;
  
  static Atom wm_deletemessage;
  
@@ -72,14 +75,12 @@
 -
 -        short code = 0x80 << 8 | keyCodes[event.xkey.keycode - 8];
 -        LiSendKeyboardEvent(code, event.type == KeyPress ? KEY_ACTION_DOWN : KEY_ACTION_UP, keyboard_modifiers);
-+    case FocusIn:
-+    case FocusOut:
-+      if (event.type == FocusIn) {
-+        grabbed = true;
-+      } else {
-+        grabbed = false;
++    case MapNotify:
++      if (!isMapedWindow) {
++        grab_window(true);
++        isMapedWindow = true;
        }
--      break;
+       break;
 -    case ButtonPress:
 -    case ButtonRelease:
 -      switch (event.xbutton.button) {
@@ -114,7 +115,9 @@
 -
 -      if (button != 0)
 -        LiSendMouseButtonEvent(event.type==ButtonPress ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, button);
--      break;
++    case DestroyNotify:
++      grab_window(false);
+       break;
 -    case MotionNotify:
 -      motion_x = event.xmotion.x - last_x;
 -      motion_y = event.xmotion.y - last_y;
@@ -124,7 +127,17 @@
 -
 -        if (grabbed)
 -          XWarpPointer(display, None, window, 0, 0, 0, 0, 640, 360);
--      }
++    case EnterNotify:
++    case LeaveNotify:
++    case FocusIn:
++    case FocusOut:
++      if (event.type == FocusIn || event.type == EnterNotify) {
++        grabbed = true;
++        fake_grab_window(true);
++      } else {
++        grabbed = false;
++        fake_grab_window(false);
+       }
 -
 -      last_x = grabbed ? 640 : event.xmotion.x;
 -      last_y = grabbed ? 360 : event.xmotion.y;
@@ -132,3 +145,21 @@
        break;
      case ClientMessage:
        if (event.xclient.data.l[0] == wm_deletemessage)
+@@ -167,5 +95,16 @@ void x11_input_init(Display* x11_display, Window x11_w
+   XFreePixmap(display, blank);
+   XDefineCursor(display, window, cursor);
+ 
+-  loop_add_fd(ConnectionNumber(display), x11_handler, POLLIN | POLLERR | POLLHUP);
++  displayFd = ConnectionNumber(display);
++  if (displayFd > -1)
++    loop_add_fd(displayFd, x11_handler, POLLIN | POLLERR | POLLHUP);
++
++  isMapedWindow = false;
++}
++
++void x11_input_remove () {
++  if (displayFd > -1) {
++    loop_remove_fd(displayFd);
++    displayFd = -1;
++  }
+ }

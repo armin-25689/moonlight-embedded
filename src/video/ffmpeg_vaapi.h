@@ -23,6 +23,8 @@
 #include <stdbool.h>
 
 extern bool isYUV444;
+extern int tryTimes;
+extern enum AVPixelFormat sharedFmt;
 
 int vaapi_init_lib(const char *device);
 int vaapi_init(AVCodecContext* decoder_ctx);
@@ -36,3 +38,5 @@ bool isVaapiCanDirectRender();
 bool isFrameFullRange(const AVFrame* frame);
 int getFrameColorspace(const AVFrame* frame);
 void *get_display_from_vaapi(bool isXDisplay);
+int get_plane_number(enum AVPixelFormat pix_fmt);
+char *get_yuv_order(enum AVPixelFormat pix_fmt);

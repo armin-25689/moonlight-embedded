@@ -20,7 +20,7 @@
 #include <EGL/egl.h>
 #include <libavcodec/avcodec.h>
 
-void egl_init(void *native_display, int display_width, int display_height, int dcFlag);
+void egl_init(void *native_display, int frame_width, int frame_height, int screen_width, int screen_height, int dcFlag);
 void egl_draw(AVFrame* frame, uint8_t* image[3]);
 void egl_draw_frame(AVFrame* frame);
 void egl_destroy();

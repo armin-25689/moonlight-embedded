@@ -49,6 +49,7 @@ typedef struct _CONFIGURATION {
   int pin;
   unsigned short port;
   bool yuv444;
+  bool fakegrab;
 } CONFIGURATION, *PCONFIGURATION;
 
 extern bool inputAdded;

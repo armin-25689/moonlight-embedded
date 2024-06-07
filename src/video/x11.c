@@ -38,12 +38,13 @@
 #include <string.h>
 
 static Display *display = NULL;
+static Display *vaapi_display = NULL;
 static Window window;
 
-static int display_width;
-static int display_height;
+static int display_width, display_height, screen_width, screen_height;
 
 static bool startedMuiltiThreads = false;
+static bool isUseVaapiDisplay = false;
 
 void x_vaapi_draw(AVFrame* frame, int width, int height) {
   #ifdef HAVE_VAAPI
@@ -55,21 +56,35 @@ bool x_test_vaapi_draw(AVFrame* frame, int width, int height) {
   #ifdef HAVE_VAAPI
   return test_vaapi_queue(frame, window, width, height);
   #endif
+  return false;
 }
 
 void* x_get_display(const char *device) {
   if (display == NULL) {
-    display = (Display *) get_display_from_vaapi(true);
-    if (display == NULL)
+#ifdef HAVE_VAAPI
+    vaapi_display = (Display *) get_display_from_vaapi(true);
+    if (device != NULL && vaapi_display != NULL) {
+      isUseVaapiDisplay = true;
+      display = vaapi_display;
+      return NULL;
+    }
+    else
+#endif
+    {
+      isUseVaapiDisplay = false;
       display = XOpenDisplay(device);
+      vaapi_display = NULL;
+    }
   }
 
   return display;
 }
 
 void x_close_display() {
-  if (display != NULL)
+  if (display != NULL && !isUseVaapiDisplay)
     XCloseDisplay(display);
+  display = NULL;
+  vaapi_display = NULL;
 }
 
 void x_muilti_threads() {
@@ -80,8 +95,8 @@ void x_muilti_threads() {
 }
 
 void x_get_resolution (int *width, int *height) {
-  *width = display_width;
-  *height = display_height;
+  *width = screen_width;
+  *height = screen_height;
 }
 
 int x_setup(int width, int height, int drFlags) {
@@ -91,18 +106,21 @@ int x_setup(int width, int height, int drFlags) {
     return -1;
   }
 
+  Screen* screen = DefaultScreenOfDisplay(display);
+  screen_width = WidthOfScreen(screen);
+  screen_height = HeightOfScreen(screen);
   if (drFlags & DISPLAY_FULLSCREEN) {
-    Screen* screen = DefaultScreenOfDisplay(display);
-    display_width = WidthOfScreen(screen);
-    display_height = HeightOfScreen(screen);
+    display_width = screen_width;
+    display_height = screen_height;
   } else {
     display_width = width;
     display_height = height;
   }
 
   Window root = DefaultRootWindow(display);
-  XSetWindowAttributes winattr = { .event_mask = FocusChangeMask };
+  XSetWindowAttributes winattr = { .event_mask = FocusChangeMask | EnterWindowMask | LeaveWindowMask};
   window = XCreateWindow(display, root, 0, 0, display_width, display_height, 0, CopyFromParent, InputOutput, CopyFromParent, CWEventMask, &winattr);
+  XSelectInput(display, window, StructureNotifyMask);
   XMapWindow(display, window);
   XStoreName(display, window, "Moonlight");
 

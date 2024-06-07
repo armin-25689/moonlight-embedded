@@ -42,9 +42,6 @@ static int current_frame, next_frame;
 
 enum decoders ffmpeg_decoder;
 
-#ifndef HAVE_VAAPI
-static bool isYUV444 = false;
-#endif
 #define BYTES_PER_PIXEL 4
 
 // This function must be called before
@@ -63,11 +60,6 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
   }
 
   ffmpeg_decoder = perf_lvl & VAAPI_ACCELERATION ? VAAPI : SOFTWARE;
-  if (ffmpeg_decoder == SOFTWARE) {
-    if (isYUV444)
-      printf("Software decoder cannot use YUV444 format.Use YUV444P instead.\n");
-    isYUV444 = false;
-  }
 
   for (int try = 0; try < 6; try++) {
     if (videoFormat & VIDEO_FORMAT_MASK_H264) {
@@ -127,10 +119,15 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
     decoder_ctx->width = width;
     decoder_ctx->height = height;
 
-    if (isYUV444)
+    if (videoFormat & VIDEO_FORMAT_MASK_YUV444)
       decoder_ctx->pix_fmt = AV_PIX_FMT_YUV444P;
     else
       decoder_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+
+    #ifdef HAVE_VAAPI
+    if (ffmpeg_decoder == VAAPI)
+      vaapi_init(decoder_ctx);
+    #endif
 
     int err = avcodec_open2(decoder_ctx, decoder, NULL);
     if (err < 0) {
@@ -160,12 +157,20 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
       fprintf(stderr, "Couldn't allocate frame");
       return -1;
     }
+    if (ffmpeg_decoder == SOFTWARE) {
+      int widthMulti = isYUV444 ? 64 : 128;
+      if (width % widthMulti != 0) {
+        dec_frames[i]->format = decoder_ctx->pix_fmt;
+        dec_frames[i]->width = decoder_ctx->width;
+        dec_frames[i]->height = decoder_ctx->height;
+        // glteximage2d need 64 type least
+        if (av_frame_get_buffer(dec_frames[i], widthMulti) < 0) {
+          fprintf(stderr, "Couldn't allocate frame buffer");
+          return -1;
+        }
+      }
+    }
   }
-
-  #ifdef HAVE_VAAPI
-  if (ffmpeg_decoder == VAAPI)
-    vaapi_init(decoder_ctx);
-  #endif
 
   return 0;
 }
@@ -182,7 +187,11 @@ void ffmpeg_destroy(void) {
       if (dec_frames[i])
         av_frame_free(&dec_frames[i]);
     }
+    free(dec_frames);
+    dec_frames = NULL;
   }
+  decoder_ctx = NULL;
+  decoder = NULL;
 }
 
 AVFrame* ffmpeg_get_frame(bool native_frame) {

@@ -1,6 +1,6 @@
 --- src/video/ffmpeg_vaapi.c.orig	2024-02-20 04:01:31 UTC
 +++ src/video/ffmpeg_vaapi.c
-@@ -18,16 +18,96 @@
+@@ -18,16 +18,143 @@
   */
  
  #include <va/va.h>
@@ -9,12 +9,13 @@
  #include <libavcodec/avcodec.h>
  #include <libavutil/hwcontext.h>
  #include <libavutil/hwcontext_vaapi.h>
++#include <libavutil/pixdesc.h>
  #include <X11/Xlib.h>
  
 +#include <Limelight.h>
 +
 +#include <EGL/egl.h>
-+#include <GLES2/gl2.h>
++#include <GLES3/gl3.h>
 +
 +#include <stdbool.h>
 +#include <unistd.h>
@@ -67,6 +68,8 @@
  #define MAX_SURFACES 16
  
 +bool isYUV444 = false;
++int tryTimes = 0;
++enum AVPixelFormat sharedFmt = AV_PIX_FMT_NONE;
 +
 +static Display *x11_display = NULL;
 +static int drm_fd = -1;
@@ -74,7 +77,16 @@
  static AVBufferRef* device_ref;
 +static VADRMPRIMESurfaceDescriptor primeDescriptor;
  
++static bool isSupportYuv444 = false;
++#define sw_format_slot 9
++static enum AVPixelFormat hw_sw_format[sw_format_slot] = { AV_PIX_FMT_NONE };
++static const char *yuvOrder = NULL;
++
 +static bool is_support_yuv444() {
++  if (isSupportYuv444)
++    return true;
++  bool supported = false;
++  int sw_format = 0;
 +  int format_num = 0;
 +  AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
 +  AVVAAPIDeviceContext *va_ctx = device->hwctx;
@@ -84,35 +96,86 @@
 +  VAStatus status = vaQueryImageFormats(va_ctx->display, formats, &format_num);
 +  if (status == VA_STATUS_SUCCESS) {
 +    for (int i = 0;i < format_num; i++) {
-+      if (formats[i].fourcc == VA_FOURCC_444P) {
-+        return true;
-+        break;
++      switch (formats[i].fourcc) {
++      case VA_FOURCC_444P:
++	hw_sw_format[sw_format++] = AV_PIX_FMT_YUV444P;
++        tryTimes++;
++	supported = true;
++	break;
++      case VA_FOURCC_XYUV:
++	hw_sw_format[sw_format++] = AV_PIX_FMT_VUYX;
++        // vuyx need keep the first
++        if (sw_format != 0 && hw_sw_format[0] > 0) {
++          hw_sw_format[sw_format - 1] = hw_sw_format[0];
++        }
++        hw_sw_format[0] = AV_PIX_FMT_VUYX;
++        tryTimes++;
++	supported = true;
++	break;
++      case VA_FOURCC_Y410:
++	hw_sw_format[sw_format++] = AV_PIX_FMT_XV30;
++        tryTimes++;
++	supported = true;
++	break;
++      case VA_FOURCC_NV12:
++	hw_sw_format[sw_format++] = AV_PIX_FMT_NV12;
++        tryTimes++;
++	break;
 +      }
 +    }
 +  }
 +
-+  return false;
++  return supported;
++}
++
++static enum AVPixelFormat get_format_from_slot () {
++  enum AVPixelFormat yuv444_fmt = AV_PIX_FMT_NONE;
++  for (int i = 0; i < sw_format_slot; i++) {
++    if (hw_sw_format[i] != AV_PIX_FMT_NONE) {
++      yuv444_fmt = hw_sw_format[i];
++      hw_sw_format[i] = AV_PIX_FMT_NONE;
++      printf("Try to use pixel format for yuv444: %s \n", av_get_pix_fmt_name(yuv444_fmt));
++      break;
++    }
++  }
++  return yuv444_fmt;
 +}
 +
  static enum AVPixelFormat va_get_format(AVCodecContext* context, const enum AVPixelFormat* pixel_format) {
    AVBufferRef* hw_ctx = av_hwframe_ctx_alloc(device_ref);
    if (hw_ctx == NULL) {
-@@ -37,7 +117,13 @@ static enum AVPixelFormat va_get_format(AVCodecContext
+@@ -37,16 +164,29 @@ static enum AVPixelFormat va_get_format(AVCodecContext
  
    AVHWFramesContext* fr_ctx = (AVHWFramesContext*) hw_ctx->data;
    fr_ctx->format = AV_PIX_FMT_VAAPI;
 -  fr_ctx->sw_format = AV_PIX_FMT_NV12;
-+  if (isYUV444 && !is_support_yuv444())
++  if (isYUV444 && !isSupportYuv444) {
 +    isYUV444 = false;
-+  if (isYUV444) {
-+    printf("Using YUV444 format to decode!It's need host support!\n");
-+    fr_ctx->sw_format = AV_PIX_FMT_YUV444P;
-+  } else
++    fprintf(stderr, "Failed to initialize VAAPI frame context because of not supported VA_FOURCC_444P format");
++    return AV_PIX_FMT_NONE;
++  } else if (isYUV444) {
++    fr_ctx->sw_format = get_format_from_slot();
++    if (fr_ctx->sw_format == AV_PIX_FMT_NONE)
++      return AV_PIX_FMT_NONE;
++  }
++  else
 +    fr_ctx->sw_format = AV_PIX_FMT_NV12;
    fr_ctx->width = context->coded_width;
    fr_ctx->height = context->coded_height;
    fr_ctx->initial_pool_size = MAX_SURFACES + 1;
-@@ -58,8 +144,15 @@ static int va_get_buffer(AVCodecContext* context, AVFr
+ 
+   if (av_hwframe_ctx_init(hw_ctx) < 0) {
+     fprintf(stderr, "Failed to initialize VAAPI frame context");
++    av_buffer_unref(&hw_ctx);
+     return AV_PIX_FMT_NONE;
+   }
+ 
++  sharedFmt = fr_ctx->sw_format;
++
+   context->pix_fmt = AV_PIX_FMT_VAAPI;
+   context->hw_device_ctx = device_ref;
+   context->hw_frames_ctx = hw_ctx;
+@@ -58,8 +198,17 @@ static int va_get_buffer(AVCodecContext* context, AVFr
    return av_hwframe_get_buffer(context->hw_frames_ctx, frame, 0);
  }
  
@@ -120,17 +183,19 @@
 -  return av_hwdevice_ctx_create(&device_ref, AV_HWDEVICE_TYPE_VAAPI, ":0", NULL, 0);
 +int vaapi_init_lib(const char *device) {
 +  if(av_hwdevice_ctx_create(&device_ref, AV_HWDEVICE_TYPE_VAAPI, device, NULL, 0) == 0) {
++    isSupportYuv444 = is_support_yuv444();
 +    AVHWDeviceContext *ctx = (AVHWDeviceContext*) device_ref->data;
 +    VAAPIDevicePriv *priv = (VAAPIDevicePriv*) ctx->user_opaque;
 +    drm_fd = priv->drm_fd;
 +    x11_display = priv->x11_display;
 +    return 0;
 +  }
++  fprintf(stderr, "Failed to initialize VAAPI lib");
 +  return -1;
  }
  
  int vaapi_init(AVCodecContext* decoder_ctx) {
-@@ -68,9 +161,262 @@ int vaapi_init(AVCodecContext* decoder_ctx) {
+@@ -68,9 +217,300 @@ int vaapi_init(AVCodecContext* decoder_ctx) {
    return 0;
  }
  
@@ -193,17 +258,11 @@
 +  attrs[attributeCount].type = VASurfaceAttribPixelFormat;
 +  attrs[attributeCount].flags = VA_SURFACE_ATTRIB_SETTABLE;
 +  attrs[attributeCount].value.type = VAGenericValueTypeInteger;
-+  if (isYUV444)
-+    attrs[attributeCount].value.value.i = isTenBit ? VA_FOURCC_Y410 : VA_FOURCC_444P;
-+  else
-+    attrs[attributeCount].value.value.i = isTenBit ? VA_FOURCC_P010 : VA_FOURCC_NV12;
++  attrs[attributeCount].value.value.i = isTenBit ? VA_FOURCC_P010 : VA_FOURCC_NV12;
 +  attributeCount++;
 +
 +  unsigned int rtformat = 0;
-+  if (isYUV444)
-+    rtformat = isTenBit ? VA_RT_FORMAT_YUV444_10 : VA_RT_FORMAT_YUV444;
-+  else
-+    rtformat = isTenBit ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420;
++  rtformat = isTenBit ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420;
 +  st = vaCreateSurfaces(va_ctx->display,
 +              rtformat,
 +              1280,
@@ -392,4 +451,48 @@
 +    return x11_display;
 +  else
 +    return &drm_fd;
++}
++
++int get_plane_number (enum AVPixelFormat pix_fmt) {
++  int planeNum;
++  switch (pix_fmt) {
++  case AV_PIX_FMT_VUYX:
++    yuvOrder = "vuyx";
++    planeNum = 1;
++    break;
++  case AV_PIX_FMT_XV30:
++  case AV_PIX_FMT_XV36:
++    yuvOrder = "xvyu";
++    planeNum = 1;
++    break;
++  case AV_PIX_FMT_YUV420P:
++  case AV_PIX_FMT_YUV444P:
++  case AV_PIX_FMT_YUV444P10:
++    yuvOrder = "yuvx";
++    planeNum = 3;
++    break;
++  case AV_PIX_FMT_NV12:
++  case AV_PIX_FMT_P010:
++  case AV_PIX_FMT_P016:
++    yuvOrder = "yuvx";
++    planeNum = 2;
++    break;
++  default:
++    yuvOrder = "yuvx";
++    planeNum = 4;
++    break;
++  }
++  return planeNum;
++}
++
++const char *get_yuv_order (enum AVPixelFormat pix_fmt) {
++  if (pix_fmt > -1) {
++    const char *intertmp = yuvOrder;
++    get_plane_number(pix_fmt);
++    const char *myyuvorder = yuvOrder;
++    yuvOrder = intertmp;
++    return myyuvorder;
++  }
++  else
++    return yuvOrder;
  }
