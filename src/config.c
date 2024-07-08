@@ -53,7 +53,6 @@ static struct option long_options[] = {
   {"width", required_argument, NULL, 'c'},
   {"height", required_argument, NULL, 'd'},
   {"yuv444", no_argument, NULL, 'f'},
-  {"fakegrab", no_argument, NULL, 'F'},
   {"bitrate", required_argument, NULL, 'g'},
   {"packetsize", required_argument, NULL, 'h'},
   {"app", required_argument, NULL, 'i'},
@@ -70,6 +69,8 @@ static struct option long_options[] = {
   {"windowed", no_argument, NULL, 't'},
   {"surround", required_argument, NULL, 'u'},
   {"fps", required_argument, NULL, 'v'},
+  {"fakegrab", no_argument, NULL, 'w'},
+  {"nograb", no_argument, NULL, 'W'},
   {"codec", required_argument, NULL, 'x'},
   {"nounsupported", no_argument, NULL, 'y'},
   {"quitappafter", no_argument, NULL, '1'},
@@ -158,9 +159,6 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
   case 'f':
     config->yuv444 = true;
     break;
-  case 'F':
-    config->fakegrab = true;
-    break;
   case 'g':
     config->stream.bitrate = atoi(value);
     break;
@@ -229,6 +227,10 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
     break;
   case 'v':
     config->stream.fps = atoi(value);
+    break;
+  case 'w':
+  case 'W':
+    config->fakegrab = true;
     break;
   case 'x':
     if (strcasecmp(value, "auto") == 0)

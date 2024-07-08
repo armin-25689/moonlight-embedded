@@ -1,6 +1,6 @@
---- src/video/pc.c.orig	2024-06-01 13:56:26 UTC
+--- src/video/pc.c.orig	2024-07-08 12:32:22 UTC
 +++ src/video/pc.c
-@@ -0,0 +1,389 @@
+@@ -0,0 +1,403 @@
 +/*
 + * This file is part of Moonlight Embedded.
 + *
@@ -56,7 +56,7 @@
 +extern bool isUseGlExt;
 +static bool isTenBit;
 +static bool isWayland = false;
-+static bool isStarted = false;
++static bool firstDraw = true;
 +
 +static void* ffmpeg_buffer = NULL;
 +static size_t ffmpeg_buffer_size = 0;
@@ -112,6 +112,13 @@
 +}
 +
 +static int software_draw (AVFrame* frame) {
++   if (firstDraw) {
++     firstDraw = false;
++     if (isYUV444 && (!(frame->linesize[0] == frame->linesize[2] && frame->linesize[1] == frame->linesize[0]))) {
++       fprintf(stderr, "There is not yuv444 format. Please try remove -yuv444 option to draw video!\n");
++       return LOOP_RETURN;
++     }
++   }
 +  egl_draw(frame, frame->data);
 +  #ifdef HAVE_WAYLAND
 +  if (isWayland)
@@ -141,6 +148,13 @@
 +}
 +
 +static int test_vaapi_va_put (AVFrame* frame) {
++   if (firstDraw) {
++     firstDraw = false;
++     if (isYUV444 && (!(frame->linesize[0] == frame->linesize[2] && frame->linesize[1] == frame->linesize[0]))) {
++       fprintf(stderr, "There is not yuv444 format. Please try remove -yuv444 option to draw video!\n");
++       return LOOP_RETURN;
++     }
++   }
 +#ifdef HAVE_VAAPI
 +  static int successTimes = 0;
 +  if (!isWayland && x_test_vaapi_draw(frame, display_width, display_height))
@@ -298,7 +312,7 @@
 +  }
 +#endif
 +
-+  isStarted = true;
++  firstDraw = true;
 +
 +  return 0;
 +}

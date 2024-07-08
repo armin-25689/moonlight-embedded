@@ -102,7 +102,7 @@
 +
 +    // set yuv444 depend on config
 +    if (config.yuv444 && (system == X11_VAAPI || system == X11_VDPAU || system == X11)) {
-+      if (config.stream.supportedVideoFormats == VIDEO_FORMAT_H264) {
++      if (config.stream.supportedVideoFormats == VIDEO_FORMAT_H264 && (system == X11_VAAPI || system == X11_VDPAU)) {
 +	// some encoder dose not support yuv444 when using h264,so try use h265 instead of h264
 +	config.stream.supportedVideoFormats |= VIDEO_FORMAT_H265;
 +      }
@@ -114,12 +114,13 @@
  
      #ifdef HAVE_SDL
      if (system == SDL)
-@@ -362,16 +383,38 @@ int main(int argc, char* argv[]) {
+@@ -362,16 +383,39 @@ int main(int argc, char* argv[]) {
            mappings = map;
          }
  
 +        bool storeIsNoSdl = isNoSdl;
-+        is_use_kbdmux(config.fakegrab);
++        if (config.inputsCount <= 0)
++          is_use_kbdmux(config.fakegrab);
 +        // Use evdev to drive gamepad listed in command
 +        isNoSdl = true;
          for (int i=0;i<config.inputsCount;i++) {
@@ -153,7 +154,7 @@
          #ifdef HAVE_LIBCEC
          cec_init();
          #endif /* HAVE_LIBCEC */
-@@ -398,7 +441,8 @@ int main(int argc, char* argv[]) {
+@@ -398,7 +442,8 @@ int main(int argc, char* argv[]) {
      if (config.pin > 0 && config.pin <= 9999) {
        sprintf(pin, "%04d", config.pin);
      } else {
@@ -163,7 +164,7 @@
      }
      printf("Please enter the following PIN on the target PC: %s\n", pin);
      fflush(stdout);
-@@ -406,6 +450,7 @@ int main(int argc, char* argv[]) {
+@@ -406,6 +451,7 @@ int main(int argc, char* argv[]) {
        fprintf(stderr, "Failed to pair to server: %s\n", gs_error);
      } else {
        printf("Succesfully paired\n");

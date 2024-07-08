@@ -15,29 +15,45 @@
  
  static struct option long_options[] = {
    {"720", no_argument, NULL, 'a'},
-@@ -50,6 +52,8 @@ static struct option long_options[] = {
+@@ -50,6 +52,7 @@ static struct option long_options[] = {
    {"4k", no_argument, NULL, '0'},
    {"width", required_argument, NULL, 'c'},
    {"height", required_argument, NULL, 'd'},
 +  {"yuv444", no_argument, NULL, 'f'},
-+  {"fakegrab", no_argument, NULL, 'F'},
    {"bitrate", required_argument, NULL, 'g'},
    {"packetsize", required_argument, NULL, 'h'},
    {"app", required_argument, NULL, 'i'},
-@@ -151,6 +155,12 @@ static void parse_argument(int c, char* value, PCONFIG
+@@ -66,6 +69,8 @@ static struct option long_options[] = {
+   {"windowed", no_argument, NULL, 't'},
+   {"surround", required_argument, NULL, 'u'},
+   {"fps", required_argument, NULL, 'v'},
++  {"fakegrab", no_argument, NULL, 'w'},
++  {"nograb", no_argument, NULL, 'W'},
+   {"codec", required_argument, NULL, 'x'},
+   {"nounsupported", no_argument, NULL, 'y'},
+   {"quitappafter", no_argument, NULL, '1'},
+@@ -151,6 +156,9 @@ static void parse_argument(int c, char* value, PCONFIG
    case 'd':
      config->stream.height = atoi(value);
      break;
 +  case 'f':
 +    config->yuv444 = true;
 +    break;
-+  case 'F':
-+    config->fakegrab = true;
-+    break;
    case 'g':
      config->stream.bitrate = atoi(value);
      break;
-@@ -281,19 +291,34 @@ bool config_file_parse(char* filename, PCONFIGURATION 
+@@ -220,6 +228,10 @@ static void parse_argument(int c, char* value, PCONFIG
+   case 'v':
+     config->stream.fps = atoi(value);
+     break;
++  case 'w':
++  case 'W':
++    config->fakegrab = true;
++    break;
+   case 'x':
+     if (strcasecmp(value, "auto") == 0)
+       config->codec = CODEC_UNSPECIFIED;
+@@ -281,19 +293,34 @@ bool config_file_parse(char* filename, PCONFIGURATION 
  
    char *line = NULL;
    size_t len = 0;
@@ -76,7 +92,7 @@
              else if (strcmp("true", value) == 0)
                parse_argument(long_options[i].val, NULL, config);
            }
-@@ -387,7 +412,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATI
+@@ -387,7 +414,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATI
    config->mapping = get_path("gamecontrollerdb.txt", getenv("XDG_DATA_DIRS"));
    config->key_dir[0] = 0;
  
@@ -85,7 +101,7 @@
    if (config_file)
      config_file_parse(config_file, config);
  
-@@ -438,5 +463,14 @@ void config_parse(int argc, char* argv[], PCONFIGURATI
+@@ -438,5 +465,14 @@ void config_parse(int argc, char* argv[], PCONFIGURATI
      } else /* if (config->stream.width * config->stream.height <= 3840 * 2160) */ {
        config->stream.bitrate = (int)(40000 * (config->stream.fps / 30.0));
      }

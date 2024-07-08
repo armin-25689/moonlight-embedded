@@ -53,7 +53,7 @@ static bool isYUV444 = false;
 extern bool isUseGlExt;
 static bool isTenBit;
 static bool isWayland = false;
-static bool isStarted = false;
+static bool firstDraw = true;
 
 static void* ffmpeg_buffer = NULL;
 static size_t ffmpeg_buffer_size = 0;
@@ -109,6 +109,13 @@ static int frame_handle (int pipefd) {
 }
 
 static int software_draw (AVFrame* frame) {
+   if (firstDraw) {
+     firstDraw = false;
+     if (isYUV444 && (!(frame->linesize[0] == frame->linesize[2] && frame->linesize[1] == frame->linesize[0]))) {
+       fprintf(stderr, "There is not yuv444 format. Please try remove -yuv444 option to draw video!\n");
+       return LOOP_RETURN;
+     }
+   }
   egl_draw(frame, frame->data);
   #ifdef HAVE_WAYLAND
   if (isWayland)
@@ -138,6 +145,13 @@ static int vaapi_va_put (AVFrame* frame) {
 }
 
 static int test_vaapi_va_put (AVFrame* frame) {
+   if (firstDraw) {
+     firstDraw = false;
+     if (isYUV444 && (!(frame->linesize[0] == frame->linesize[2] && frame->linesize[1] == frame->linesize[0]))) {
+       fprintf(stderr, "There is not yuv444 format. Please try remove -yuv444 option to draw video!\n");
+       return LOOP_RETURN;
+     }
+   }
 #ifdef HAVE_VAAPI
   static int successTimes = 0;
   if (!isWayland && x_test_vaapi_draw(frame, display_width, display_height))
@@ -295,7 +309,7 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   }
 #endif
 
-  isStarted = true;
+  firstDraw = true;
 
   return 0;
 }

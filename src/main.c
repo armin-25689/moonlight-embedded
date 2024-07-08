@@ -347,7 +347,7 @@ int main(int argc, char* argv[]) {
 
     // set yuv444 depend on config
     if (config.yuv444 && (system == X11_VAAPI || system == X11_VDPAU || system == X11)) {
-      if (config.stream.supportedVideoFormats == VIDEO_FORMAT_H264) {
+      if (config.stream.supportedVideoFormats == VIDEO_FORMAT_H264 && (system == X11_VAAPI || system == X11_VDPAU)) {
 	// some encoder dose not support yuv444 when using h264,so try use h265 instead of h264
 	config.stream.supportedVideoFormats |= VIDEO_FORMAT_H265;
       }
@@ -384,7 +384,8 @@ int main(int argc, char* argv[]) {
         }
 
         bool storeIsNoSdl = isNoSdl;
-        is_use_kbdmux(config.fakegrab);
+        if (config.inputsCount <= 0)
+          is_use_kbdmux(config.fakegrab);
         // Use evdev to drive gamepad listed in command
         isNoSdl = true;
         for (int i=0;i<config.inputsCount;i++) {
