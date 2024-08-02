@@ -1,4 +1,4 @@
---- src/input/mapping.c.orig	2024-02-20 04:01:31 UTC
+--- src/input/mapping.c.orig	2024-08-01 13:37:02 UTC
 +++ src/input/mapping.c
 @@ -46,9 +46,13 @@ struct mapping* mapping_parse(char* mapping) {
  
@@ -35,3 +35,10 @@
    }
    map->guid[32] = '\0';
    map->name[256] = '\0';
+@@ -233,5 +235,5 @@ void mapping_print(struct mapping* map) {
+   print_btn("paddle3", map->btn_paddle3);
+   print_btn("paddle4", map->btn_paddle4);
+   print_btn("touchpad", map->btn_touchpad);
+-  printf("platform:Linux\n");
++  printf("platform:FreeBSD\n");
+ }

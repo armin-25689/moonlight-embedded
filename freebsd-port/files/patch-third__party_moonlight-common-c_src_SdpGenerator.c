@@ -1,4 +1,4 @@
---- third_party/moonlight-common-c/src/SdpGenerator.c.orig	2024-02-18 00:20:24 UTC
+--- third_party/moonlight-common-c/src/SdpGenerator.c.orig	2024-08-01 13:37:02 UTC
 +++ third_party/moonlight-common-c/src/SdpGenerator.c
 @@ -343,7 +343,9 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr)
      // GFE currently imposes a limit of 100 Mbps for the video bitrate. It will automatically
@@ -11,17 +11,18 @@
  
      // We don't support dynamic bitrate scaling properly (it tends to bounce between min and max and never
      // settle on the optimal bitrate if it's somewhere in the middle), so we'll just latch the bitrate
-@@ -443,6 +445,13 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr)
+@@ -443,6 +445,14 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr)
          }
  
          if (AppVersionQuad[0] >= 7) {
-+	  if (IS_SUNSHINE()) {
-+	    if ((NegotiatedVideoFormat & VIDEO_FORMAT_MASK_10BIT) && (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_YUV444)) {
-+	      err |= addAttributeString(&optionHead, "x-nv-video[0].dynamicRangeMode", "3");
-+	    } else if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_YUV444) {
-+	      err |= addAttributeString(&optionHead, "x-nv-video[0].dynamicRangeMode", "2");
-+	    }
-+	  }
++            if (IS_SUNSHINE()) {
++                if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_YUV444) {
++                    err |= addAttributeString(&optionHead, "x-nv-video[0].yuv444Mode", "1");
++                }
++                else {
++                    err |= addAttributeString(&optionHead, "x-nv-video[0].yuv444Mode", "0");
++                }
++            }
              // Enable HDR if requested
              if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_10BIT) {
                  err |= addAttributeString(&optionHead, "x-nv-video[0].dynamicRangeMode", "1");

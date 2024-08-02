@@ -1,12 +1,10 @@
---- src/input/evdev.c.orig	2024-02-20 04:01:31 UTC
+--- src/input/evdev.c.orig	2024-08-01 13:37:02 UTC
 +++ src/input/evdev.c
 @@ -45,6 +45,22 @@
  #endif
  #include <math.h>
  
 +#define QUITCODE "quit"
-+
-+extern bool isNoSdl;
 +
 +static int keyboardpipefd = -1;
 +static const char *quitstate = QUITCODE;
@@ -19,6 +17,8 @@
 +static bool fakeGrab = false;
 +static bool fakeGrabKey = false;
 +static bool iskeyboardgrab = false;
++static bool sdlgp = false;
++static bool swapXYAB = false;
 +
  #if __BYTE_ORDER == __LITTLE_ENDIAN
  #define int16_to_le(val) val
@@ -175,7 +175,7 @@
        int mouseCode = 0;
        int gamepadCode = 0;
        int index = dev->key_map[ev->code];
-@@ -440,24 +550,109 @@ static bool evdev_handle_event(struct input_event *ev,
+@@ -440,36 +550,137 @@ static bool evdev_handle_event(struct input_event *ev,
        case BTN_TOUCH:
          if (ev->value == 1) {
            dev->touchDownTime = ev->time;
@@ -290,7 +290,43 @@
        default:
          gamepadModified = true;
          if (dev->map == NULL)
-@@ -608,6 +803,55 @@ static bool evdev_handle_event(struct input_event *ev,
+           break;
+-        else if (index == dev->map->btn_a)
+-          gamepadCode = A_FLAG;
+-        else if (index == dev->map->btn_x)
+-          gamepadCode = X_FLAG;
+-        else if (index == dev->map->btn_y)
+-          gamepadCode = Y_FLAG;
+-        else if (index == dev->map->btn_b)
+-          gamepadCode = B_FLAG;
++        else if (index == dev->map->btn_a) {
++          if (!swapXYAB)
++            gamepadCode = A_FLAG;
++          else
++            gamepadCode = B_FLAG;
++        }
++        else if (index == dev->map->btn_x) {
++          if (!swapXYAB)
++            gamepadCode = X_FLAG;
++          else
++            gamepadCode = Y_FLAG;
++        }
++        else if (index == dev->map->btn_y) {
++          if (!swapXYAB)
++            gamepadCode = Y_FLAG;
++          else
++            gamepadCode = X_FLAG;
++        }
++        else if (index == dev->map->btn_b) {
++          if (!swapXYAB)
++            gamepadCode = B_FLAG;
++          else
++            gamepadCode = A_FLAG;
++        }
+         else if (index == dev->map->btn_dpup)
+           gamepadCode = UP_FLAG;
+         else if (index == dev->map->btn_dpdown)
+@@ -608,6 +819,55 @@ static bool evdev_handle_event(struct input_event *ev,
        }
        break;
      }
@@ -346,7 +382,34 @@
  
      if (dev->map == NULL)
        break;
-@@ -758,8 +1002,10 @@ static int evdev_handle(int fd) {
+@@ -717,12 +977,14 @@ static bool evdev_handle_mapping_event(struct input_ev
+   case EV_ABS:
+     hat_index = (ev->code - ABS_HAT0X) / 2;
+     if (hat_index >= 0 && hat_index < 4) {
++      dev->hats_state[hat_index][0] = 0;
++      dev->hats_state[hat_index][1] = 0;
+       int hat_dir_index = (ev->code - ABS_HAT0X) % 2;
+       dev->hats_state[hat_index][hat_dir_index] = ev->value < 0 ? -1 : (ev->value == 0 ? 0 : 1);
+     }
+     if (currentAbs != NULL) {
+       struct input_abs_parms parms;
+-      evdev_init_parms(dev, &parms, ev->code);
++      evdev_init_parms(dev, &parms, dev->abs_map[ev->code]);
+ 
+       if (ev->value > parms.avg + parms.range/2) {
+         *currentAbs = dev->abs_map[ev->code];
+@@ -730,8 +992,9 @@ static bool evdev_handle_mapping_event(struct input_ev
+       } else if (ev->value < parms.avg - parms.range/2) {
+         *currentAbs = dev->abs_map[ev->code];
+         *currentReverse = true;
+-      } else if (ev->code == *currentAbs)
++      } else if (dev->abs_map[ev->code] == *currentAbs) {
+         return false;
++      }
+     } else if (currentHat != NULL) {
+       if (hat_index >= 0 && hat_index < 4) {
+         *currentHat = hat_index;
+@@ -758,8 +1021,10 @@ static int evdev_handle(int fd) {
        struct input_event ev;
        while ((rc = libevdev_next_event(devices[i].dev, LIBEVDEV_READ_FLAG_NORMAL, &ev)) >= 0) {
          if (rc == LIBEVDEV_READ_STATUS_SYNC)
@@ -358,12 +421,19 @@
            if (!handler(&ev, &devices[i]))
              return LOOP_RETURN;
          }
-@@ -775,6 +1021,40 @@ static int evdev_handle(int fd) {
+@@ -775,6 +1040,47 @@ static int evdev_handle(int fd) {
    return LOOP_OK;
  }
  
-+void is_use_kbdmux(bool fakegrab) {
-+  fakeGrab = fakegrab;
++void evdev_init_vars(bool isfakegrab, bool issdlgp, bool isswapxyab, bool isinputadded) {
++  fakeGrab = isfakegrab;
++  sdlgp = issdlgp;
++  swapXYAB = isswapxyab;
++  if (swapXYAB)
++
++  if (isinputadded)
++    return;
++
 +  const char* tryFirstInput = "/dev/input/event0";
 +  const char* trySecondInput = "/dev/input/event1";
 +
@@ -399,7 +469,7 @@
  void evdev_create(const char* device, struct mapping* mappings, bool verbose, int rotate) {
    int fd = open(device, O_RDWR|O_NONBLOCK);
    if (fd <= 0) {
-@@ -823,8 +1103,9 @@ void evdev_create(const char* device, struct mapping* 
+@@ -823,8 +1129,9 @@ void evdev_create(const char* device, struct mapping* 
      mappings = xwc_mapping;
  
    bool is_keyboard = libevdev_has_event_code(evdev, EV_KEY, KEY_Q);
@@ -411,7 +481,7 @@
  
    // This classification logic comes from SDL
    bool is_accelerometer =
-@@ -851,7 +1132,34 @@ void evdev_create(const char* device, struct mapping* 
+@@ -851,7 +1158,34 @@ void evdev_create(const char* device, struct mapping* 
       libevdev_has_event_code(evdev, EV_ABS, ABS_WHEEL) ||
       libevdev_has_event_code(evdev, EV_ABS, ABS_GAS) ||
       libevdev_has_event_code(evdev, EV_ABS, ABS_BRAKE));
@@ -446,18 +516,13 @@
    if (is_accelerometer) {
      if (verbose)
        printf("Ignoring accelerometer: %s\n", name);
-@@ -861,12 +1169,21 @@ void evdev_create(const char* device, struct mapping* 
+@@ -861,12 +1195,22 @@ void evdev_create(const char* device, struct mapping* 
    }
  
    if (is_gamepad) {
 -    evdev_gamepads++;
  
-     if (mappings == NULL) {
-       fprintf(stderr, "No mapping available for %s (%s) on %s\n", name, str_guid, device);
-       mappings = default_mapping;
-     }
-+
-+    if (!isNoSdl) {
++    if (sdlgp) {
 +      if (verbose)
 +        printf("Ignoring gamepad by evdev,instead by using sdl: %s\n", name);
 +      libevdev_free(evdev);
@@ -465,11 +530,17 @@
 +      return;
 +    }
 +
+     if (mappings == NULL) {
+       fprintf(stderr, "No mapping available for %s (%s) on %s\n", name, str_guid, device);
++      fprintf(stderr, "Please use 'moonlight map -input %s >> ~/.config/moonlight/gamecontrollerdb.txt' for %s to create mapping\n", device, name);
+       mappings = default_mapping;
+     }
++
 +    evdev_gamepads++;
    } else {
      if (verbose)
        printf("Not mapping %s as a gamepad\n", name);
-@@ -900,7 +1217,15 @@ void evdev_create(const char* device, struct mapping* 
+@@ -900,7 +1244,15 @@ void evdev_create(const char* device, struct mapping* 
    devices[dev].rotate = rotate;
    devices[dev].touchDownX = TOUCH_UP;
    devices[dev].touchDownY = TOUCH_UP;
@@ -485,7 +556,18 @@
    int nbuttons = 0;
    /* Count joystick buttons first like SDL does */
    for (int i = BTN_JOYSTICK; i < KEY_MAX; ++i) {
-@@ -939,7 +1264,7 @@ void evdev_create(const char* device, struct mapping* 
+@@ -917,8 +1269,9 @@ void evdev_create(const char* device, struct mapping* 
+     /* Skip hats */
+     if (i == ABS_HAT0X)
+       i = ABS_HAT3Y;
+-    else if (libevdev_has_event_code(devices[dev].dev, EV_ABS, i))
++    else if (libevdev_has_event_code(devices[dev].dev, EV_ABS, i)) {
+       devices[dev].abs_map[i] = naxes++;
++    }
+   }
+ 
+   devices[dev].controllerId = -1;
+@@ -939,7 +1292,7 @@ void evdev_create(const char* device, struct mapping* 
        fprintf(stderr, "Mapping for %s (%s) on %s is incorrect\n", name, str_guid, device);
    }
  
@@ -494,7 +576,60 @@
      if (ioctl(fd, EVIOCGRAB, 1) < 0) {
        fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
      }
-@@ -1065,11 +1390,7 @@ void evdev_start() {
+@@ -1009,6 +1362,7 @@ void evdev_map(char* device) {
+   struct libevdev *evdev = libevdev_new();
+   libevdev_set_fd(evdev, fd);
+   const char* name = libevdev_get_name(evdev);
++  iskeyboardgrab = true;
+ 
+   int16_t guid[8] = {0};
+   guid[0] = int16_to_le(libevdev_get_id_bustype(evdev));
+@@ -1027,6 +1381,8 @@ void evdev_map(char* device) {
+   libevdev_free(evdev);
+   close(fd);
+ 
++  if (ioctl(devices[0].fd, EVIOCGRAB, 1) < 0)
++    fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
+   handler = evdev_handle_mapping_event;
+ 
+   evdev_map_abs("Left Stick Right", &(map.abs_leftx), &(map.reverse_leftx));
+@@ -1037,25 +1393,27 @@ void evdev_map(char* device) {
+   evdev_map_abs("Right Stick Up", &(map.abs_righty), &(map.reverse_righty));
+   evdev_map_key("Right Stick Button", &(map.btn_rightstick));
+ 
+-  evdev_map_hatkey("D-Pad Right", &(map.hat_dpright), &(map.hat_dir_dpright), &(map.btn_dpright));
+-  evdev_map_hatkey("D-Pad Left", &(map.hat_dpleft), &(map.hat_dir_dpleft), &(map.btn_dpleft));
+-  evdev_map_hatkey("D-Pad Up", &(map.hat_dpup), &(map.hat_dir_dpup), &(map.btn_dpup));
+-  evdev_map_hatkey("D-Pad Down", &(map.hat_dpdown), &(map.hat_dir_dpdown), &(map.btn_dpdown));
++  evdev_map_hatkey("D-Pad(Hat) Right", &(map.hat_dpright), &(map.hat_dir_dpright), &(map.btn_dpright));
++  evdev_map_hatkey("D-Pad(Hat) Left", &(map.hat_dpleft), &(map.hat_dir_dpleft), &(map.btn_dpleft));
++  evdev_map_hatkey("D-Pad(Hat) Up", &(map.hat_dpup), &(map.hat_dir_dpup), &(map.btn_dpup));
++  evdev_map_hatkey("D-Pad(Hat) Down", &(map.hat_dpdown), &(map.hat_dir_dpdown), &(map.btn_dpdown));
+ 
+   evdev_map_key("Button X (1)", &(map.btn_x));
+   evdev_map_key("Button A (2)", &(map.btn_a));
+   evdev_map_key("Button B (3)", &(map.btn_b));
+   evdev_map_key("Button Y (4)", &(map.btn_y));
+-  evdev_map_key("Back Button", &(map.btn_back));
++  evdev_map_key("Back(Select) Button", &(map.btn_back));
+   evdev_map_key("Start Button", &(map.btn_start));
+-  evdev_map_key("Special Button", &(map.btn_guide));
++  evdev_map_key("Special(Home) Button", &(map.btn_guide));
+ 
+   bool ignored;
+   evdev_map_abskey("Left Trigger", &(map.abs_lefttrigger), &(map.btn_lefttrigger), &ignored);
+   evdev_map_abskey("Right Trigger", &(map.abs_righttrigger), &(map.btn_righttrigger), &ignored);
+ 
+-  evdev_map_key("Left Bumper", &(map.btn_leftshoulder));
+-  evdev_map_key("Right Bumper", &(map.btn_rightshoulder));
++  evdev_map_key("Left Bumper(Shoulder)", &(map.btn_leftshoulder));
++  evdev_map_key("Right Bumper(Shoulder)", &(map.btn_rightshoulder));
++  if (ioctl(devices[0].fd, EVIOCGRAB, 0) < 0)
++    fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
+   mapping_print(&map);
+ }
+ 
+@@ -1065,11 +1423,7 @@ void evdev_start() {
    // code looks for. For this reason, we wait to grab until
    // we're ready to take input events. Ctrl+C works up until
    // this point.
@@ -507,7 +642,7 @@
  
    // Any new input devices detected after this point will be grabbed immediately
    grabbingDevices = true;
-@@ -1123,3 +1444,422 @@ void evdev_rumble(unsigned short controller_id, unsign
+@@ -1123,3 +1477,446 @@ void evdev_rumble(unsigned short controller_id, unsign
    write(device->fd, (const void*) &event, sizeof(event));
    device->haptic_effect_id = effect.id;
  }
@@ -812,10 +947,27 @@
 +    if (event->cbutton.button >= SDL_arraysize(SDL_TO_LI_BUTTON_MAP))
 +      return SDL_NOTHING;
 +
++    int now_buttons = SDL_TO_LI_BUTTON_MAP[event->cbutton.button];
++    if (swapXYAB) {
++      switch (now_buttons) {
++      case A_FLAG:
++        now_buttons = B_FLAG;
++        break;
++      case B_FLAG:
++        now_buttons = A_FLAG;
++        break;
++      case X_FLAG:
++        now_buttons = Y_FLAG;
++        break;
++      case Y_FLAG:
++        now_buttons = X_FLAG;
++        break;
++      }
++    }
 +    if (event->type == SDL_CONTROLLERBUTTONDOWN)
-+      gamepad->buttons |= SDL_TO_LI_BUTTON_MAP[event->cbutton.button];
++      gamepad->buttons |= now_buttons;
 +    else
-+      gamepad->buttons &= ~SDL_TO_LI_BUTTON_MAP[event->cbutton.button];
++      gamepad->buttons &= ~now_buttons;
 +
 +    if ((gamepad->buttons & QUIT_BUTTONS) == QUIT_BUTTONS)
 +      return SDL_QUIT_APPLICATION;
@@ -916,6 +1068,13 @@
 +  for (int i = 0; i < SDL_NumJoysticks(); ++i) {
 +    if (SDL_IsGameController(i)) {
 +      add_gamepad(i);
++    }
++    else {
++      char guidStr[33];
++      SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i),
++                                guidStr, sizeof(guidStr));
++      const char* name = SDL_JoystickNameForIndex(i);
++      fprintf(stderr, "No mapping available for %s (%s).Use 'x11/antimicrox' or others to create mapping to ~/.config/moonlight/gamecontrollerdb.txt\n", name, guidStr);
 +    }
 +  }
 +

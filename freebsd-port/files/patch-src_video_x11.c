@@ -1,39 +1,38 @@
---- src/video/x11.c.orig	2024-02-20 04:01:31 UTC
+--- src/video/x11.c.orig	2024-08-01 13:37:02 UTC
 +++ src/video/x11.c
-@@ -17,91 +17,110 @@
+@@ -17,91 +17,106 @@
   * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
   */
  
++#include <stdbool.h>
++#include <stdio.h>
++#include <string.h>
 +
 +#include <X11/Xatom.h>
 +#include <X11/Xutil.h>
 +
-+#include "../input/x11.h"
-+#ifndef USE_X11
-+#define USE_X11 1
-+#endif
  #include "video.h"
 -#include "egl.h"
  #include "ffmpeg.h"
  #ifdef HAVE_VAAPI
  #include "ffmpeg_vaapi.h"
  #endif
- 
--#include "../input/x11.h"
+-
++#include "x11.h"
+ #include "../input/x11.h"
 -#include "../loop.h"
 -#include "../util.h"
-+#include "x11.h"
  
 -#include <X11/Xatom.h>
 -#include <X11/Xutil.h>
 -
- #include <stdbool.h>
- #include <stdio.h>
- #include <string.h>
+-#include <stdbool.h>
+-#include <stdio.h>
+-#include <string.h>
 -#include <unistd.h>
 -#include <fcntl.h>
 -#include <poll.h>
- 
+-
 -#define X11_VDPAU_ACCELERATION ENABLE_HARDWARE_ACCELERATION_1
 -#define X11_VAAPI_ACCELERATION ENABLE_HARDWARE_ACCELERATION_2
 -#define SLICES_PER_FRAME 4
@@ -65,13 +64,14 @@
 -    #endif
 +void x_vaapi_draw(AVFrame* frame, int width, int height) {
 +  #ifdef HAVE_VAAPI
-+  return vaapi_queue(frame, window, width, height);
++  vaapi_queue(frame, &window, width, height);
++  return;
 +  #endif
 +}
 +
 +bool x_test_vaapi_draw(AVFrame* frame, int width, int height) {
 +  #ifdef HAVE_VAAPI
-+  return test_vaapi_queue(frame, window, width, height);
++  return vaapi_queue(frame, &window, width, height) != 0 ? false : true;
 +  #endif
 +  return false;
 +}
@@ -79,7 +79,7 @@
 +void* x_get_display(const char *device) {
 +  if (display == NULL) {
 +#ifdef HAVE_VAAPI
-+    vaapi_display = (Display *) get_display_from_vaapi(true);
++    vaapi_display = (Display *) vaapi_get_display(true);
 +    if (device != NULL && vaapi_display != NULL) {
 +      isUseVaapiDisplay = true;
 +      display = vaapi_display;
@@ -158,7 +158,7 @@
    XMapWindow(display, window);
    XStoreName(display, window, "Moonlight");
  
-@@ -122,85 +141,15 @@ int x11_setup(int videoFormat, int width, int height, 
+@@ -122,85 +137,11 @@ int x11_setup(int videoFormat, int width, int height, 
    }
    XFlush(display);
  
@@ -192,15 +192,13 @@
  
 -int x11_setup_vdpau(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
 -  return x11_setup(videoFormat, width, height, redrawRate, context, drFlags | X11_VDPAU_ACCELERATION);
-+EGLSurface x_get_egl_surface(EGLDisplay display, EGLConfig config, void *data) {
-+  return eglCreateWindowSurface(display, config, window, data);
++void* x_get_window() {
++  return &window;
  }
- 
+-
 -int x11_setup_vaapi(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
 -  return x11_setup(videoFormat, width, height, redrawRate, context, drFlags | X11_VAAPI_ACCELERATION);
-+EGLDisplay x_get_egl_display() {
-+  return eglGetDisplay(display);
- }
+-}
 -
 -void x11_cleanup() {
 -  ffmpeg_destroy();

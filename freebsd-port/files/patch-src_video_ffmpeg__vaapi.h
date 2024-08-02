@@ -1,30 +1,20 @@
---- src/video/ffmpeg_vaapi.h.orig	2024-02-20 04:01:31 UTC
+--- src/video/ffmpeg_vaapi.h.orig	2024-08-01 13:37:02 UTC
 +++ src/video/ffmpeg_vaapi.h
-@@ -17,9 +17,26 @@
+@@ -17,9 +17,12 @@
   * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
   */
  
-+#include <EGL/egl.h>
- #include <va/va.h>
- #include <X11/Xlib.h>
-+#include <stdbool.h>
- 
+-#include <va/va.h>
+-#include <X11/Xlib.h>
+-
 -int vaapi_init_lib();
-+extern bool isYUV444;
-+extern int tryTimes;
-+extern enum AVPixelFormat sharedFmt;
-+
 +int vaapi_init_lib(const char *device);
  int vaapi_init(AVCodecContext* decoder_ctx);
- void vaapi_queue(AVFrame* dec_frame, Window win, int width, int height);
-+bool test_vaapi_queue(AVFrame* dec_frame, Window win, int width, int height);
-+void freeEGLImages(EGLDisplay dpy, EGLImage images[4]);
-+ssize_t exportEGLImages(AVFrame *frame, EGLDisplay dpy, bool eglIsSupportExtDmaBufMod,
-+                        EGLImage images[4]);
-+bool canExportSurfaceHandle(bool isTenBit);
-+bool isVaapiCanDirectRender();
-+bool isFrameFullRange(const AVFrame* frame);
-+int getFrameColorspace(const AVFrame* frame);
-+void *get_display_from_vaapi(bool isXDisplay);
-+int get_plane_number(enum AVPixelFormat pix_fmt);
-+char *get_yuv_order(enum AVPixelFormat pix_fmt);
+-void vaapi_queue(AVFrame* dec_frame, Window win, int width, int height);
++#ifdef HAVE_X11
++int vaapi_queue(AVFrame* dec_frame, void *window, int width, int height);
++#endif
++bool vaapi_can_export_surface_handle(bool isTenBit);
++bool vaapi_is_can_direct_render();
++void *vaapi_get_display(bool isXDisplay);
++bool vaapi_is_support_yuv444(int needyuv444);

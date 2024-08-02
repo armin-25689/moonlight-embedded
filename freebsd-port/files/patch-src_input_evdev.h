@@ -1,4 +1,4 @@
---- src/input/evdev.h.orig	2024-02-20 04:01:31 UTC
+--- src/input/evdev.h.orig	2024-08-01 13:37:02 UTC
 +++ src/input/evdev.h
 @@ -19,6 +19,9 @@
  
@@ -15,7 +15,7 @@
  void evdev_map(char* device);
  void evdev_rumble(unsigned short controller_id, unsigned short low_freq_motor, unsigned short high_freq_motor);
 +void evdev_trans_op_fd(int fd);
-+void is_use_kbdmux(bool fakegrab);
++void evdev_init_vars(bool isfakegrab, bool issdlgp, bool isswapxyab, bool isinputadded);
 +int x11_sdl_init(char* mappings);
 +void grab_window(bool grabstate);
 +void fake_grab_window(bool grabstate);

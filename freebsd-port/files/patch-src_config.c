@@ -1,4 +1,4 @@
---- src/config.c.orig	2024-02-20 04:01:31 UTC
+--- src/config.c.orig	2024-08-01 13:37:02 UTC
 +++ src/config.c
 @@ -37,12 +37,14 @@
  #define USER_PATHS "."
@@ -15,7 +15,7 @@
  
  static struct option long_options[] = {
    {"720", no_argument, NULL, 'a'},
-@@ -50,6 +52,7 @@ static struct option long_options[] = {
+@@ -50,11 +52,13 @@ static struct option long_options[] = {
    {"4k", no_argument, NULL, '0'},
    {"width", required_argument, NULL, 'c'},
    {"height", required_argument, NULL, 'd'},
@@ -23,7 +23,17 @@
    {"bitrate", required_argument, NULL, 'g'},
    {"packetsize", required_argument, NULL, 'h'},
    {"app", required_argument, NULL, 'i'},
-@@ -66,6 +69,8 @@ static struct option long_options[] = {
+   {"input", required_argument, NULL, 'j'},
+   {"mapping", required_argument, NULL, 'k'},
++  {"swapxyab", no_argument, NULL, 'K'},
+   {"nosops", no_argument, NULL, 'l'},
+   {"audio", required_argument, NULL, 'm'},
+   {"localaudio", no_argument, NULL, 'n'},
+@@ -63,9 +67,12 @@ static struct option long_options[] = {
+   {"save", required_argument, NULL, 'q'},
+   {"keydir", required_argument, NULL, 'r'},
+   {"remote", required_argument, NULL, 's'},
++  {"sdlgp", no_argument, NULL, 'S'},
    {"windowed", no_argument, NULL, 't'},
    {"surround", required_argument, NULL, 'u'},
    {"fps", required_argument, NULL, 'v'},
@@ -32,7 +42,7 @@
    {"codec", required_argument, NULL, 'x'},
    {"nounsupported", no_argument, NULL, 'y'},
    {"quitappafter", no_argument, NULL, '1'},
-@@ -151,6 +156,9 @@ static void parse_argument(int c, char* value, PCONFIG
+@@ -151,6 +158,9 @@ static void parse_argument(int c, char* value, PCONFIG
    case 'd':
      config->stream.height = atoi(value);
      break;
@@ -42,7 +52,28 @@
    case 'g':
      config->stream.bitrate = atoi(value);
      break;
-@@ -220,6 +228,10 @@ static void parse_argument(int c, char* value, PCONFIG
+@@ -176,6 +186,9 @@ static void parse_argument(int c, char* value, PCONFIG
+       exit(-1);
+     }
+     break;
++  case 'K':
++    config->swapxyab = true;
++    break;
+   case 'l':
+     config->sops = false;
+     break;
+@@ -207,7 +220,9 @@ static void parse_argument(int c, char* value, PCONFIG
+     else if (strcasecmp(value, "false") == 0 || strcasecmp(value, "no") == 0)
+       config->stream.streamingRemotely = STREAM_CFG_LOCAL;
+     break;
+-
++  case 'S':
++    config->sdlgp = true;
++    break;
+   case 't':
+     config->fullscreen = false;
+     break;
+@@ -220,6 +235,10 @@ static void parse_argument(int c, char* value, PCONFIG
    case 'v':
      config->stream.fps = atoi(value);
      break;
@@ -53,7 +84,7 @@
    case 'x':
      if (strcasecmp(value, "auto") == 0)
        config->codec = CODEC_UNSPECIFIED;
-@@ -281,19 +293,34 @@ bool config_file_parse(char* filename, PCONFIGURATION 
+@@ -281,19 +300,34 @@ bool config_file_parse(char* filename, PCONFIGURATION 
  
    char *line = NULL;
    size_t len = 0;
@@ -92,7 +123,14 @@
              else if (strcmp("true", value) == 0)
                parse_argument(long_options[i].val, NULL, config);
            }
-@@ -387,7 +414,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATI
+@@ -384,10 +418,14 @@ void config_parse(int argc, char* argv[], PCONFIGURATI
+   config->port = 47989;
+ 
+   config->inputsCount = 0;
++  config->yuv444 = false;
++  config->fakegrab = false;
++  config->sdlgp = false;
++  config->swapxyab = false;
    config->mapping = get_path("gamecontrollerdb.txt", getenv("XDG_DATA_DIRS"));
    config->key_dir[0] = 0;
  
@@ -101,7 +139,7 @@
    if (config_file)
      config_file_parse(config_file, config);
  
-@@ -438,5 +465,14 @@ void config_parse(int argc, char* argv[], PCONFIGURATI
+@@ -438,5 +476,14 @@ void config_parse(int argc, char* argv[], PCONFIGURATI
      } else /* if (config->stream.width * config->stream.height <= 3840 * 2160) */ {
        config->stream.bitrate = (int)(40000 * (config->stream.fps / 30.0));
      }

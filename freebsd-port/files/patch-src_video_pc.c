@@ -1,6 +1,6 @@
---- src/video/pc.c.orig	2024-07-08 12:32:22 UTC
+--- src/video/pc.c.orig	2024-08-01 13:37:02 UTC
 +++ src/video/pc.c
-@@ -0,0 +1,403 @@
+@@ -0,0 +1,425 @@
 +/*
 + * This file is part of Moonlight Embedded.
 + *
@@ -20,23 +20,7 @@
 + * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
 + */
 +
-+#include "egl.h"
-+#include "ffmpeg.h"
-+#ifdef HAVE_VAAPI
-+#include "ffmpeg_vaapi.h"
-+#endif
-+#include "video.h"
-+
-+#include "../input/x11.h"
-+#include "x11.h"
-+#ifdef HAVE_WAYLAND
-+#include "wayland.h"
-+#endif
-+
-+#include "../input/evdev.h"
-+#include "../loop.h"
-+#include "../util.h"
-+
++#include <libavcodec/avcodec.h>
 +#include <stdbool.h>
 +#include <stdio.h>
 +#include <stdlib.h>
@@ -45,23 +29,41 @@
 +#include <fcntl.h>
 +#include <poll.h>
 +
++#include "egl.h"
++#include "ffmpeg.h"
++#ifdef HAVE_VAAPI
++#include "ffmpeg_vaapi.h"
++#endif
++#include "video.h"
++
++#ifdef HAVE_X11
++#include "../input/x11.h"
++#include "x11.h"
++#endif
++#ifdef HAVE_WAYLAND
++#include "wayland.h"
++#endif
++
++#include "../input/evdev.h"
++#include "../loop.h"
++#include "../util.h"
++
 +#define X11_VDPAU_ACCELERATION ENABLE_HARDWARE_ACCELERATION_1
 +#define X11_VAAPI_ACCELERATION ENABLE_HARDWARE_ACCELERATION_2
 +#define SLICES_PER_FRAME 4
 +
-+#ifndef HAVE_VAAPI
-+static bool isYUV444 = false;
-+#endif
 +
++enum WindowType windowType = 0;
 +extern bool isUseGlExt;
++
 +static bool isTenBit;
-+static bool isWayland = false;
 +static bool firstDraw = true;
 +
 +static void* ffmpeg_buffer = NULL;
 +static size_t ffmpeg_buffer_size = 0;
 +
 +static void *display = NULL;
++static void *window = NULL;
 +
 +static int pipefd[2];
 +static int windowpipefd[2];
@@ -89,10 +91,10 @@
 +    return LOOP_RETURN;
 +#ifdef HAVE_WAYLAND
 +  } else if (strcmp(opCode, GRABCODE) == 0) {
-+    if (isWayland)
++    if (windowType & WAYLAND_WINDOW)
 +      wl_change_cursor("hide");
 +  } else if (strcmp(opCode, UNGRABCODE) == 0) {
-+    if (isWayland)
++    if (windowType & WAYLAND_WINDOW)
 +      wl_change_cursor("display");
 +#endif
 +  }
@@ -119,9 +121,9 @@
 +       return LOOP_RETURN;
 +     }
 +   }
-+  egl_draw(frame, frame->data);
++  egl_draw(frame);
 +  #ifdef HAVE_WAYLAND
-+  if (isWayland)
++  if (windowType & WAYLAND_WINDOW)
 +    wl_dispatch_event();
 +  #endif
 +  return LOOP_OK;
@@ -129,9 +131,9 @@
 +
 +static int vaapi_egl_draw (AVFrame* frame) {
 +#ifdef HAVE_VAAPI
-+  egl_draw_frame(frame);
++  egl_draw(frame);
 +  #ifdef HAVE_WAYLAND
-+  if (isWayland)
++  if (windowType & WAYLAND_WINDOW)
 +    wl_dispatch_event();
 +  #endif
 +  return LOOP_OK;
@@ -157,20 +159,21 @@
 +   }
 +#ifdef HAVE_VAAPI
 +  static int successTimes = 0;
-+  if (!isWayland && x_test_vaapi_draw(frame, display_width, display_height))
++#ifdef HAVE_X11
++  if (!(windowType & WAYLAND_WINDOW) && x_test_vaapi_draw(frame, display_width, display_height))
 +    successTimes++;
 +  else
 +    successTimes--;
++#else
++  successTimes = 0;
++#endif
 +
 +  if (successTimes <= 0) {
 +    int dcFlag = 0;
-+  #ifdef HAVE_WAYLAND
-+    dcFlag = isWayland ? (ffmpeg_decoder | WAYLAND) : ffmpeg_decoder;
-+  #endif
-+    egl_init(display, frame_width, frame_height, screen_width, screen_height, dcFlag);
++    egl_init(display, window, frame_width, frame_height, screen_width, screen_height, dcFlag);
 +
-+    if (!canExportSurfaceHandle(isTenBit) ||
-+        !isVaapiCanDirectRender()) {
++    if (!vaapi_can_export_surface_handle(isTenBit) ||
++        !vaapi_is_can_direct_render()) {
 +      isUseGlExt = false;
 +    }
 +
@@ -189,28 +192,41 @@
 +}
 +
 +int x11_init(bool vdpau, bool vaapi) {
-+#ifdef HAVE_WAYLAND
-+  isWayland = getenv("WAYLAND_DISPLAY") == NULL ? false : true;
-+#endif
++  windowType = getenv("WAYLAND_DISPLAY") != NULL ? WAYLAND_WINDOW : X11_WINDOW;
++  //windowType = getenv("WAYLAND_DISPLAY") != NULL ? WAYLAND_WINDOW : (getenv("DISPLAY") != NULL ? X11_WINDOW : GBM_WINDOW);
 +  const char *displayDevice = getenv("DISPLAY");
 +
 +  if (vaapi) {
 +  #ifdef HAVE_VAAPI
-+    if (!isWayland)
++    #ifdef HAVE_X11
++    if (!(windowType & WAYLAND_WINDOW))
 +      x_muilti_threads();
-+    if (vaapi_init_lib(isWayland ? NULL : displayDevice) != -1) {
-+    #ifdef HAVE_WAYLAND
-+      display = isWayland ? wl_get_display(NULL) : x_get_display(displayDevice);
-+    #else
-+      display = x_get_display(displayDevice);
 +    #endif
++    if (vaapi_init_lib(windowType & WAYLAND_WINDOW ? NULL : displayDevice) != -1) {
++      isSupportYuv444 = vaapi_is_support_yuv444(0);
++      switch (windowType) {
++      case X11_WINDOW:
++      #ifdef HAVE_X11
++        display = x_get_display(displayDevice);
++      #endif
++        break;
++      case WAYLAND_WINDOW:
++      #ifdef HAVE_WAYLAND
++        display = wl_get_display(NULL);
++      #endif
++        break;
++      case GBM_WINDOW:
++        break;
++      }
 +      return INIT_VAAPI;
 +    }
 +  #endif
 +  }
 +
++  // yuv444 is always supported by software decoder
++  isSupportYuv444 = true;
 +  #ifdef HAVE_WAYLAND
-+  if (isWayland) {
++  if (windowType & WAYLAND_WINDOW) {
 +    display = wl_get_display(NULL);
 +    if (!display)
 +      return 0;
@@ -219,10 +235,12 @@
 +    }
 +  }
 +  #endif
-+  isWayland = false;
++  windowType = X11_WINDOW;
++  #ifdef HAVE_X11
 +  x_muilti_threads();
 +
 +  display = x_get_display(displayDevice);
++  #endif
 +  if (!display)
 +    return 0;
 +
@@ -234,15 +252,20 @@
 +
 +  ensure_buf_size(&ffmpeg_buffer, &ffmpeg_buffer_size, INITIAL_DECODER_BUFFER_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
 +
-+  if (!isWayland) {
++  if (!(windowType & WAYLAND_WINDOW)) {
++#ifdef HAVE_X11
 +    if (x_setup(width, height, drFlags) == -1)
 +      return -1;
 +    x_get_resolution(&screen_width, &screen_height);
-+  } else {
++    window = x_get_window();
++#endif
++  }
++  else {
 +#ifdef HAVE_WAYLAND
 +    if (wayland_setup(width, height, drFlags) == -1)
 +      return -1;
 +    wl_get_resolution(&screen_width, &screen_height);
++    window = wl_get_window();
 +#endif
 +  }
 +  if (drFlags & DISPLAY_FULLSCREEN) {
@@ -263,9 +286,6 @@
 +  else
 +    avc_flags = SLICE_THREADING;
 +
-+  if (videoFormat & VIDEO_FORMAT_MASK_YUV444)
-+    isYUV444 = true;
-+
 +  if (ffmpeg_init(videoFormat, frame_width, frame_height, avc_flags, 2, SLICES_PER_FRAME) < 0) {
 +    fprintf(stderr, "Couldn't initialize video decoding\n");
 +    return -1;
@@ -278,14 +298,11 @@
 +  ffmpegArgs.thread_count = SLICES_PER_FRAME;
 +
 +  if (ffmpeg_decoder == SOFTWARE) {
-+    int dcFlag = ffmpeg_decoder;
-+    #ifdef HAVE_WAYLAND
-+    dcFlag = isWayland ? (ffmpeg_decoder | WAYLAND) : ffmpeg_decoder;
-+    #endif
++    int dcFlag = 0;
 +    #define FULLSCREEN 0x08
 +    if (drFlags & DISPLAY_FULLSCREEN)
 +      dcFlag |= FULLSCREEN;
-+    egl_init(display, frame_width, frame_height, screen_width, screen_height, dcFlag);
++    egl_init(display, window, frame_width, frame_height, screen_width, screen_height, dcFlag);
 +    #undef FULLSCREEN
 +    render_handler = software_draw;
 +  } else {
@@ -306,7 +323,7 @@
 +
 +  evdev_trans_op_fd(windowpipefd[1]);
 +#ifdef HAVE_WAYLAND
-+  if (isWayland) {
++  if (windowType & WAYLAND_WINDOW) {
 +    wl_trans_op_fd(windowpipefd[1]);
 +    wl_setup_post();
 +  }
@@ -334,11 +351,13 @@
 +  #endif
 +  ffmpeg_destroy();
 +  #ifdef HAVE_WAYLAND
-+  if (isWayland)
++  if (windowType & WAYLAND_WINDOW)
 +    wl_close_display();
 +  else
 +  #endif
++  #ifdef HAVE_X11
 +    x_close_display();
++  #endif
 +}
 +
 +int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
@@ -361,16 +380,19 @@
 +      return DR_NEED_IDR;
 +    }
 +#ifdef HAVE_VAAPI
++    #ifdef HAVE_X11
 +    // try to change sw_format for gpu decoder
-+    if (!isWayland) {
++    if (!(windowType & WAYLAND_WINDOW)) {
 +      grab_window(false);
 +      x11_input_remove();
 +      x_close_display();
 +    }
++    #endif
 +    ffmpeg_destroy();
 +    usleep(10000);
-+    tryTimes--;
-+    if (x11_init(true, true) <= INIT_EGL || (!isWayland && x_setup(ffmpegArgs.width, ffmpegArgs.height, ffmpegArgs.drFlags) <= -1) || ffmpeg_init(ffmpegArgs.videoFormat, ffmpegArgs.width, ffmpegArgs.height, ffmpegArgs.avc_flags, ffmpegArgs.buffer_count, ffmpegArgs.thread_count) < 0 || tryTimes <= 0)
++    if (x11_init(true, true) <= INIT_EGL || 
++        (!(windowType & WAYLAND_WINDOW) && x_setup(ffmpegArgs.width, ffmpegArgs.height, ffmpegArgs.drFlags) <= -1) ||
++        ffmpeg_init(ffmpegArgs.videoFormat, ffmpegArgs.width, ffmpegArgs.height, ffmpegArgs.avc_flags, ffmpegArgs.buffer_count, ffmpegArgs.thread_count) < 0)
 +#endif
 +      write(windowpipefd[1], &quitRequest, sizeof(char *));
 +    return DR_NEED_IDR;
