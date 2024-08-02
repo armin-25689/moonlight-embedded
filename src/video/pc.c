@@ -139,10 +139,12 @@ static int vaapi_egl_draw (AVFrame* frame) {
 }
 
 static int vaapi_va_put (AVFrame* frame) {
-  #ifdef HAVE_VAAPI
+#ifdef HAVE_VAAPI
+  #ifdef HAVE_X11
   x_vaapi_draw(frame, display_width, display_height);
   return LOOP_OK;
   #endif
+#endif
   return LOOP_RETURN;
 }
 
@@ -157,12 +159,12 @@ static int test_vaapi_va_put (AVFrame* frame) {
 #ifdef HAVE_VAAPI
   static int successTimes = 0;
 #ifdef HAVE_X11
+/*
   if (!(windowType & WAYLAND_WINDOW) && x_test_vaapi_draw(frame, display_width, display_height))
     successTimes++;
   else
     successTimes--;
-#else
-  successTimes = 0;
+*/
 #endif
 
   if (successTimes <= 0) {
@@ -199,7 +201,7 @@ int x11_init(bool vdpau, bool vaapi) {
     if (!(windowType & WAYLAND_WINDOW))
       x_muilti_threads();
     #endif
-    if (vaapi_init_lib(windowType & WAYLAND_WINDOW ? NULL : displayDevice) != -1) {
+    if (vaapi_init_lib(NULL) != -1) {
       isSupportYuv444 = vaapi_is_support_yuv444(0);
       switch (windowType) {
       case X11_WINDOW:

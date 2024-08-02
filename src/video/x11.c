@@ -57,6 +57,7 @@ bool x_test_vaapi_draw(AVFrame* frame, int width, int height) {
 
 void* x_get_display(const char *device) {
   if (display == NULL) {
+/*
 #ifdef HAVE_VAAPI
     vaapi_display = (Display *) vaapi_get_display(true);
     if (device != NULL && vaapi_display != NULL) {
@@ -66,6 +67,7 @@ void* x_get_display(const char *device) {
     }
     else
 #endif
+*/
     {
       isUseVaapiDisplay = false;
       display = XOpenDisplay(device);
