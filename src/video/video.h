@@ -48,3 +48,6 @@ extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vdpau;
 #ifdef HAVE_SDL
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_sdl;
 #endif
+
+extern bool isSupportYuv444;
+extern bool wantYuv444;

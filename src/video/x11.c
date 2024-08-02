@@ -17,25 +17,20 @@
  * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
 
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
 
-#include "../input/x11.h"
-#ifndef USE_X11
-#define USE_X11 1
-#endif
 #include "video.h"
 #include "ffmpeg.h"
 #ifdef HAVE_VAAPI
 #include "ffmpeg_vaapi.h"
 #endif
-
 #include "x11.h"
-
-#include <stdbool.h>
-#include <stdio.h>
-#include <string.h>
+#include "../input/x11.h"
 
 static Display *display = NULL;
 static Display *vaapi_display = NULL;
@@ -48,13 +43,14 @@ static bool isUseVaapiDisplay = false;
 
 void x_vaapi_draw(AVFrame* frame, int width, int height) {
   #ifdef HAVE_VAAPI
-  return vaapi_queue(frame, window, width, height);
+  vaapi_queue(frame, &window, width, height);
+  return;
   #endif
 }
 
 bool x_test_vaapi_draw(AVFrame* frame, int width, int height) {
   #ifdef HAVE_VAAPI
-  return test_vaapi_queue(frame, window, width, height);
+  return vaapi_queue(frame, &window, width, height) != 0 ? false : true;
   #endif
   return false;
 }
@@ -62,7 +58,7 @@ bool x_test_vaapi_draw(AVFrame* frame, int width, int height) {
 void* x_get_display(const char *device) {
   if (display == NULL) {
 #ifdef HAVE_VAAPI
-    vaapi_display = (Display *) get_display_from_vaapi(true);
+    vaapi_display = (Display *) vaapi_get_display(true);
     if (device != NULL && vaapi_display != NULL) {
       isUseVaapiDisplay = true;
       display = vaapi_display;
@@ -146,10 +142,6 @@ int x_setup(int width, int height, int drFlags) {
   return 0;
 }
 
-EGLSurface x_get_egl_surface(EGLDisplay display, EGLConfig config, void *data) {
-  return eglCreateWindowSurface(display, config, window, data);
-}
-
-EGLDisplay x_get_egl_display() {
-  return eglGetDisplay(display);
+void* x_get_window() {
+  return &window;
 }

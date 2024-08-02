@@ -58,6 +58,7 @@ static struct option long_options[] = {
   {"app", required_argument, NULL, 'i'},
   {"input", required_argument, NULL, 'j'},
   {"mapping", required_argument, NULL, 'k'},
+  {"swapxyab", no_argument, NULL, 'K'},
   {"nosops", no_argument, NULL, 'l'},
   {"audio", required_argument, NULL, 'm'},
   {"localaudio", no_argument, NULL, 'n'},
@@ -66,6 +67,7 @@ static struct option long_options[] = {
   {"save", required_argument, NULL, 'q'},
   {"keydir", required_argument, NULL, 'r'},
   {"remote", required_argument, NULL, 's'},
+  {"sdlgp", no_argument, NULL, 'S'},
   {"windowed", no_argument, NULL, 't'},
   {"surround", required_argument, NULL, 'u'},
   {"fps", required_argument, NULL, 'v'},
@@ -184,6 +186,9 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
       exit(-1);
     }
     break;
+  case 'K':
+    config->swapxyab = true;
+    break;
   case 'l':
     config->sops = false;
     break;
@@ -215,7 +220,9 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
     else if (strcasecmp(value, "false") == 0 || strcasecmp(value, "no") == 0)
       config->stream.streamingRemotely = STREAM_CFG_LOCAL;
     break;
-
+  case 'S':
+    config->sdlgp = true;
+    break;
   case 't':
     config->fullscreen = false;
     break;
@@ -411,6 +418,10 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->port = 47989;
 
   config->inputsCount = 0;
+  config->yuv444 = false;
+  config->fakegrab = false;
+  config->sdlgp = false;
+  config->swapxyab = false;
   config->mapping = get_path("gamecontrollerdb.txt", getenv("XDG_DATA_DIRS"));
   config->key_dir[0] = 0;
 

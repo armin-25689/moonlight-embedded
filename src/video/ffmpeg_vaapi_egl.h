@@ -17,12 +17,9 @@
  * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
  */
 
-int vaapi_init_lib(const char *device);
-int vaapi_init(AVCodecContext* decoder_ctx);
-#ifdef HAVE_X11
-int vaapi_queue(AVFrame* dec_frame, void *window, int width, int height);
-#endif
-bool vaapi_can_export_surface_handle(bool isTenBit);
-bool vaapi_is_can_direct_render();
-void *vaapi_get_display(bool isXDisplay);
-bool vaapi_is_support_yuv444(int needyuv444);
+enum PixelFormatOrder { VUYX_ORDER = 0, XVYU_ORDER, YUVX_ORDER };
+
+void vaapi_free_egl_images(EGLDisplay dpy, EGLImage images[4]);
+ssize_t vaapi_export_egl_images(AVFrame *frame, EGLDisplay dpy, bool eglIsSupportExtDmaBufMod,
+                        EGLImage images[4]);
+int vaapi_get_plane_info(enum AVPixelFormat **pix_fmt, int *plane_num, enum PixelFormatOrder *plane_order);

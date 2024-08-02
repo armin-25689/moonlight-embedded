@@ -17,26 +17,27 @@
  * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "egl.h"
-#include <GLES3/gl3.h>
-#include <GLES2/gl2ext.h>
-
-#ifdef HAVE_VAAPI
-#include "ffmpeg_vaapi.h"
-#endif
-#ifdef HAVE_WAYLAND
-#include "wayland.h"
-#endif
-#include "x11.h"
-
-#include <Limelight.h>
-
-#include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <stdlib.h>
+
+#include <EGL/egl.h>
+#include <GLES3/gl3.h>
+#include <GLES2/gl2ext.h>
+#include <libavcodec/avcodec.h>
+
+#include <Limelight.h>
+
+#include "egl.h"
+#include "ffmpeg.h"
+#ifdef HAVE_VAAPI
+#include "ffmpeg_vaapi_egl.h"
+#endif
+// include glsl
+#include "egl_glsl.h"
 
 #ifndef EGL_PLATFORM_X11_KHR
 #define EGL_PLATFORM_X11_KHR 0x31D5
@@ -47,173 +48,27 @@
 #ifndef EGL_PLATFORM_GBM_KHR
 #define EGL_PLATFORM_GBM_KHR 0x31D7
 #endif
-#define SOFTWARE 0
-#define FRAG_PARAM_YUVMAT 0
-#define FRAG_PARAM_OFFSET 1
-#define FRAG_PARAM_YUVORDER 2
-#define FRAG_PARAM_PLANE0 3
-#define FRAG_PARAM_PLANE1 4
-#define FRAG_PARAM_PLANE2 5
-#define FRAG_PARAM_CUTWIDTH 6
+#ifndef EGL_CONTEXT_MAJOR_VERSION_KHR
+#define EGL_CONTEXT_MAJOR_VERSION_KHR 0x3098
+#endif
+#ifndef EGL_CONTEXT_MINOR_VERSION_KHR
+#define EGL_CONTEXT_MINOR_VERSION_KHR 0x30FB
+#endif
+#ifndef EGL_OPENGL_ES3_BIT_KHR
+#define EGL_OPENGL_ES3_BIT_KHR 0x0040
+#endif
 
 bool isUseGlExt = false;
-#ifndef HAVE_VAAPI
-static bool isYUV444 = false;
-static enum AVPixelFormat sharedFmt = AV_PIX_FMT_NONE;
-#endif
-static bool isWayland = false;
-static const int egl_max_planes = 4;
-static enum AVPixelFormat last_pix_fmt = AV_PIX_FMT_NONE;
 
 static struct EXTSTATE {
   bool eglIsSupportExtDmaBuf;
   bool eglIsSupportExtDmaBufMod;
   bool eglIsSupportExtKHR;
   bool eglIsSupportImageOES;
-  bool eglIsSupportCreateImage;
 } ExtState;
 
 static const EGLint context_attributes[] = { EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 0,  EGL_NONE };
-
-static const char* vertex_source = {
-"#version 300 es\n"
-"\n"
-"layout (location = 0) in vec2 position;\n"
-"layout (location = 1) in vec2 aTexCoord;\n"
-"out vec2 tex_position;\n"
-"\n"
-"void main() {\n"
-"  gl_Position = vec4(position, 0, 1);\n"
-"  tex_position = aTexCoord;\n\n"
-"}\n"
-};
-
-static const char* fragment_source_3plane = {
-"#version 300 es\n"
-"precision mediump float;\n"
-"out vec4 FragColor;\n"
-"\n"
-"in vec2 tex_position;\n"
-"\n"
-"uniform mat3 yuvmat;\n"
-"uniform vec3 offset;\n"
-"uniform ivec4 yuvorder;\n"
-"uniform sampler2D ymap;\n"
-"uniform sampler2D umap;\n"
-"uniform sampler2D vmap;\n"
-"uniform float cutwidth;\n"
-"\n"
-"void main() {\n"
-"  if (tex_position.x > cutwidth) {\n"
-"    FragColor = vec4(0.0f,0.0f,0.0f,1.0f);\n"
-"    return;\n"
-"  }\n"
-"  vec3 YCbCr = vec3(\n"
-"    texture2D(ymap, tex_position).r,\n"
-"    texture2D(umap, tex_position).r,\n"
-"    texture2D(vmap, tex_position).r\n"
-"  );\n"
-"\n"
-"  YCbCr -= offset;\n"
-"  FragColor = vec4(clamp(yuvmat * YCbCr, 0.0, 1.0), 1.0f);\n"
-"}\n"
-};
-
-static const char* fragment_source_nv12 = {
-"#version 300 es\n"
-"precision mediump float;\n"
-"out vec4 FragColor;\n"
-"\n"
-"in vec2 tex_position;\n"
-"\n"
-"uniform mat3 yuvmat;\n"
-"uniform vec3 offset;\n"
-"uniform ivec4 yuvorder;\n"
-"uniform sampler2D plane1;\n"
-"uniform sampler2D plane2;\n"
-"\n"
-"void main() {\n"
-"	vec3 YCbCr = vec3(\n"
-"		texture2D(plane1, tex_position)[0],\n"
-"		texture2D(plane2, tex_position).xy\n"
-"	);\n"
-"\n"
-"	YCbCr -= offset;\n"
-"	FragColor = vec4(clamp(yuvmat * YCbCr, 0.0, 1.0), 1.0f);\n"
-"}\n"
-};
-
-static const char* fragment_source_packed = {
-"#version 300 es\n"
-"precision mediump float;\n"
-"out vec4 FragColor;\n"
-"\n"
-"in vec2 tex_position;\n"
-"\n"
-"uniform mat3 yuvmat;\n"
-"uniform vec3 offset;\n"
-"uniform ivec4 yuvorder;\n"
-"uniform sampler2D vuyamap;\n"
-"\n"
-"void main() {\n"
-"  vec4 vuya = texture2D(vuyamap, tex_position);\n"
-"  vec3 YCbCr = vec3(vuya[yuvorder[0]], vuya[yuvorder[1]], vuya[yuvorder[2]]);"
-"\n"
-"  YCbCr -= offset;\n"
-"  FragColor = vec4(clamp(yuvmat * YCbCr, 0.0, 1.0), 1.0f);\n"
-"}\n"
-};
-
-static const float vertices[] = {
- // pos .... // tex coords
- 1.0f, 1.0f, 1.0f, 0.0f,
- 1.0f, -1.0f, 1.0f, 1.0f,
- -1.0f, -1.0f, 0.0f, 1.0f,
- -1.0f, 1.0f, 0.0f, 0.0f,
-};
-
-static const GLuint elements[] = {
-  0, 1, 2,
-  2, 3, 0
-};
-
-static const float limitedOffsets[] = { 16.0f / 255.0f, 128.0f / 255.0f, 128.0f / 255.0f };
-static const float fullOffsets[] = { 0.0f, 128.0f / 255.0f, 128.0f / 255.0f };
-static const float bt601Lim[] = {
-  1.1644f, 1.1644f, 1.1644f,
-  0.0f, -0.3917f, 2.0172f,
-  1.5960f, -0.8129f, 0.0f
-};
-static const float bt601Full[] = {
-    1.0f, 1.0f, 1.0f,
-    0.0f, -0.3441f, 1.7720f,
-    1.4020f, -0.7141f, 0.0f
-};
-static const float bt709Lim[] = {
-  1.1644f, 1.1644f, 1.1644f,
-  0.0f, -0.2132f, 2.1124f,
-  1.7927f, -0.5329f, 0.0f
-};
-static const float bt709Full[] = {
-  1.0f, 1.0f, 1.0f,
-  0.0f, -0.1873f, 1.8556f,
-  1.5748f, -0.4681f, 0.0f
-};
-static const float bt2020Lim[] = {
-  1.1644f, 1.1644f, 1.1644f,
-  0.0f, -0.1874f, 2.1418f,
-  1.6781f, -0.6505f, 0.0f
-};
-static const float bt2020Full[] = {
-  1.0f, 1.0f, 1.0f,
-  0.0f, -0.1646f, 1.8814f,
-  1.4746f, -0.5714f, 0.0f
-};
-static const int vuyx[] = { 2, 1, 0, 3 };
-// xv30 xv36
-static const int xvyu[] = { 1, 0, 2, 3 };
-static const int yuvx[] = { 0, 1, 2, 3 };
-
+//static const EGLint context_attributes[] = { EGL_CONTEXT_MAJOR_VERSION_KHR, 3, EGL_CONTEXT_MINOR_VERSION_KHR, 0,  EGL_NONE };
 static EGLDisplay display;
 static EGLSurface surface;
 static EGLContext context;
@@ -224,28 +79,34 @@ static bool current;
 
 static GLuint VAO;
 static GLuint texture_id[4], texture_uniform[7];
-static GLuint shader_program_yuv,shader_program_packed,shader_program_nv12;
+static GLuint shader_program_packed, shader_program_nv12, shader_program_yuv;
+// for planeNum 0, 1, 2, 3, 4
+static GLuint *shaders[5] = { &shader_program_nv12, &shader_program_packed, &shader_program_nv12, &shader_program_yuv, &shader_program_nv12 };
 
 static const float *colorOffsets;
 static const float *colorspace;
-static const int *yuvOrder;
+static int egl_max_planes = 4;
 static int planeNum = 4;
+static const int *yuvOrder;
+// initialize differet format for soft_pix_fmt and last_pix_fmt
+static enum AVPixelFormat soft_pix_fmt = AV_PIX_FMT_YUV420P;
+static enum AVPixelFormat last_pix_fmt = AV_PIX_FMT_NONE;
+static enum AVPixelFormat *sharedFmt = &soft_pix_fmt;
 
 static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES;
+static PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC glEGLImageTargetTexStorageEXT;
+// (GLenum target, GLeglImageOES image, const GLint* attrib_list);
 
-static void chooseColorConfig(const AVFrame* frame)
+static void choose_color_config(const AVFrame* frame)
 {
   bool fullRange = false;
-#ifdef HAVE_VAAPI
-  if (isFrameFullRange(frame)) {
+  if (ffmpeg_is_frame_full_range(frame)) {
     fullRange = true;
     colorOffsets = fullOffsets;
   } else {
-#endif
     colorOffsets = limitedOffsets;
-#ifdef HAVE_VAAPI
   }
-  switch (getFrameColorspace(frame)) {
+  switch (ffmpeg_get_frame_colorspace(frame)) {
   case COLORSPACE_REC_601:
     colorspace = fullRange ? bt601Full : bt601Lim;
     break;
@@ -259,30 +120,22 @@ static void chooseColorConfig(const AVFrame* frame)
     colorspace = bt601Lim;
     break;
   }
-  planeNum = get_plane_number(sharedFmt);
-  const char *yuvorderchar = get_yuv_order(-1);
-  if (strcmp("yuvx",yuvorderchar) == 0 ||
-      strcmp("yuva",yuvorderchar) == 0 ||
-      strcmp("ayuv",yuvorderchar) == 0) // yuv order
-    yuvOrder = yuvx; 
-  else if (strcmp("vuyx",yuvorderchar) == 0 ||
-           strcmp("vuya",yuvorderchar) == 0) {// vuyx
-    yuvOrder = vuyx; 
+#ifdef HAVE_VAAPI
+  if (ffmpeg_decoder != SOFTWARE) {
+    enum PixelFormatOrder planeOrder;
+    vaapi_get_plane_info(&sharedFmt, &planeNum, &planeOrder);
+    yuvOrder = plane_order[planeOrder];
+    return;
   }
-  else if (strcmp("xvyu",yuvorderchar) == 0 ||
-           strcmp("avyu",yuvorderchar) == 0) // xv30
-    yuvOrder = xvyu; 
-  else
-    yuvOrder = yuvx; 
-#else
-  // default config
-  colorspace = bt601Lim;
-  planeNum = 3; 
-  yuvOrder = yuvx; 
 #endif
+  // only x11 platform
+  *sharedFmt = isYUV444 ? AV_PIX_FMT_YUV444P : AV_PIX_FMT_YUV420P;
+  yuvOrder = plane_order[YUVX_ORDER]; 
+  planeNum = 3;
+  return;
 }
 
-static bool isGlExtensionSupport(const char *extensionname) {
+static bool is_gl_extension_support(const char *extensionname) {
   char firstChar = *extensionname;
   const char *allExtensions = NULL;
 
@@ -307,9 +160,11 @@ static bool isGlExtensionSupport(const char *extensionname) {
       const char *glExtensionName = NULL;
       for (GLuint i = 0; i < glExtensionsNum; i++) {
         glExtensionName = glGetStringi(GL_EXTENSIONS, i);
-        if (glExtensionName != NULL)
-          if (strcmp(extensionname, glExtensionName) == 0)
+        if (glExtensionName != NULL) {
+          if (strcmp(extensionname, glExtensionName) == 0) {
             return true;
+          }
+        }
       }
     }
   }
@@ -317,112 +172,81 @@ static bool isGlExtensionSupport(const char *extensionname) {
   return false;
 }
 
-static bool isUseExt(struct EXTSTATE *extState) {
-  if (isGlExtensionSupport("EGL_KHR_image_base") || isGlExtensionSupport("EGL_KHR_image")) {
-    extState->eglIsSupportExtKHR = true;
+static bool is_use_ext(struct EXTSTATE *extState) {
+  // egl_khr_image_base or egl_khr_image is at leaset one exist
+  if (!is_gl_extension_support("EGL_KHR_image_base") && !is_gl_extension_support("EGL_KHR_image")) {
+    fprintf(stderr, "EGL: could not support rendering by egl because of no EGL_KHR_image_base or EGL_KHR_image extensions\n" );
+    return false;
   }
 
-  if (isGlExtensionSupport("GL_OES_EGL_image")) {
-    extState->eglIsSupportImageOES = true;
+  // gl_oes_egl_image require egl_khr_image_base or egl_khr_image,and needed for glegliamgetargettexture2does function
+  if (!is_gl_extension_support("GL_OES_EGL_image")) {
+    fprintf(stderr, "EGL: could not support rendering by egl because of no GL_OES_EGL_image extensions\n" );
+    return false;
+  }
+  else {
+    glEGLImageTargetTexture2DOES = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    if (glEGLImageTargetTexture2DOES == NULL) {
+      return false;
+    }
   }
 
-  glEGLImageTargetTexture2DOES = (typeof(glEGLImageTargetTexture2DOES))eglGetProcAddress("glEGLImageTargetTexture2DOES");
-  if (glEGLImageTargetTexture2DOES == NULL) {
-    extState->eglIsSupportImageOES = false;
+  if (!is_gl_extension_support("GL_EXT_EGL_image_storage")) {
+    fprintf(stderr, "EGL: could not support rendering by egl because of no GL_EXT_EGL_image_storage extensions\n" );
+  }
+  else {
+    glEGLImageTargetTexStorageEXT = (PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC)eglGetProcAddress("glEGLImageTargetTexStorageEXT");
   }
   
   // For vaapi-EGL
-  if (isGlExtensionSupport("EGL_EXT_image_dma_buf_import")) {
+  if (is_gl_extension_support("EGL_EXT_image_dma_buf_import")) {
     extState->eglIsSupportExtDmaBuf = true;
   }
-
-  if (isGlExtensionSupport("EGL_EXT_image_dma_buf_import_modifiers")) {
+  if (is_gl_extension_support("EGL_EXT_image_dma_buf_import_modifiers")) {
     extState->eglIsSupportExtDmaBufMod = true; 
   }
 
-  if (eglGetProcAddress("eglCreateImage") == NULL) {
-    extState->eglIsSupportCreateImage = false;
-  } else {
-    extState->eglIsSupportCreateImage = true;
-  }
-
-  if (extState->eglIsSupportExtDmaBuf && extState->eglIsSupportExtDmaBufMod &&
-       extState->eglIsSupportExtKHR && extState->eglIsSupportImageOES &&
-       extState->eglIsSupportCreateImage)
-    return true;
-
-  return false;
+  return true;
 }
 
-static int generate_vertex_shader(GLuint *vertex_shader, const char* vertex_source) {
-  *vertex_shader = glCreateShader(GL_VERTEX_SHADER);
-  glShaderSource(*vertex_shader, 1, &vertex_source, NULL);
-  glCompileShader(*vertex_shader);
+static int generate_shader(GLuint *dst_shader, const char* dst_source, int gl_shader_type) {
+  *dst_shader = glCreateShader(gl_shader_type);
+  glShaderSource(*dst_shader, 1, &dst_source, NULL);
+  glCompileShader(*dst_shader);
   // try to display compile errpr
   GLint status;
   char szLog[1024] = {0};
   GLsizei logLen = 0;
-  glGetShaderiv(*vertex_shader,GL_COMPILE_STATUS,&status);
-  glGetShaderInfoLog(*vertex_shader,1024,&logLen,szLog);
+  glGetShaderiv(*dst_shader, GL_COMPILE_STATUS, &status);
+  glGetShaderInfoLog(*dst_shader, 1024, &logLen,szLog);
   if(!status) {
-   printf("vertex_shader Compile error:%s\n", szLog);
-   return -1;
-  }
-  return 0;
-}
-static int generate_fragment_shader(GLuint *fragment_shader, const char* fragment_source) {
-  *fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
-  glShaderSource(*fragment_shader, 1, &fragment_source, NULL);
-  glCompileShader(*fragment_shader);
-  // try to display compile errpr
-  GLint status;
-  char szLog[1024] = {0};
-  GLsizei logLen = 0;
-  glGetShaderiv(*fragment_shader,GL_COMPILE_STATUS,&status);
-  glGetShaderInfoLog(*fragment_shader,1024,&logLen,szLog);
-  if(!status) {
-   printf("fragment_shader Compile error:%s\n", szLog);
+   printf("Shader(type:%d) compile error:%s\n", gl_shader_type, szLog);
    return -1;
   }
   return 0;
 }
 
-void egl_init(void *native_display, int frame_width, int frame_height, int screen_width, int screen_height, int dcFlag) {
+void egl_init(void *native_display, void *native_window, int frame_width, int frame_height, int screen_width, int screen_height, int dcFlag) {
   // glteximage2d needs the width that must to be a multiple of 64 because it has a 
   // minimum width of 64
+  // also can use frame->linesize[0] to set width
   int widthMulti = isYUV444 ? 64 : 128;
   if (frame_width % widthMulti != 0)
     width = ((int)(frame_width / widthMulti)) * widthMulti + widthMulti;
   else
     width = frame_width;
   height = frame_height;
-  int ffmpeg_decoder = dcFlag;
   current = false;
   #define FULLSCREEN 0x08
   bool isFullScreen = dcFlag & FULLSCREEN ? true : false;
-  ffmpeg_decoder = isFullScreen ? (ffmpeg_decoder - FULLSCREEN) : ffmpeg_decoder;
   #undef FULLSCREEN
-
-#ifdef HAVE_WAYLAND
-  isWayland = (dcFlag & WAYLAND) == WAYLAND ? true : false;
-  ffmpeg_decoder = isWayland ? (ffmpeg_decoder - WAYLAND) : ffmpeg_decoder;
-#else
-  isWayland = false;
-#endif
 
   // get an EGL display connection
   PFNEGLGETPLATFORMDISPLAYPROC eglGetPlatformDisplayProc;
   eglGetPlatformDisplayProc = (typeof(eglGetPlatformDisplayProc)) eglGetProcAddress("eglGetPlatformDisplay");
   if (eglGetPlatformDisplayProc != NULL) {
-    int platformFlag = isWayland ? EGL_PLATFORM_WAYLAND_KHR : EGL_PLATFORM_X11_KHR;
+    int platformFlag = windowType & WAYLAND_WINDOW ? EGL_PLATFORM_WAYLAND_KHR : (windowType & GBM_WINDOW ? EGL_PLATFORM_GBM_KHR : EGL_PLATFORM_X11_KHR);
     display = eglGetPlatformDisplayProc(platformFlag, native_display, NULL); //EGL_PLATFORM_X11_KHR for x11;EGL_PLATFORM_GBM_KHR for drm
-  }
-  if (display == EGL_NO_DISPLAY) {
-#ifdef HAVE_WAYLAND
-    display = isWayland ? wl_get_egl_display() : x_get_egl_display();
-#else
-    display = x_get_egl_display();
-#endif
   }
   if (display == EGL_NO_DISPLAY) {
     fprintf( stderr, "EGL: error get display\n" );
@@ -440,8 +264,9 @@ void egl_init(void *native_display, int frame_width, int frame_height, int scree
   // get our config from the config class
   EGLConfig config = NULL;
   const EGLint *attribute_list;
-  static const EGLint attribute_list_8bit[] = { EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_DEPTH_SIZE, 24, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER, EGL_NONE };
-  //static const EGLint attribute_list_10bit[] = { EGL_RED_SIZE, 10, EGL_GREEN_SIZE, 10, EGL_BLUE_SIZE, 10, EGL_ALPHA_SIZE, 2, EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_DEPTH_SIZE, 32, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER, EGL_NONE };
+  //static const EGLint attribute_list_8bit[] = { EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_DEPTH_SIZE, 24, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR, EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER, EGL_NONE };
+  static const EGLint attribute_list_8bit[] = { EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_DEPTH_SIZE, 24, EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER, EGL_NONE };
+  //static const EGLint attribute_list_10bit[] = { EGL_RED_SIZE, 10, EGL_GREEN_SIZE, 10, EGL_BLUE_SIZE, 10, EGL_ALPHA_SIZE, 2, EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_DEPTH_SIZE, 32, EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER, EGL_NONE };
   attribute_list = attribute_list_8bit;
 
   EGLint totalConfigsFound = 0;
@@ -465,12 +290,17 @@ void egl_init(void *native_display, int frame_width, int frame_height, int scree
     exit(EXIT_FAILURE);
   }
 
+  // test egl and opengl es version
+  double egl_version = atof(eglQueryString(display, EGL_VERSION));
+  GLint gles_version;
+  eglQueryContext(display, context, EGL_CONTEXT_CLIENT_VERSION, &gles_version);
+  if (egl_version < 1.5 || (ffmpeg_decoder != SOFTWARE && gles_version < 3)) {
+    fprintf(stderr, "EGL: couldn't initialize egl and opengl es context because of egl version(%s) and gles version(%d)\n", eglQueryString(display, EGL_VERSION), gles_version);
+    exit (-1);
+  }
+
   // finally we can create a new surface using this config and window
-#ifdef HAVE_WAYLAND
-  surface = isWayland ? wl_get_egl_surface(display, config, NULL) : x_get_egl_surface(display, config, NULL);
-#else
-  surface = x_get_egl_surface(display, config, NULL);
-#endif
+  surface = eglCreatePlatformWindowSurface(display, config, native_window, NULL);
   if (surface == EGL_NO_SURFACE) {
     fprintf(stderr, "EGL: couldn't get a valid egl surface\n");
     exit (EXIT_FAILURE);
@@ -478,10 +308,6 @@ void egl_init(void *native_display, int frame_width, int frame_height, int scree
 
   eglMakeCurrent(display, surface, surface, context);
 
-  // try to point if can use extensions for egl
-  if (ffmpeg_decoder != SOFTWARE && isUseExt(&ExtState)) {
-    isUseGlExt = true;
-  }
   // test render resolution is supported
   int maxTextureSize;
   glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
@@ -490,9 +316,14 @@ void egl_init(void *native_display, int frame_width, int frame_height, int scree
     exit (-1);
   }
 
+  // try to point if can use extensions for egl
+  if (ffmpeg_decoder != SOFTWARE && is_use_ext(&ExtState)) {
+    isUseGlExt = true;
+  }
+
 #ifdef HAVE_WAYLAND
   // for wayland
-  if (isWayland)
+  if (windowType & WAYLAND_WINDOW)
     eglSwapInterval(display, 0);
 #endif
 
@@ -500,10 +331,10 @@ void egl_init(void *native_display, int frame_width, int frame_height, int scree
   
   GLuint common_vertex_shader;
   GLuint yuv_fragment_shader,nv12_fragment_shader,packed_fragment_shader;
-  if (generate_vertex_shader(&common_vertex_shader, vertex_source) < 0 ||
-      generate_fragment_shader(&yuv_fragment_shader, fragment_source_3plane) < 0 ||
-      generate_fragment_shader(&nv12_fragment_shader, fragment_source_nv12) < 0 ||
-      generate_fragment_shader(&packed_fragment_shader, fragment_source_packed) < 0)
+  if (generate_shader(&common_vertex_shader, vertex_source, GL_VERTEX_SHADER) < 0 ||
+      generate_shader(&yuv_fragment_shader, fragment_source_3plane, GL_FRAGMENT_SHADER) < 0 ||
+      generate_shader(&nv12_fragment_shader, fragment_source_nv12, GL_FRAGMENT_SHADER) < 0 ||
+      generate_shader(&packed_fragment_shader, fragment_source_packed, GL_FRAGMENT_SHADER) < 0)
     exit(-1);
 
   shader_program_yuv = glCreateProgram();
@@ -570,41 +401,30 @@ void egl_init(void *native_display, int frame_width, int frame_height, int scree
   }
 
   // for software render ,because we want cut the not needed view range
-  cutwidth = (float)frame_width / width - ((isYUV444 || frame_width == width) ? 0 : 0.001);
+  cutwidth = ffmpeg_decoder != SOFTWARE ? 1 : ((float)frame_width / width - ((isYUV444 || frame_width == width) ? 0 : 0.0002));
   if (ffmpeg_decoder == SOFTWARE && frame_width != width) {
+    // cut display area,importent for software decoder
     if (isFullScreen)
-      glViewport(0, 0, ((int)(screen_width / widthMulti)) * widthMulti + widthMulti, screen_height);
+      glViewport(0, 0, (int)((screen_width / (float)frame_width) * width), screen_height);
     else
       glViewport(0, 0, width, height);
-      //glViewport(frame_width > width ? (int)((frame_width - width) / 2) : (int)((width - frame_width) / 2), 0, width, height);
   }
 
   eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 }
 
-void egl_draw(AVFrame* frame, uint8_t* image[3]) {
-  if (!current) {
-    chooseColorConfig(frame);
-    eglMakeCurrent(display, surface, surface, context);
-    current = true;
-  }
-
-  glUseProgram(shader_program_yuv);
-  glBindVertexArray(VAO);
-
-  for (int i = 0; i < 3; i++) {
-    glActiveTexture(GL_TEXTURE0 + i);
-    glBindTexture(GL_TEXTURE_2D, texture_id[i]);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (i > 0 && !isYUV444) ? width / 2 : width, (i > 0 && !isYUV444) ? height / 2 : height, GL_LUMINANCE, GL_UNSIGNED_BYTE, image[i]);
-  }
-
+static inline void draw_texture() {
+  // Bind parameters for the shaders
   glUniformMatrix3fv(texture_uniform[FRAG_PARAM_YUVMAT], 1, GL_FALSE, colorspace);
   glUniform3fv(texture_uniform[FRAG_PARAM_OFFSET], 1, colorOffsets);
   glUniform4iv(texture_uniform[FRAG_PARAM_YUVORDER], 1, yuvOrder);
   glUniform1i(texture_uniform[FRAG_PARAM_PLANE0], 0);
-  glUniform1i(texture_uniform[FRAG_PARAM_PLANE1], 1);
-  glUniform1i(texture_uniform[FRAG_PARAM_PLANE2], 2);
-  glUniform1f(texture_uniform[FRAG_PARAM_CUTWIDTH], cutwidth);
+  if (planeNum >= 2)
+    glUniform1i(texture_uniform[FRAG_PARAM_PLANE1], 1);
+  if (planeNum >= 3) {
+    glUniform1i(texture_uniform[FRAG_PARAM_PLANE2], 2);
+    glUniform1f(texture_uniform[FRAG_PARAM_CUTWIDTH], cutwidth);
+  }
 
   glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
   glBindVertexArray(0);
@@ -612,40 +432,23 @@ void egl_draw(AVFrame* frame, uint8_t* image[3]) {
   eglSwapBuffers(display, surface);
 }
 
-#ifdef HAVE_VAAPI
-void egl_draw_frame(AVFrame* frame) {
-  if (last_pix_fmt != sharedFmt) {
-    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    chooseColorConfig(frame);
-    last_pix_fmt = sharedFmt;
-    eglMakeCurrent(display, surface, surface, context);
+static inline void egl_draw_soft(AVFrame* frame, uint8_t* image[3]) {
+
+  for (int i = 0; i < 3; i++) {
+    glActiveTexture(GL_TEXTURE0 + i);
+    glBindTexture(GL_TEXTURE_2D, texture_id[i]);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (i > 0 && !isYUV444) ? width / 2 : width, (i > 0 && !isYUV444) ? height / 2 : height, GL_LUMINANCE, GL_UNSIGNED_BYTE, image[i]);
   }
 
+  draw_texture();
+}
+
+static inline void egl_draw_vaapi(AVFrame* frame) {
+#ifdef HAVE_VAAPI
   EGLImage image[4];
 
-  bool twoplane = false,threeplane = false;
-  switch (planeNum) {
-  case 1:
-    glUseProgram(shader_program_packed);
-    break;
-  case 2:
-    glUseProgram(shader_program_nv12);
-    twoplane = true;
-    break;
-  case 3:
-    glUseProgram(shader_program_yuv);
-    twoplane = true;
-    threeplane = true;
-    break;
-  default:
-    glUseProgram(shader_program_nv12);
-    twoplane = true;
-    break;
-  }
-  glBindVertexArray(VAO);
-
-  ssize_t plane_count = exportEGLImages(frame, display, ExtState.eglIsSupportExtDmaBufMod,
-                                        image);
+  ssize_t plane_count = vaapi_export_egl_images(frame, display,
+                                                ExtState.eglIsSupportExtDmaBufMod, image);
   if (plane_count < 0) {
       printf("Error in egl_drawing frame\n");
       return;
@@ -655,28 +458,34 @@ void egl_draw_frame(AVFrame* frame) {
      glActiveTexture(GL_TEXTURE0 + i);
      glBindTexture(GL_TEXTURE_2D, texture_id[i]);
      glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image[i]);
+     //glEGLImageTargetTexStorageEXT(GL_TEXTURE_2D, image[i], NULL);
   }
 
-  // Bind parameters for the shaders
-  glUniformMatrix3fv(texture_uniform[FRAG_PARAM_YUVMAT], 1, GL_FALSE, colorspace);
-  glUniform3fv(texture_uniform[FRAG_PARAM_OFFSET], 1, colorOffsets);
-  glUniform4iv(texture_uniform[FRAG_PARAM_YUVORDER], 1, yuvOrder);
-  glUniform1i(texture_uniform[FRAG_PARAM_PLANE0], 0);
-  if (twoplane)
-    glUniform1i(texture_uniform[FRAG_PARAM_PLANE1], 1);
-  if (threeplane) {
-    glUniform1i(texture_uniform[FRAG_PARAM_PLANE2], 2);
-    glUniform1f(texture_uniform[FRAG_PARAM_CUTWIDTH], 1);
-  }
+  draw_texture();
 
-  glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-  glBindVertexArray(0);
-
-  eglSwapBuffers(display, surface);
-
-  freeEGLImages(display, image);
-}
+  vaapi_free_egl_images(display, image);
 #endif
+}
+
+void egl_draw(AVFrame* frame) {
+  if (last_pix_fmt != *sharedFmt) {
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    choose_color_config(frame);
+    last_pix_fmt = *sharedFmt;
+    eglMakeCurrent(display, surface, surface, context);
+  }
+
+  glUseProgram(*shaders[planeNum]);
+  glBindVertexArray(VAO);
+
+  if (ffmpeg_decoder != SOFTWARE) {
+    egl_draw_vaapi(frame);
+  }
+  else {
+    egl_draw_soft(frame, frame->data);
+  }
+  return;
+}
 
 void egl_destroy() {
   eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);

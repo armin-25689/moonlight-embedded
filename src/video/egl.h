@@ -17,10 +17,10 @@
  * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <EGL/egl.h>
-#include <libavcodec/avcodec.h>
+enum WindowType {X11_WINDOW=1, WAYLAND_WINDOW=2, GBM_WINDOW=4};
+// 1 is x11 ;2 is wayland ;4 is gbm
+extern enum WindowType windowType;
 
-void egl_init(void *native_display, int frame_width, int frame_height, int screen_width, int screen_height, int dcFlag);
-void egl_draw(AVFrame* frame, uint8_t* image[3]);
-void egl_draw_frame(AVFrame* frame);
+void egl_init(void *native_display, void *native_window, int frame_width, int frame_height, int screen_width, int screen_height, int dcFlag);
+void egl_draw(AVFrame* frame);
 void egl_destroy();

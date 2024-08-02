@@ -235,5 +235,5 @@ void mapping_print(struct mapping* map) {
   print_btn("paddle3", map->btn_paddle3);
   print_btn("paddle4", map->btn_paddle4);
   print_btn("touchpad", map->btn_touchpad);
-  printf("platform:Linux\n");
+  printf("platform:FreeBSD\n");
 }

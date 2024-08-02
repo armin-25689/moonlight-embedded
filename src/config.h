@@ -48,6 +48,8 @@ typedef struct _CONFIGURATION {
   bool hdr;
   int pin;
   unsigned short port;
+  bool sdlgp;
+  bool swapxyab;
   bool yuv444;
   bool fakegrab;
 } CONFIGURATION, *PCONFIGURATION;

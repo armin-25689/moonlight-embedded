@@ -18,10 +18,8 @@
  */
 
 #ifdef HAVE_WAYLAND
-#undef USE_X11
 #include <wayland-client.h>
 #include <wayland-egl.h>
-#include <EGL/egl.h>
 
 #include "wayland.h"
 #include "video.h"
@@ -110,8 +108,11 @@ static const struct wl_output_listener wl_output_listener = {
   .mode = wl_output_get_mode,
   .done = noop,
   .scale = wl_output_get_scale,
+/*
+  for version 4
   .name = noop,
   .description = noop,
+*/
 };
 
 static void pointer_enter(void *data, struct wl_pointer *wl_pointer, uint32_t serial, struct wl_surface *pointer_surface, wl_fixed_t pointer_x, wl_fixed_t pointer_y) {
@@ -132,12 +133,15 @@ static const struct wl_pointer_listener wl_pointer_listener = {
   .motion = noop,
   .button = noop,
   .axis = noop,
+  // version 5
   .frame = noop,
   .axis_source = noop,
   .axis_stop = noop,
   .axis_discrete = noop,
 /*
+  // version 8
   .axis_value120 = noop,
+  // version 9
   .axis_relative_direction = noop,
 */
 };
@@ -170,7 +174,7 @@ static void registry_handler(void *data,struct wl_registry *registry, uint32_t i
     xdg_wm_base = wl_registry_bind(registry, id, &xdg_wm_base_interface, 2);
     xdg_wm_base_add_listener(xdg_wm_base, &xdg_wm_base_listener, NULL);
   } else if (strcmp(interface, wl_output_interface.name) == 0) {
-    wl_output = wl_registry_bind(registry, id, &wl_output_interface, 4);
+    wl_output = wl_registry_bind(registry, id, &wl_output_interface, 2);
     wl_output_add_listener(wl_output, &wl_output_listener, NULL);
   } else if (strcmp(interface, wl_seat_interface.name) == 0) {
     wl_seat = wl_registry_bind(registry, id, &wl_seat_interface, 5);
@@ -357,11 +361,7 @@ void wl_trans_op_fd(int fd) {
   window_op_fd = fd;
 }
 
-EGLSurface wl_get_egl_surface(EGLDisplay display, EGLConfig config, void *data) {
-  return eglCreateWindowSurface(display, config, wl_window, data);
-}
-
-EGLDisplay wl_get_egl_display() {
-  return eglGetDisplay(wl_display);
+void* wl_get_window() {
+  return wl_window;
 }
 #endif
