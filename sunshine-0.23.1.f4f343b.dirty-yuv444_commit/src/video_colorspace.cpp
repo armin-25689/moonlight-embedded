@@ -20,15 +20,9 @@ namespace video {
 
     /* See video::config_t declaration for details */
 
-    if ((config.dynamicRange == 1 || config.dynamicRange >= 3) && hdr_display) {
+    if (config.dynamicRange > 0 && hdr_display) {
       // Rec. 2020 with ST 2084 perceptual quantizer
       colorspace.colorspace = colorspace_e::bt2020;
-    }
-    else if (config.dynamicRange == 2) {
-      colorspace.colorspace = colorspace_e::rec709;
-      colorspace.bit_depth = 8;
-      colorspace.full_range = 1;
-      return colorspace;
     }
     else {
       switch (config.encoderCscMode >> 1) {
@@ -58,12 +52,10 @@ namespace video {
 
     switch (config.dynamicRange) {
       case 0:
-      case 2:
         colorspace.bit_depth = 8;
         break;
 
       case 1:
-      case 3:
         colorspace.bit_depth = 10;
         break;
 

@@ -202,6 +202,7 @@ namespace platf {
     p010,
     yuv444p,
     yuv444p10,
+    yuv444p16,
     yuv444,
     yuv444_10,
     bgra,
@@ -221,6 +222,7 @@ namespace platf {
       _CONVERT(p010);
       _CONVERT(yuv444p);
       _CONVERT(yuv444p10);
+      _CONVERT(yuv444p16);
       _CONVERT(yuv444);
       _CONVERT(yuv444_10);
       _CONVERT(bgra);

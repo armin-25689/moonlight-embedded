@@ -114,10 +114,6 @@ namespace platf::dxgi {
   blob_t convert_yuv444_planar_yuv_ps_linear_hlsl;
   blob_t convert_yuv444_planar_yuv_ps_perceptual_quantizer_hlsl;
   blob_t convert_yuv444_planar_yuv_vs_hlsl;
-  blob_t convert_vuya_planar_ps_hlsl;
-  blob_t convert_vuya_planar_ps_linear_hlsl;
-  blob_t convert_vuya_planar_ps_perceptual_quantizer_hlsl;
-  blob_t convert_vuya_planar_vs_hlsl;
   blob_t cursor_ps_hlsl;
   blob_t cursor_ps_normalize_white_hlsl;
   blob_t cursor_vs_hlsl;
@@ -383,7 +379,6 @@ namespace platf::dxgi {
   class d3d_base_encode_device final {
   public:
     int yuv444p10mask;
-    int bgramask;
     int yuv444mask;
     int
     convert(platf::img_t &img_base) {
@@ -416,7 +411,7 @@ namespace platf::dxgi {
 	if (yuv444p10mask == 1 || yuv444mask == 1) {
 	  device_ctx->OMSetRenderTargets(1, &yuv444_rt, nullptr);
           device_ctx->VSSetShader(scene_vs.get(), nullptr, 0);
-          device_ctx->PSSetShader((img.format == DXGI_FORMAT_R16G16B16A16_FLOAT || img.format == DXGI_FORMAT_R10G10B10A2_UNORM) ? convert_YUV_fp16_ps.get() : convert_YUV_ps.get(), nullptr, 0);
+          device_ctx->PSSetShader(img.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? convert_YUV_fp16_ps.get() : convert_YUV_ps.get(), nullptr, 0);
           device_ctx->RSSetViewports(1, &outYUV_view);
           device_ctx->PSSetShaderResources(0, 1, &img_ctx.encoder_input_res);
           device_ctx->Draw(3, 0);
@@ -488,6 +483,15 @@ namespace platf::dxgi {
 
       if (yuv444p10mask == 1 || yuv444mask == 1) {
 	outYUV_view = D3D11_VIEWPORT { offsetX, offsetY, out_width_f, out_height_f, 0.0f, 1.0f };
+	int32_t yuv_order_modifier = yuv444mask == 1 ? 0 : yuv444p10mask == 1 ? 1 : 2;
+        int32_t yuv_order_in[16 / sizeof(float)] { yuv_order_modifier };
+        yuv_order = make_buffer(device.get(), yuv_order_in);
+
+        if (!yuv_order) {
+          BOOST_LOG(error) << "Failed to create yuv_order vertex constant buffer";
+          return -1;
+        }
+        device_ctx->PSSetConstantBuffers(2, 1, &yuv_order);
       }
       else {
         outY_view = D3D11_VIEWPORT { offsetX, offsetY, out_width_f, out_height_f, 0.0f, 1.0f };
@@ -531,9 +535,13 @@ namespace platf::dxgi {
 	  const float xv30_black[]  = { 0.0f, 0.5f, 0.0f, 0.5f };
 	  device_ctx->ClearRenderTargetView(yuv444_rt.get(), xv30_black);
 	}
-	else {
+	else if (yuv444mask == 1) {
           const float vuyx_black[] = { 0.5f, 0.5f, 0.0f, 0.0f };
 	  device_ctx->ClearRenderTargetView(yuv444_rt.get(), vuyx_black);
+	}
+	else {
+          const float yuva_black[] = { 0.0f, 0.5f, 0.5f, 0.0f };
+	  device_ctx->ClearRenderTargetView(yuv444_rt.get(), yuva_black);
 	}
       }
       else {
@@ -607,10 +615,9 @@ namespace platf::dxgi {
       }
 
       yuv444p10mask = (pix_fmt == pix_fmt_e::yuv444_10) ? 1 : 0;
-      bgramask = (pix_fmt == pix_fmt_e::bgra) ? 1 : 0;
       yuv444mask = (pix_fmt == pix_fmt_e::yuv444) ? 1 : 0;
-      if (yuv444p10mask == 1) {
-	format = DXGI_FORMAT_Y410;
+      if (yuv444p10mask == 1 || yuv444mask == 1) {
+	format = (pix_fmt == pix_fmt_e::yuv444_10 ? DXGI_FORMAT_Y410 : DXGI_FORMAT_AYUV);
         status = device->CreateVertexShader(convert_yuv444_planar_yuv_vs_hlsl->GetBufferPointer(), convert_yuv444_planar_yuv_vs_hlsl->GetBufferSize(), nullptr, &scene_vs);
         if (status) {
           BOOST_LOG(error) << "Failed to create scene vertex shader [0x"sv << util::hex(status).to_string_view() << ']';
@@ -637,39 +644,6 @@ namespace platf::dxgi {
   
         // These shaders consume standard 8-bit sRGB input
         status = device->CreatePixelShader(convert_yuv444_planar_yuv_ps_hlsl->GetBufferPointer(), convert_yuv444_planar_yuv_ps_hlsl->GetBufferSize(), nullptr, &convert_YUV_ps);
-        if (status) {
-          BOOST_LOG(error) << "Failed to create convertY pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
-          return -1;
-        }
-      }
-      else if (yuv444mask == 1) {
-	format = DXGI_FORMAT_AYUV;
-        status = device->CreateVertexShader(convert_vuya_planar_vs_hlsl->GetBufferPointer(), convert_vuya_planar_vs_hlsl->GetBufferSize(), nullptr, &scene_vs);
-        if (status) {
-          BOOST_LOG(error) << "Failed to create scene vertex shader [0x"sv << util::hex(status).to_string_view() << ']';
-          return -1;
-        }
-  
-        // If the display is in HDR and we're streaming HDR, we'll be converting scRGB to SMPTE 2084 PQ.
-        if (format == DXGI_FORMAT_Y410 && display->is_hdr()) {
-          status = device->CreatePixelShader(convert_vuya_planar_ps_perceptual_quantizer_hlsl->GetBufferPointer(), convert_vuya_planar_ps_perceptual_quantizer_hlsl->GetBufferSize(), nullptr, &convert_YUV_fp16_ps);
-          if (status) {
-            BOOST_LOG(error) << "Failed to create convertY pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
-            return -1;
-          }
-        }
-        else {
-          // If the display is in Advanced Color mode, the desktop format will be scRGB FP16.
-          // scRGB uses linear gamma, so we must use our linear to sRGB conversion shaders.
-          status = device->CreatePixelShader(convert_vuya_planar_ps_linear_hlsl->GetBufferPointer(), convert_vuya_planar_ps_linear_hlsl->GetBufferSize(), nullptr, &convert_YUV_fp16_ps);
-          if (status) {
-            BOOST_LOG(error) << "Failed to create convertY pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
-            return -1;
-          }
-        }
-  
-        // These shaders consume standard 8-bit sRGB input
-        status = device->CreatePixelShader(convert_vuya_planar_ps_hlsl->GetBufferPointer(), convert_vuya_planar_ps_hlsl->GetBufferSize(), nullptr, &convert_YUV_ps);
         if (status) {
           BOOST_LOG(error) << "Failed to create convertY pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
           return -1;
@@ -850,6 +824,7 @@ namespace platf::dxgi {
 
     buf_t subsample_offset;
     buf_t color_matrix;
+    buf_t yuv_order;
 
     blend_t blend_disable;
     sampler_state_t sampler_linear;
@@ -1492,7 +1467,7 @@ namespace platf::dxgi {
       device_ctx->VSSetConstantBuffers(2, 1, &rotation);
     }
 
-    if ((config.dynamicRange == 1 || config.dynamicRange >= 3) && is_hdr()) {
+    if (config.dynamicRange && is_hdr()) {
       // This shader will normalize scRGB white levels to a user-defined white level
       status = device->CreatePixelShader(cursor_ps_normalize_white_hlsl->GetBufferPointer(), cursor_ps_normalize_white_hlsl->GetBufferSize(), nullptr, &cursor_ps);
       if (status) {
@@ -1654,7 +1629,6 @@ namespace platf::dxgi {
       // We include the 8-bit modes too for when the display is in SDR mode,
       // while the client stream is HDR-capable. These UNORM formats can
       // use our normal pixel shaders that expect sRGB input.
-      DXGI_FORMAT_R10G10B10A2_UNORM,
       DXGI_FORMAT_B8G8R8A8_UNORM,
       DXGI_FORMAT_B8G8R8X8_UNORM,
       DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -1702,7 +1676,7 @@ namespace platf::dxgi {
               BOOST_LOG(warning) << "If your AMD GPU supports AV1 encoding, update your graphics drivers!"sv;
               return false;
             }
-            else if ((config.dynamicRange == 1 || config.dynamicRange >= 3) && version < AMF_MAKE_FULL_VERSION(1, 4, 23, 0)) {
+            else if (config.dynamicRange && version < AMF_MAKE_FULL_VERSION(1, 4, 23, 0)) {
               // Older versions of the AMD AMF runtime can crash when fed P010 surfaces.
               // Fail if AMF version is below 1.4.23 where HEVC Main10 encoding was introduced.
               // AMF 1.4.23 corresponds to driver version 21.12.1 (21.40.11.03) or newer.
@@ -1748,7 +1722,7 @@ namespace platf::dxgi {
 
   std::unique_ptr<avcodec_encode_device_t>
   display_vram_t::make_avcodec_encode_device(pix_fmt_e pix_fmt) {
-    if (pix_fmt != platf::pix_fmt_e::nv12 && pix_fmt != platf::pix_fmt_e::p010 && pix_fmt != platf::pix_fmt_e::bgra && pix_fmt != platf::pix_fmt_e::yuv444 && pix_fmt != platf::pix_fmt_e::yuv444_10) {
+    if (pix_fmt != platf::pix_fmt_e::nv12 && pix_fmt != platf::pix_fmt_e::p010 && pix_fmt != platf::pix_fmt_e::yuv444 && pix_fmt != platf::pix_fmt_e::yuv444_10) {
       BOOST_LOG(error) << "display_vram_t doesn't support pixel format ["sv << from_pix_fmt(pix_fmt) << ']';
 
       return nullptr;
@@ -1795,10 +1769,6 @@ namespace platf::dxgi {
     compile_pixel_shader_helper(convert_yuv444_planar_yuv_ps_linear);
     compile_pixel_shader_helper(convert_yuv444_planar_yuv_ps_perceptual_quantizer);
     compile_vertex_shader_helper(convert_yuv444_planar_yuv_vs);
-    compile_pixel_shader_helper(convert_vuya_planar_ps);
-    compile_pixel_shader_helper(convert_vuya_planar_ps_linear);
-    compile_pixel_shader_helper(convert_vuya_planar_ps_perceptual_quantizer);
-    compile_vertex_shader_helper(convert_vuya_planar_vs);
     compile_pixel_shader_helper(cursor_ps);
     compile_pixel_shader_helper(cursor_ps_normalize_white);
     compile_vertex_shader_helper(cursor_vs);

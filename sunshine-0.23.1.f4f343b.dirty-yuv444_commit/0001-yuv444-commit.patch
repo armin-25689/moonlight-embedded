@@ -1,60 +1,74 @@
-From a378db9bf289467104212fd7825a7400e57b4f0f Mon Sep 17 00:00:00 2001
+From 41a2924d86f219d4b172e244710836a3c47bcd98 Mon Sep 17 00:00:00 2001
 From: aaa <aaa@111.com>
-Date: Thu, 30 May 2024 21:00:19 +0800
+Date: Thu, 1 Aug 2024 20:17:18 +0800
 Subject: [PATCH] yuv444 commit
 
 ---
- src/platform/common.h                         |  10 +
- src/platform/windows/display_vram.cpp         | 296 +++++++++++++-----
- src/video.cpp                                 |  88 ++++--
- src/video.h                                   |  14 +-
- src/video_colorspace.cpp                      |  10 +-
- .../linux/shaders/opengl/ConvertYUV.frag      |  31 ++
- .../directx/convert_vuya_planar_ps.hlsl       |   3 +
- .../convert_vuya_planar_ps_linear.hlsl        |   3 +
- ...t_vuya_planar_ps_perceptual_quantizer.hlsl |   3 +
- .../directx/convert_vuya_planar_vs.hlsl       |  10 +
- .../directx/convert_yuv444_planar_yuv_ps.hlsl |   3 +
- .../convert_yuv444_planar_yuv_ps_linear.hlsl  |   3 +
- ...44_planar_yuv_ps_perceptual_quantizer.hlsl |   3 +
- .../directx/convert_yuv444_planar_yuv_vs.hlsl |  10 +
- .../include/convert_vuya_planar_ps_base.hlsl  |  27 ++
- .../convert_yuv444_planar_yuv_ps_base.hlsl    |  27 ++
- 16 files changed, 440 insertions(+), 101 deletions(-)
- create mode 100644 src_assets/linux/shaders/opengl/ConvertYUV.frag
- create mode 100644 src_assets/windows/assets/shaders/directx/convert_vuya_planar_ps.hlsl
- create mode 100644 src_assets/windows/assets/shaders/directx/convert_vuya_planar_ps_linear.hlsl
- create mode 100644 src_assets/windows/assets/shaders/directx/convert_vuya_planar_ps_perceptual_quantizer.hlsl
- create mode 100644 src_assets/windows/assets/shaders/directx/convert_vuya_planar_vs.hlsl
- create mode 100644 src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_ps.hlsl
- create mode 100644 src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_ps_linear.hlsl
- create mode 100644 src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_ps_perceptual_quantizer.hlsl
- create mode 100644 src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_vs.hlsl
- create mode 100644 src_assets/windows/assets/shaders/directx/include/convert_vuya_planar_ps_base.hlsl
- create mode 100644 src_assets/windows/assets/shaders/directx/include/convert_yuv444_planar_yuv_ps_base.hlsl
+ src/nvhttp.cpp                        |  10 +
+ src/platform/common.h                 |  12 ++
+ src/platform/windows/display_vram.cpp | 266 ++++++++++++++++++--------
+ src/rtsp.cpp                          |   2 +
+ src/video.cpp                         | 141 ++++++++++++--
+ src/video.h                           |  20 +-
+ 6 files changed, 354 insertions(+), 97 deletions(-)
 
+diff --git a/src/nvhttp.cpp b/src/nvhttp.cpp
+index 70ca9bc..2e2b7d0 100644
+--- a/src/nvhttp.cpp
++++ b/src/nvhttp.cpp
+@@ -691,18 +691,28 @@ namespace nvhttp {
+     }
+ 
+     uint32_t codec_mode_flags = SCM_H264;
++    // h264_444 is always supported by software encoder
++    if (video::active_h264_mode >= 4) {
++      codec_mode_flags |= SCM_H264_444;
++    }
+     if (video::active_hevc_mode >= 2) {
+       codec_mode_flags |= SCM_HEVC;
+     }
+     if (video::active_hevc_mode >= 3) {
+       codec_mode_flags |= SCM_HEVC_MAIN10;
+     }
++    if (video::active_hevc_mode >= 4) {
++      codec_mode_flags |= SCM_HEVC_444_10;
++    }
+     if (video::active_av1_mode >= 2) {
+       codec_mode_flags |= SCM_AV1_MAIN8;
+     }
+     if (video::active_av1_mode >= 3) {
+       codec_mode_flags |= SCM_AV1_MAIN10;
+     }
++    if (video::active_av1_mode >= 4) {
++      codec_mode_flags |= SCM_AV1_444_10;
++    }
+     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
+ 
+     pt::ptree display_nodes;
 diff --git a/src/platform/common.h b/src/platform/common.h
-index 007f7ec..4e1a6c4 100644
+index 007f7ec..40ffa74 100644
 --- a/src/platform/common.h
 +++ b/src/platform/common.h
-@@ -200,6 +200,11 @@ namespace platf {
+@@ -200,6 +200,12 @@ namespace platf {
      yuv420p10,
      nv12,
      p010,
 +    yuv444p,
 +    yuv444p10,
++    yuv444p16,
 +    yuv444,
 +    yuv444_10,
 +    bgra,
      unknown
    };
  
-@@ -214,6 +219,11 @@ namespace platf {
+@@ -214,6 +220,12 @@ namespace platf {
        _CONVERT(yuv420p10);
        _CONVERT(nv12);
        _CONVERT(p010);
 +      _CONVERT(yuv444p);
 +      _CONVERT(yuv444p10);
++      _CONVERT(yuv444p16);
 +      _CONVERT(yuv444);
 +      _CONVERT(yuv444_10);
 +      _CONVERT(bgra);
@@ -62,10 +76,10 @@ index 007f7ec..4e1a6c4 100644
      }
  #undef _CONVERT
 diff --git a/src/platform/windows/display_vram.cpp b/src/platform/windows/display_vram.cpp
-index 4aa1800..ff5f685 100644
+index 4aa1800..fc2d207 100644
 --- a/src/platform/windows/display_vram.cpp
 +++ b/src/platform/windows/display_vram.cpp
-@@ -110,6 +110,14 @@ namespace platf::dxgi {
+@@ -110,6 +110,10 @@ namespace platf::dxgi {
    blob_t convert_yuv420_planar_y_ps_linear_hlsl;
    blob_t convert_yuv420_planar_y_ps_perceptual_quantizer_hlsl;
    blob_t convert_yuv420_planar_y_vs_hlsl;
@@ -73,24 +87,19 @@ index 4aa1800..ff5f685 100644
 +  blob_t convert_yuv444_planar_yuv_ps_linear_hlsl;
 +  blob_t convert_yuv444_planar_yuv_ps_perceptual_quantizer_hlsl;
 +  blob_t convert_yuv444_planar_yuv_vs_hlsl;
-+  blob_t convert_vuya_planar_ps_hlsl;
-+  blob_t convert_vuya_planar_ps_linear_hlsl;
-+  blob_t convert_vuya_planar_ps_perceptual_quantizer_hlsl;
-+  blob_t convert_vuya_planar_vs_hlsl;
    blob_t cursor_ps_hlsl;
    blob_t cursor_ps_normalize_white_hlsl;
    blob_t cursor_vs_hlsl;
-@@ -374,6 +382,9 @@ namespace platf::dxgi {
+@@ -374,6 +378,8 @@ namespace platf::dxgi {
  
    class d3d_base_encode_device final {
    public:
 +    int yuv444p10mask;
-+    int bgramask;
 +    int yuv444mask;
      int
      convert(platf::img_t &img_base) {
        // Garbage collect mapped capture images whose weak references have expired
-@@ -402,18 +413,28 @@ namespace platf::dxgi {
+@@ -402,18 +408,28 @@ namespace platf::dxgi {
            return -1;
          }
  
@@ -109,7 +118,7 @@ index 4aa1800..ff5f685 100644
 +	if (yuv444p10mask == 1 || yuv444mask == 1) {
 +	  device_ctx->OMSetRenderTargets(1, &yuv444_rt, nullptr);
 +          device_ctx->VSSetShader(scene_vs.get(), nullptr, 0);
-+          device_ctx->PSSetShader((img.format == DXGI_FORMAT_R16G16B16A16_FLOAT || img.format == DXGI_FORMAT_R10G10B10A2_UNORM) ? convert_YUV_fp16_ps.get() : convert_YUV_ps.get(), nullptr, 0);
++          device_ctx->PSSetShader(img.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? convert_YUV_fp16_ps.get() : convert_YUV_ps.get(), nullptr, 0);
 +          device_ctx->RSSetViewports(1, &outYUV_view);
 +          device_ctx->PSSetShaderResources(0, 1, &img_ctx.encoder_input_res);
 +          device_ctx->Draw(3, 0);
@@ -131,7 +140,7 @@ index 4aa1800..ff5f685 100644
  
          // Release encoder mutex to allow capture code to reuse this image
          img_ctx.encoder_mutex->ReleaseSync(0);
-@@ -465,17 +486,22 @@ namespace platf::dxgi {
+@@ -465,17 +481,31 @@ namespace platf::dxgi {
        auto offsetX = (out_width - out_width_f) / 2;
        auto offsetY = (out_height - out_height_f) / 2;
  
@@ -139,19 +148,28 @@ index 4aa1800..ff5f685 100644
 -      outUV_view = D3D11_VIEWPORT { offsetX / 2, offsetY / 2, out_width_f / 2, out_height_f / 2, 0.0f, 1.0f };
 +      if (yuv444p10mask == 1 || yuv444mask == 1) {
 +	outYUV_view = D3D11_VIEWPORT { offsetX, offsetY, out_width_f, out_height_f, 0.0f, 1.0f };
++	int32_t yuv_order_modifier = yuv444mask == 1 ? 0 : yuv444p10mask == 1 ? 1 : 2;
++        int32_t yuv_order_in[16 / sizeof(float)] { yuv_order_modifier };
++        yuv_order = make_buffer(device.get(), yuv_order_in);
+ 
+-      float subsample_offset_in[16 / sizeof(float)] { 1.0f / (float) out_width_f, 1.0f / (float) out_height_f };  // aligned to 16-byte
+-      subsample_offset = make_buffer(device.get(), subsample_offset_in);
++        if (!yuv_order) {
++          BOOST_LOG(error) << "Failed to create yuv_order vertex constant buffer";
++          return -1;
++        }
++        device_ctx->PSSetConstantBuffers(2, 1, &yuv_order);
 +      }
 +      else {
 +        outY_view = D3D11_VIEWPORT { offsetX, offsetY, out_width_f, out_height_f, 0.0f, 1.0f };
 +        outUV_view = D3D11_VIEWPORT { offsetX / 2, offsetY / 2, out_width_f / 2, out_height_f / 2, 0.0f, 1.0f };
  
--      float subsample_offset_in[16 / sizeof(float)] { 1.0f / (float) out_width_f, 1.0f / (float) out_height_f };  // aligned to 16-byte
--      subsample_offset = make_buffer(device.get(), subsample_offset_in);
-+        float subsample_offset_in[16 / sizeof(float)] { 1.0f / (float) out_width_f, 1.0f / (float) out_height_f };  // aligned to 16-byte
-+        subsample_offset = make_buffer(device.get(), subsample_offset_in);
- 
 -      if (!subsample_offset) {
 -        BOOST_LOG(error) << "Failed to create subsample offset vertex constant buffer";
 -        return -1;
++        float subsample_offset_in[16 / sizeof(float)] { 1.0f / (float) out_width_f, 1.0f / (float) out_height_f };  // aligned to 16-byte
++        subsample_offset = make_buffer(device.get(), subsample_offset_in);
++
 +        if (!subsample_offset) {
 +          BOOST_LOG(error) << "Failed to create subsample offset vertex constant buffer";
 +          return -1;
@@ -162,7 +180,7 @@ index 4aa1800..ff5f685 100644
  
        {
          int32_t rotation_modifier = display->display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ? 0 : display->display_rotation - 1;
-@@ -488,31 +514,55 @@ namespace platf::dxgi {
+@@ -488,31 +518,59 @@ namespace platf::dxgi {
          device_ctx->VSSetConstantBuffers(1, 1, &rotation);
        }
  
@@ -191,9 +209,13 @@ index 4aa1800..ff5f685 100644
 +	  const float xv30_black[]  = { 0.0f, 0.5f, 0.0f, 0.5f };
 +	  device_ctx->ClearRenderTargetView(yuv444_rt.get(), xv30_black);
 +	}
-+	else {
++	else if (yuv444mask == 1) {
 +          const float vuyx_black[] = { 0.5f, 0.5f, 0.0f, 0.0f };
 +	  device_ctx->ClearRenderTargetView(yuv444_rt.get(), vuyx_black);
++	}
++	else {
++          const float yuva_black[] = { 0.0f, 0.5f, 0.5f, 0.0f };
++	  device_ctx->ClearRenderTargetView(yuv444_rt.get(), yuva_black);
 +	}
        }
 -
@@ -239,7 +261,7 @@ index 4aa1800..ff5f685 100644
        return 0;
      }
  
-@@ -556,62 +606,133 @@ namespace platf::dxgi {
+@@ -556,62 +614,99 @@ namespace platf::dxgi {
          BOOST_LOG(warning) << "Failed to increase encoding GPU thread priority. Please run application as administrator for optimal performance.";
        }
  
@@ -260,15 +282,17 @@ index 4aa1800..ff5f685 100644
 -      if (format == DXGI_FORMAT_P010 && display->is_hdr()) {
 -        status = device->CreatePixelShader(convert_yuv420_planar_y_ps_perceptual_quantizer_hlsl->GetBufferPointer(), convert_yuv420_planar_y_ps_perceptual_quantizer_hlsl->GetBufferSize(), nullptr, &convert_Y_fp16_ps);
 +      yuv444p10mask = (pix_fmt == pix_fmt_e::yuv444_10) ? 1 : 0;
-+      bgramask = (pix_fmt == pix_fmt_e::bgra) ? 1 : 0;
 +      yuv444mask = (pix_fmt == pix_fmt_e::yuv444) ? 1 : 0;
-+      if (yuv444p10mask == 1) {
-+	format = DXGI_FORMAT_Y410;
++      if (yuv444p10mask == 1 || yuv444mask == 1) {
++	format = (pix_fmt == pix_fmt_e::yuv444_10 ? DXGI_FORMAT_Y410 : DXGI_FORMAT_AYUV);
 +        status = device->CreateVertexShader(convert_yuv444_planar_yuv_vs_hlsl->GetBufferPointer(), convert_yuv444_planar_yuv_vs_hlsl->GetBufferSize(), nullptr, &scene_vs);
-+        if (status) {
+         if (status) {
+-          BOOST_LOG(error) << "Failed to create convertY pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
 +          BOOST_LOG(error) << "Failed to create scene vertex shader [0x"sv << util::hex(status).to_string_view() << ']';
-+          return -1;
-+        }
+           return -1;
+         }
+-
+-        status = device->CreatePixelShader(convert_yuv420_packed_uv_type0_ps_perceptual_quantizer_hlsl->GetBufferPointer(), convert_yuv420_packed_uv_type0_ps_perceptual_quantizer_hlsl->GetBufferSize(), nullptr, &convert_UV_fp16_ps);
 +  
 +        // If the display is in HDR and we're streaming HDR, we'll be converting scRGB to SMPTE 2084 PQ.
 +        if (format == DXGI_FORMAT_Y410 && display->is_hdr()) {
@@ -291,42 +315,7 @@ index 4aa1800..ff5f685 100644
 +        // These shaders consume standard 8-bit sRGB input
 +        status = device->CreatePixelShader(convert_yuv444_planar_yuv_ps_hlsl->GetBufferPointer(), convert_yuv444_planar_yuv_ps_hlsl->GetBufferSize(), nullptr, &convert_YUV_ps);
          if (status) {
-           BOOST_LOG(error) << "Failed to create convertY pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
-           return -1;
-         }
--
--        status = device->CreatePixelShader(convert_yuv420_packed_uv_type0_ps_perceptual_quantizer_hlsl->GetBufferPointer(), convert_yuv420_packed_uv_type0_ps_perceptual_quantizer_hlsl->GetBufferSize(), nullptr, &convert_UV_fp16_ps);
-+      }
-+      else if (yuv444mask == 1) {
-+	format = DXGI_FORMAT_AYUV;
-+        status = device->CreateVertexShader(convert_vuya_planar_vs_hlsl->GetBufferPointer(), convert_vuya_planar_vs_hlsl->GetBufferSize(), nullptr, &scene_vs);
-         if (status) {
 -          BOOST_LOG(error) << "Failed to create convertUV pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
-+          BOOST_LOG(error) << "Failed to create scene vertex shader [0x"sv << util::hex(status).to_string_view() << ']';
-+          return -1;
-+        }
-+  
-+        // If the display is in HDR and we're streaming HDR, we'll be converting scRGB to SMPTE 2084 PQ.
-+        if (format == DXGI_FORMAT_Y410 && display->is_hdr()) {
-+          status = device->CreatePixelShader(convert_vuya_planar_ps_perceptual_quantizer_hlsl->GetBufferPointer(), convert_vuya_planar_ps_perceptual_quantizer_hlsl->GetBufferSize(), nullptr, &convert_YUV_fp16_ps);
-+          if (status) {
-+            BOOST_LOG(error) << "Failed to create convertY pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
-+            return -1;
-+          }
-+        }
-+        else {
-+          // If the display is in Advanced Color mode, the desktop format will be scRGB FP16.
-+          // scRGB uses linear gamma, so we must use our linear to sRGB conversion shaders.
-+          status = device->CreatePixelShader(convert_vuya_planar_ps_linear_hlsl->GetBufferPointer(), convert_vuya_planar_ps_linear_hlsl->GetBufferSize(), nullptr, &convert_YUV_fp16_ps);
-+          if (status) {
-+            BOOST_LOG(error) << "Failed to create convertY pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
-+            return -1;
-+          }
-+        }
-+  
-+        // These shaders consume standard 8-bit sRGB input
-+        status = device->CreatePixelShader(convert_vuya_planar_ps_hlsl->GetBufferPointer(), convert_vuya_planar_ps_hlsl->GetBufferSize(), nullptr, &convert_YUV_ps);
-+        if (status) {
 +          BOOST_LOG(error) << "Failed to create convertY pixel shader [0x"sv << util::hex(status).to_string_view() << ']';
            return -1;
          }
@@ -410,7 +399,14 @@ index 4aa1800..ff5f685 100644
        auto default_color_vectors = ::video::color_vectors_from_colorspace(::video::colorspace_e::rec601, false);
        if (!default_color_vectors) {
          BOOST_LOG(error) << "Missing color vectors for Rec. 601"sv;
-@@ -735,6 +856,7 @@ namespace platf::dxgi {
+@@ -729,12 +824,14 @@ namespace platf::dxgi {
+ 
+     buf_t subsample_offset;
+     buf_t color_matrix;
++    buf_t yuv_order;
+ 
+     blend_t blend_disable;
+     sampler_state_t sampler_linear;
  
      render_target_t nv12_Y_rt;
      render_target_t nv12_UV_rt;
@@ -418,7 +414,7 @@ index 4aa1800..ff5f685 100644
  
      // d3d_img_t::id -> encoder_img_ctx_t
      // These store the encoder textures for each img_t that passes through
-@@ -749,10 +871,13 @@ namespace platf::dxgi {
+@@ -749,10 +846,13 @@ namespace platf::dxgi {
      ps_t convert_UV_fp16_ps;
      ps_t convert_Y_ps;
      ps_t convert_Y_fp16_ps;
@@ -432,42 +428,25 @@ index 4aa1800..ff5f685 100644
  
      DXGI_FORMAT format;
  
-@@ -1367,7 +1492,7 @@ namespace platf::dxgi {
-       device_ctx->VSSetConstantBuffers(2, 1, &rotation);
-     }
- 
--    if (config.dynamicRange && is_hdr()) {
-+    if ((config.dynamicRange == 1 || config.dynamicRange >= 3) && is_hdr()) {
-       // This shader will normalize scRGB white levels to a user-defined white level
-       status = device->CreatePixelShader(cursor_ps_normalize_white_hlsl->GetBufferPointer(), cursor_ps_normalize_white_hlsl->GetBufferSize(), nullptr, &cursor_ps);
-       if (status) {
-@@ -1529,6 +1654,7 @@ namespace platf::dxgi {
-       // We include the 8-bit modes too for when the display is in SDR mode,
-       // while the client stream is HDR-capable. These UNORM formats can
-       // use our normal pixel shaders that expect sRGB input.
-+      DXGI_FORMAT_R10G10B10A2_UNORM,
-       DXGI_FORMAT_B8G8R8A8_UNORM,
-       DXGI_FORMAT_B8G8R8X8_UNORM,
-       DXGI_FORMAT_R8G8B8A8_UNORM,
-@@ -1576,7 +1702,7 @@ namespace platf::dxgi {
+@@ -1576,7 +1676,7 @@ namespace platf::dxgi {
                BOOST_LOG(warning) << "If your AMD GPU supports AV1 encoding, update your graphics drivers!"sv;
                return false;
              }
 -            else if (config.dynamicRange && version < AMF_MAKE_FULL_VERSION(1, 4, 23, 0)) {
-+            else if ((config.dynamicRange == 1 || config.dynamicRange >= 3) && version < AMF_MAKE_FULL_VERSION(1, 4, 23, 0)) {
++            else if (config.dynamicRange  && version < AMF_MAKE_FULL_VERSION(1, 4, 23, 0)) {
                // Older versions of the AMD AMF runtime can crash when fed P010 surfaces.
                // Fail if AMF version is below 1.4.23 where HEVC Main10 encoding was introduced.
                // AMF 1.4.23 corresponds to driver version 21.12.1 (21.40.11.03) or newer.
-@@ -1622,7 +1748,7 @@ namespace platf::dxgi {
+@@ -1622,7 +1722,7 @@ namespace platf::dxgi {
  
    std::unique_ptr<avcodec_encode_device_t>
    display_vram_t::make_avcodec_encode_device(pix_fmt_e pix_fmt) {
 -    if (pix_fmt != platf::pix_fmt_e::nv12 && pix_fmt != platf::pix_fmt_e::p010) {
-+    if (pix_fmt != platf::pix_fmt_e::nv12 && pix_fmt != platf::pix_fmt_e::p010 && pix_fmt != platf::pix_fmt_e::bgra && pix_fmt != platf::pix_fmt_e::yuv444 && pix_fmt != platf::pix_fmt_e::yuv444_10) {
++    if (pix_fmt != platf::pix_fmt_e::nv12 && pix_fmt != platf::pix_fmt_e::p010 && pix_fmt != platf::pix_fmt_e::yuv444 && pix_fmt != platf::pix_fmt_e::yuv444_10) {
        BOOST_LOG(error) << "display_vram_t doesn't support pixel format ["sv << from_pix_fmt(pix_fmt) << ']';
  
        return nullptr;
-@@ -1665,6 +1791,14 @@ namespace platf::dxgi {
+@@ -1665,6 +1765,10 @@ namespace platf::dxgi {
      compile_pixel_shader_helper(convert_yuv420_planar_y_ps_linear);
      compile_pixel_shader_helper(convert_yuv420_planar_y_ps_perceptual_quantizer);
      compile_vertex_shader_helper(convert_yuv420_planar_y_vs);
@@ -475,18 +454,34 @@ index 4aa1800..ff5f685 100644
 +    compile_pixel_shader_helper(convert_yuv444_planar_yuv_ps_linear);
 +    compile_pixel_shader_helper(convert_yuv444_planar_yuv_ps_perceptual_quantizer);
 +    compile_vertex_shader_helper(convert_yuv444_planar_yuv_vs);
-+    compile_pixel_shader_helper(convert_vuya_planar_ps);
-+    compile_pixel_shader_helper(convert_vuya_planar_ps_linear);
-+    compile_pixel_shader_helper(convert_vuya_planar_ps_perceptual_quantizer);
-+    compile_vertex_shader_helper(convert_vuya_planar_vs);
      compile_pixel_shader_helper(cursor_ps);
      compile_pixel_shader_helper(cursor_ps_normalize_white);
      compile_vertex_shader_helper(cursor_vs);
+diff --git a/src/rtsp.cpp b/src/rtsp.cpp
+index 99b9f0d..0e69856 100644
+--- a/src/rtsp.cpp
++++ b/src/rtsp.cpp
+@@ -969,6 +969,7 @@ namespace rtsp_stream {
+     args.try_emplace("x-nv-video[0].encoderCscMode"sv, "0"sv);
+     args.try_emplace("x-nv-vqos[0].bitStreamFormat"sv, "0"sv);
+     args.try_emplace("x-nv-video[0].dynamicRangeMode"sv, "0"sv);
++    args.try_emplace("x-nv-video[0].yuv444Mode"sv, "0"sv);
+     args.try_emplace("x-nv-aqos.packetDuration"sv, "5"sv);
+     args.try_emplace("x-nv-general.useReliableUdp"sv, "1"sv);
+     args.try_emplace("x-nv-vqos[0].fec.minRequiredFecPackets"sv, "0"sv);
+@@ -1013,6 +1014,7 @@ namespace rtsp_stream {
+       config.monitor.encoderCscMode = util::from_view(args.at("x-nv-video[0].encoderCscMode"sv));
+       config.monitor.videoFormat = util::from_view(args.at("x-nv-vqos[0].bitStreamFormat"sv));
+       config.monitor.dynamicRange = util::from_view(args.at("x-nv-video[0].dynamicRangeMode"sv));
++      config.monitor.Yuv444Mode = util::from_view(args.at("x-nv-video[0].yuv444Mode"sv));
+ 
+       configuredBitrateKbps = util::from_view(args.at("x-ml-video.configuredBitrateKbps"sv));
+     }
 diff --git a/src/video.cpp b/src/video.cpp
-index 394e7d4..7eb1404 100644
+index 394e7d4..b080bae 100644
 --- a/src/video.cpp
 +++ b/src/video.cpp
-@@ -72,14 +72,30 @@ namespace video {
+@@ -72,11 +72,13 @@ namespace video {
        baseline = 66,
        main = 77,
        high = 100,
@@ -499,43 +494,78 @@ index 394e7d4..7eb1404 100644
 +      rext = 4,
      };
    }  // namespace qsv
-+  namespace swp {
  
-+    enum class profile_h264_e : int {
-+      baseline = 66,
-+      main = 77,
-+      high = 100,
-+      high444 = 244,
-+    };
-+
-+    enum class profile_hevc_e : int {
-+      main = 1,
-+      main_10 = 2,
-+      rext = 4,
-+    };
-+  }  // namespace swp
-   util::Either<avcodec_buffer_t, int>
-   dxgi_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *);
-   util::Either<avcodec_buffer_t, int>
-@@ -447,7 +463,8 @@ namespace video {
+@@ -447,7 +449,8 @@ namespace video {
      "nvenc"sv,
      std::make_unique<encoder_platform_formats_nvenc>(
        platf::mem_type_e::dxgi,
 -      platf::pix_fmt_e::nv12, platf::pix_fmt_e::p010),
 +      platf::pix_fmt_e::nv12, platf::pix_fmt_e::p010,
-+      platf::pix_fmt_e::unknown, platf::pix_fmt_e::unknown),
++      platf::pix_fmt_e::yuv444, platf::pix_fmt_e::yuv444p16), // yuv444p16 will shrinking to yuv444p10 by nv
      {
        // Common options
        {},
-@@ -498,6 +515,7 @@ namespace video {
+@@ -455,6 +458,8 @@ namespace video {
+       {},
+       // HDR-specific options
+       {},
++      // yuv444 options
++      {},
+       // Fallback options
+       {},
+       std::nullopt,  // QP rate control fallback
+@@ -467,6 +472,8 @@ namespace video {
+       {},
+       // HDR-specific options
+       {},
++      // yuv444 options
++      {},
+       // Fallback options
+       {},
+       std::nullopt,  // QP rate control fallback
+@@ -479,6 +486,8 @@ namespace video {
+       {},
+       // HDR-specific options
+       {},
++      // yuv444 options
++      {},
+       // Fallback options
+       {},
+       std::nullopt,  // QP rate control fallback
+@@ -498,6 +507,7 @@ namespace video {
        AV_PIX_FMT_CUDA,
    #endif
        AV_PIX_FMT_NV12, AV_PIX_FMT_P010,
-+      AV_PIX_FMT_NONE,AV_PIX_FMT_NONE,
++      AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV444P16, // yuv444p16 will shrinking to yuv444p10 by nv
    #ifdef _WIN32
        dxgi_init_avcodec_hardware_input_buffer
    #else
-@@ -581,6 +599,7 @@ namespace video {
+@@ -520,6 +530,8 @@ namespace video {
+       {},
+       // HDR-specific options
+       {},
++      // yuv444 options
++      {},
+       // Fallback options
+       {},
+       std::nullopt,  // QP rate control fallback
+@@ -545,6 +557,7 @@ namespace video {
+       {
+         { "profile"s, (int) nv::profile_hevc_e::main_10 },
+       },
++      {},  // yuv444 options
+       {},  // Fallback options
+       std::nullopt,  // QP rate control fallback
+       "hevc_nvenc"s,
+@@ -566,6 +579,7 @@ namespace video {
+         { "profile"s, (int) nv::profile_h264_e::high },
+       },
+       {},  // HDR-specific options
++      {},  // yuv444 options
+       {},  // Fallback options
+       std::nullopt,  // QP rate control fallback
+       "h264_nvenc"s,
+@@ -581,6 +595,7 @@ namespace video {
        AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_QSV,
        AV_PIX_FMT_QSV,
        AV_PIX_FMT_NV12, AV_PIX_FMT_P010,
@@ -543,7 +573,36 @@ index 394e7d4..7eb1404 100644
        dxgi_init_avcodec_hardware_input_buffer),
      {
        // Common options
-@@ -662,6 +681,7 @@ namespace video {
+@@ -595,6 +610,8 @@ namespace video {
+       {},
+       // HDR-specific options
+       {},
++      // yuv444 options
++      {},
+       // Fallback options
+       {},
+       std::nullopt,  // QP rate control fallback
+@@ -619,6 +636,10 @@ namespace video {
+       {
+         { "profile"s, (int) qsv::profile_hevc_e::main_10 },
+       },
++      // yuv444 options
++      {
++        { "profile"s, (int) qsv::profile_hevc_e::rext },
++      },
+       // Fallback options
+       {
+         { "low_power"s, []() { return config::video.qsv.qsv_slow_hevc ? 0 : 1; } },
+@@ -646,6 +667,8 @@ namespace video {
+       },
+       // HDR-specific options
+       {},
++      // yuv444 options
++      {},
+       // Fallback options
+       {
+         { "low_power"s, 0 },  // Some old/low-end Intel GPUs don't support low power encoding
+@@ -662,6 +685,7 @@ namespace video {
        AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_NONE,
        AV_PIX_FMT_D3D11,
        AV_PIX_FMT_NV12, AV_PIX_FMT_P010,
@@ -551,7 +610,32 @@ index 394e7d4..7eb1404 100644
        dxgi_init_avcodec_hardware_input_buffer),
      {
        // Common options
-@@ -737,6 +757,7 @@ namespace video {
+@@ -676,6 +700,7 @@ namespace video {
+       },
+       {},  // SDR-specific options
+       {},  // HDR-specific options
++      {},  // yuv444 options
+       {},  // Fallback options
+       std::nullopt,  // QP rate control fallback
+       "av1_amf"s,
+@@ -698,6 +723,7 @@ namespace video {
+       },
+       {},  // SDR-specific options
+       {},  // HDR-specific options
++      {},  // yuv444 options
+       {},  // Fallback options
+       std::nullopt,  // QP rate control fallback
+       "hevc_amf"s,
+@@ -720,6 +746,8 @@ namespace video {
+       {},
+       // HDR-specific options
+       {},
++      // yuv444 options
++      {},
+       // Fallback options
+       {
+         { "usage"s, 2 /* AMF_VIDEO_ENCODER_USAGE_LOW_LATENCY */ },  // Workaround for https://github.com/GPUOpen-LibrariesAndSDKs/AMF/issues/410
+@@ -737,6 +765,7 @@ namespace video {
        AV_HWDEVICE_TYPE_NONE, AV_HWDEVICE_TYPE_NONE,
        AV_PIX_FMT_NONE,
        AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10,
@@ -559,15 +643,68 @@ index 394e7d4..7eb1404 100644
        nullptr),
      {
        // libsvtav1 takes different presets than libx264/libx265.
-@@ -802,6 +823,7 @@ namespace video {
+@@ -749,6 +778,7 @@ namespace video {
+       },
+       {},  // SDR-specific options
+       {},  // HDR-specific options
++      {},  // yuv444 options
+       {},  // Fallback options
+ 
+       // QP rate control fallback
+@@ -776,6 +806,7 @@ namespace video {
+       },
+       {},  // SDR-specific options
+       {},  // HDR-specific options
++      {},  // yuv444 options { "profile"s, "main444-8"s },or "main444-10",but it too heavy. libx265 will auto select correct profile such as main444-8
+       {},  // Fallback options
+       std::nullopt,  // QP rate control fallback
+       "libx265"s,
+@@ -788,6 +819,9 @@ namespace video {
+       },
+       {},  // SDR-specific options
+       {},  // HDR-specific options
++      {
++        { "profile"s, "high444"s },
++      },  // yuv444 options.  libx264 will auto select correct profile such as high444
+       {},  // Fallback options
+       std::nullopt,  // QP rate control fallback
+       "libx264"s,
+@@ -802,6 +836,7 @@ namespace video {
        AV_HWDEVICE_TYPE_VAAPI, AV_HWDEVICE_TYPE_NONE,
        AV_PIX_FMT_VAAPI,
        AV_PIX_FMT_NV12, AV_PIX_FMT_P010,
-+      AV_PIX_FMT_NONE,AV_PIX_FMT_NONE,
++      AV_PIX_FMT_VUYX, AV_PIX_FMT_XV30,
        vaapi_init_avcodec_hardware_input_buffer),
      {
        // Common options
-@@ -870,6 +892,7 @@ namespace video {
+@@ -814,6 +849,8 @@ namespace video {
+       {},
+       // HDR-specific options
+       {},
++      // yuv444 options
++      {},
+       // Fallback options
+       {
+         { "low_power"s, 0 },  // Not all VAAPI drivers expose LP entrypoints
+@@ -833,6 +870,8 @@ namespace video {
+       {},
+       // HDR-specific options
+       {},
++      // yuv444 options
++      {},
+       // Fallback options
+       {
+         { "low_power"s, 0 },  // Not all VAAPI drivers expose LP entrypoints
+@@ -852,6 +891,8 @@ namespace video {
+       {},
+       // HDR-specific options
+       {},
++      // yuv444 options
++      {},
+       // Fallback options
+       {
+         { "low_power"s, 0 },  // Not all VAAPI drivers expose LP entrypoints
+@@ -870,6 +911,7 @@ namespace video {
        AV_HWDEVICE_TYPE_VIDEOTOOLBOX, AV_HWDEVICE_TYPE_NONE,
        AV_PIX_FMT_VIDEOTOOLBOX,
        AV_PIX_FMT_NV12, AV_PIX_FMT_P010,
@@ -575,129 +712,235 @@ index 394e7d4..7eb1404 100644
        vt_init_avcodec_hardware_input_buffer),
      {
        // Common options
-@@ -909,9 +932,7 @@ namespace video {
+@@ -881,6 +923,7 @@ namespace video {
        },
        {},  // SDR-specific options
        {},  // HDR-specific options
--      {
--        { "flags"s, "-low_delay" },
--      },  // Fallback options
-+      {},  // Fallback options
++      {},  // yuv444 options
+       {},  // Fallback options
        std::nullopt,
-       "h264_videotoolbox"s,
-     },
-@@ -1296,10 +1317,6 @@ namespace video {
-         return ret;
-       }
+       "av1_videotoolbox"s,
+@@ -895,6 +938,7 @@ namespace video {
+       },
+       {},  // SDR-specific options
+       {},  // HDR-specific options
++      {},  // yuv444 options
+       {},  // Fallback options
+       std::nullopt,
+       "hevc_videotoolbox"s,
+@@ -909,6 +953,7 @@ namespace video {
+       },
+       {},  // SDR-specific options
+       {},  // HDR-specific options
++      {},  // yuv444 options
+       {
+         { "flags"s, "-low_delay" },
+       },  // Fallback options
+@@ -937,6 +982,8 @@ namespace video {
+   };
  
--      if (av_packet->flags & AV_PKT_FLAG_KEY) {
--        BOOST_LOG(debug) << "Frame "sv << frame_nr << ": IDR Keyframe (AV_FRAME_FLAG_KEY)"sv;
--      }
--
-       if ((frame->flags & AV_FRAME_FLAG_KEY) && !(av_packet->flags & AV_PKT_FLAG_KEY)) {
-         BOOST_LOG(error) << "Encoder did not produce IDR frame when requested!"sv;
-       }
-@@ -1390,7 +1407,10 @@ namespace video {
-       return nullptr;
-     }
- 
--    if (config.dynamicRange && !video_format[encoder_t::DYNAMIC_RANGE]) {
-+    bool isHdrRequest = (config.dynamicRange == 1 || config.dynamicRange == 3) ? true : false;
-+    bool isYuv444Request = (config.dynamicRange == 2 || config.dynamicRange == 3) ? true : false;
-+
-+    if (isHdrRequest && !video_format[encoder_t::DYNAMIC_RANGE]) {
-       BOOST_LOG(error) << video_format.name << ": dynamic range not supported"sv;
-       return nullptr;
-     }
-@@ -1403,7 +1423,7 @@ namespace video {
+   static encoder_t *chosen_encoder;
++  static int encoder_yuv420_packet_size[5];
++  int active_h264_mode = 0;
+   int active_hevc_mode;
+   int active_av1_mode;
+   bool last_encoder_probe_supported_ref_frames_invalidation = false;
+@@ -1403,7 +1450,7 @@ namespace video {
      }
  
      auto colorspace = encode_device->colorspace;
 -    auto sw_fmt = (colorspace.bit_depth == 10) ? platform_formats->avcodec_pix_fmt_10bit : platform_formats->avcodec_pix_fmt_8bit;
-+    auto sw_fmt = (colorspace.bit_depth == 10) ? (isYuv444Request ? platform_formats->avcodec_pix_fmt_10bit_444 : platform_formats->avcodec_pix_fmt_10bit) : (isYuv444Request ? platform_formats->avcodec_pix_fmt_8bit_444 : platform_formats->avcodec_pix_fmt_8bit);
++    auto sw_fmt = (colorspace.bit_depth == 10) ? (config.Yuv444Mode ? platform_formats->avcodec_pix_fmt_10bit_444 : platform_formats->avcodec_pix_fmt_10bit) : (config.Yuv444Mode ? platform_formats->avcodec_pix_fmt_8bit_444 : platform_formats->avcodec_pix_fmt_8bit);
  
      // Allow up to 1 retry to apply the set of fallback options.
      //
-@@ -1420,11 +1440,11 @@ namespace video {
+@@ -1420,15 +1467,17 @@ namespace video {
  
        switch (config.videoFormat) {
          case 0:
 -          ctx->profile = FF_PROFILE_H264_HIGH;
-+          ctx->profile = isYuv444Request ? FF_PROFILE_H264_HIGH_444_PREDICTIVE : FF_PROFILE_H264_HIGH;
++	  // some encoder not support h264 yuv444 mode such as qsv
++          ctx->profile = config.Yuv444Mode ? FF_PROFILE_H264_HIGH_444_PREDICTIVE : FF_PROFILE_H264_HIGH;
            break;
  
          case 1:
 -          ctx->profile = config.dynamicRange ? FF_PROFILE_HEVC_MAIN_10 : FF_PROFILE_HEVC_MAIN;
-+          ctx->profile = isYuv444Request ? FF_PROFILE_HEVC_REXT : (isHdrRequest ? FF_PROFILE_HEVC_MAIN_10 : FF_PROFILE_HEVC_MAIN);
++          ctx->profile = config.Yuv444Mode ? FF_PROFILE_HEVC_REXT : (config.dynamicRange ? FF_PROFILE_HEVC_MAIN_10 : FF_PROFILE_HEVC_MAIN);
            break;
  
          case 2:
-@@ -1453,10 +1473,7 @@ namespace video {
-         }
+           // AV1 supports both 8 and 10 bit encoding with the same Main profile
++	  // some encoder not support av1 yuv444 mode such as qsv
+           ctx->profile = FF_PROFILE_AV1_MAIN;
+           break;
        }
- 
--      // We forcefully reset the flags to avoid clash on reuse of AVCodecContext
--      ctx->flags = 0;
--      ctx->flags |= AV_CODEC_FLAG_CLOSED_GOP | AV_CODEC_FLAG_LOW_DELAY;
+@@ -1456,7 +1505,6 @@ namespace video {
+       // We forcefully reset the flags to avoid clash on reuse of AVCodecContext
+       ctx->flags = 0;
+       ctx->flags |= AV_CODEC_FLAG_CLOSED_GOP | AV_CODEC_FLAG_LOW_DELAY;
 -
-+      ctx->flags |= (AV_CODEC_FLAG_CLOSED_GOP | AV_CODEC_FLAG_LOW_DELAY);
        ctx->flags2 |= AV_CODEC_FLAG2_FAST;
  
        auto avcodec_colorspace = avcodec_colorspace_from_sunshine_colorspace(colorspace);
-@@ -1557,7 +1574,7 @@ namespace video {
-       for (auto &option : video_format.common_options) {
+@@ -1560,6 +1608,11 @@ namespace video {
+       for (auto &option : (config.dynamicRange ? video_format.hdr_options : video_format.sdr_options)) {
          handle_option(option);
        }
--      for (auto &option : (config.dynamicRange ? video_format.hdr_options : video_format.sdr_options)) {
-+      for (auto &option : (isHdrRequest ? video_format.hdr_options : video_format.sdr_options)) {
-         handle_option(option);
-       }
-       if (retries > 0) {
-@@ -1609,6 +1626,31 @@ namespace video {
-         BOOST_LOG(error) << "Couldn't set video quality: encoder "sv << encoder.name << " doesn't support qp"sv;
-         return nullptr;
-       }
-+      // my defined options
-+      if (isYuv444Request) {
-+        encoder_t::option_t libx264_444_option = { "profile"s, "high444"s };
-+        encoder_t::option_t hevc_444_option = { "profile"s, (int) swp::profile_hevc_e::rext };  // qsv only can encode vuyx when using hevc
-+        encoder_t::option_t sw_crf = { "crf"s, 0 };
-+	encoder_t::option_t libx265_444_option = { "profile"s, "main444-8"s };
-+        switch (config.videoFormat) {
-+          case 0:
-+            //h264
-+            break;
-+          case 1:
-+  	  // for qsv hevc_444
-+	    if (hardware)
-+              handle_option(hevc_444_option);
-+	    else
-+	      handle_option(libx265_444_option);
-+            break;
-+          case 2:
-+            // AV1 
-+            break;
-+        }
-+        if (!hardware) {
-+  	handle_option(sw_crf);
++      if (config.Yuv444Mode) {
++        for (auto &option : video_format.yuv444_options) {
++          handle_option(option);
 +        }
 +      }
- 
-       if (auto status = avcodec_open2(ctx.get(), codec, &options)) {
-         char err_str[AV_ERROR_MAX_STRING_SIZE] { 0 };
-@@ -1870,7 +1912,7 @@ namespace video {
+       if (retries > 0) {
+         for (auto &option : video_format.fallback_options) {
+           handle_option(option);
+@@ -1870,7 +1923,7 @@ namespace video {
      std::unique_ptr<platf::encode_device_t> result;
  
      auto colorspace = colorspace_from_client_config(config, disp.is_hdr());
 -    auto pix_fmt = (colorspace.bit_depth == 10) ? encoder.platform_formats->pix_fmt_10bit : encoder.platform_formats->pix_fmt_8bit;
-+    auto pix_fmt = (colorspace.bit_depth == 10) ? ((config.dynamicRange == 2 || config.dynamicRange == 3) ? encoder.platform_formats->pix_fmt_10bit_444 : encoder.platform_formats->pix_fmt_10bit) : ((config.dynamicRange == 2 || config.dynamicRange == 3) ? encoder.platform_formats->pix_fmt_8bit_444 : encoder.platform_formats->pix_fmt_8bit);
++    auto pix_fmt = (colorspace.bit_depth == 10) ? (config.Yuv444Mode ? encoder.platform_formats->pix_fmt_10bit_444 : encoder.platform_formats->pix_fmt_10bit) : (config.Yuv444Mode ? encoder.platform_formats->pix_fmt_8bit_444 : encoder.platform_formats->pix_fmt_8bit);
  
      if (dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get())) {
        result = disp.make_avcodec_encode_device(pix_fmt);
-@@ -2803,6 +2845,16 @@ namespace video {
+@@ -2260,6 +2313,22 @@ namespace video {
+       return -1;
+     }
+ 
++    // prepare for  test if support yuv444 mode
++    if (!config.Yuv444Mode) {
++      if (auto packet_avcodec1 = dynamic_cast<packet_raw_avcodec *>(packet.get())) {
++	encoder_yuv420_packet_size[config.videoFormat] = packet_avcodec1->av_packet->size;
++      }
++    }
++    if (config.Yuv444Mode) {
++      // test is support yuv444 mode
++      if (auto packet_avcodec2 = dynamic_cast<packet_raw_avcodec *>(packet.get())) {
++	if (encoder_yuv420_packet_size[config.videoFormat] == packet_avcodec2->av_packet->size) {
++	  // for yuv444 mode,packet size is lager than yuv420 mode.
++	  return -1;
++	}
++      }
++    }
++
+     int flag = 0;
+ 
+     // This check only applies for H.264 and HEVC
+@@ -2295,8 +2364,8 @@ namespace video {
+     encoder.av1.capabilities.set();
+ 
+     // First, test encoder viability
+-    config_t config_max_ref_frames { 1920, 1080, 60, 1000, 1, 1, 1, 0, 0 };
+-    config_t config_autoselect { 1920, 1080, 60, 1000, 1, 0, 1, 0, 0 };
++    config_t config_max_ref_frames { 1920, 1080, 60, 1000, 1, 1, 1, 0, 0, 0 };
++    config_t config_autoselect { 1920, 1080, 60, 1000, 1, 0, 1, 0, 0, 0 };
+ 
+     // If the encoder isn't supported at all (not even H.264), bail early
+     reset_display(disp, encoder.platform_formats->dev_type, config::video.output_name, config_autoselect);
+@@ -2415,8 +2484,15 @@ namespace video {
+       encoder.av1.capabilities.reset();
+     }
+ 
++    // Test h264 yuv444 support
++    config_t config_yuv444 { 1920, 1080, 60, 1000, 1, 0, 1, 0, 0, 1 };
++    if (encoder.h264[encoder_t::PASSED]) {
++      encoder.h264[encoder_t::YUV444_MODE] = validate_config(disp, encoder,config_yuv444) >= 0;
++    }
++
+     std::vector<std::pair<encoder_t::flag_e, config_t>> configs {
+-      { encoder_t::DYNAMIC_RANGE, { 1920, 1080, 60, 1000, 1, 0, 3, 1, 1 } },
++      { encoder_t::DYNAMIC_RANGE, { 1920, 1080, 60, 1000, 1, 0, 3, 1, 1, 0 } },
++      { encoder_t::YUV444_MODE, { 1920, 1080, 60, 1000, 1, 0, 3, 1, 1, 1 } },
+     };
+ 
+     for (auto &[flag, config] : configs) {
+@@ -2435,7 +2511,7 @@ namespace video {
+       }
+ 
+       // HDR is not supported with H.264. Don't bother even trying it.
+-      encoder.h264[flag] = flag != encoder_t::DYNAMIC_RANGE && validate_config(disp, encoder, h264) >= 0;
++      encoder.h264[flag] = (flag == encoder_t::YUV444_MODE) ? encoder.h264[encoder_t::YUV444_MODE] : (flag != encoder_t::DYNAMIC_RANGE) && validate_config(disp, encoder, h264) >= 0;
+ 
+       if (encoder.hevc[encoder_t::PASSED]) {
+         encoder.hevc[flag] = validate_config(disp, encoder, hevc) >= 0;
+@@ -2485,7 +2561,15 @@ namespace video {
+ 
+     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
+       // If we can't satisfy both the encoder and codec requirement, prefer the encoder over codec support
+-      if (active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) {
++      if (active_h264_mode == 4 && !encoder->h264[encoder_t::YUV444_MODE]) {
++        BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support H264 YUV444 MODE on this system"sv;
++        active_h264_mode = 0;
++      }
++      if (active_hevc_mode == 4 && !encoder->hevc[encoder_t::YUV444_MODE]) {
++        BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support HEVC YUV444 MODE on this system"sv;
++        active_hevc_mode = 0;
++      }
++      else if (active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) {
+         BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support HEVC Main10 on this system"sv;
+         active_hevc_mode = 0;
+       }
+@@ -2494,7 +2578,11 @@ namespace video {
+         active_hevc_mode = 0;
+       }
+ 
+-      if (active_av1_mode == 3 && !encoder->av1[encoder_t::DYNAMIC_RANGE]) {
++      if (active_av1_mode == 4 && !encoder->av1[encoder_t::YUV444_MODE]) {
++        BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support AV1 YUV444 MODE on this system"sv;
++        active_av1_mode = 0;
++      }
++      else if (active_av1_mode == 3 && !encoder->av1[encoder_t::DYNAMIC_RANGE]) {
+         BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support AV1 Main10 on this system"sv;
+         active_av1_mode = 0;
+       }
+@@ -2534,7 +2622,7 @@ namespace video {
+     BOOST_LOG(info) << "// Testing for available encoders, this may generate errors. You can safely ignore those errors. //"sv;
+ 
+     // If we haven't found an encoder yet, but we want one with specific codec support, search for that now.
+-    if (chosen_encoder == nullptr && (active_hevc_mode >= 2 || active_av1_mode >= 2)) {
++    if (chosen_encoder == nullptr && (active_h264_mode >= 3 || active_hevc_mode >= 2 || active_av1_mode >= 2)) {
+       KITTY_WHILE_LOOP(auto pos = std::begin(encoder_list), pos != std::end(encoder_list), {
+         auto encoder = *pos;
+ 
+@@ -2558,6 +2646,14 @@ namespace video {
+           continue;
+         }
+ 
++        // Skip it if it doesn't support yuv444 mode on the specified codec
++        if ((active_h264_mode == 4 && !encoder->h264[encoder_t::YUV444_MODE]) ||
++	    (active_hevc_mode == 4 && !encoder->hevc[encoder_t::YUV444_MODE]) ||
++            (active_av1_mode == 4 && !encoder->av1[encoder_t::YUV444_MODE])) {
++          pos++;
++          continue;
++        }
++
+         chosen_encoder = encoder;
+         break;
+       });
+@@ -2638,12 +2734,15 @@ namespace video {
+       BOOST_LOG(info) << "Found AV1 encoder: "sv << encoder.av1.name << " ["sv << encoder.name << ']';
+     }
+ 
++    if (active_h264_mode == 0) {
++      active_h264_mode = encoder.h264[encoder_t::YUV444_MODE] ? 4 : 2;
++    }
+     if (active_hevc_mode == 0) {
+-      active_hevc_mode = encoder.hevc[encoder_t::PASSED] ? (encoder.hevc[encoder_t::DYNAMIC_RANGE] ? 3 : 2) : 1;
++      active_hevc_mode = encoder.hevc[encoder_t::PASSED] ? (encoder.hevc[encoder_t::YUV444_MODE] ? 4 : (encoder.hevc[encoder_t::DYNAMIC_RANGE] ? 3 : 2)) : 1;
+     }
+ 
+     if (active_av1_mode == 0) {
+-      active_av1_mode = encoder.av1[encoder_t::PASSED] ? (encoder.av1[encoder_t::DYNAMIC_RANGE] ? 3 : 2) : 1;
++      active_av1_mode = encoder.av1[encoder_t::PASSED] ? (encoder.av1[encoder_t::YUV444_MODE] ? 4 : (encoder.av1[encoder_t::DYNAMIC_RANGE] ? 3 : 2)) : 1;
+     }
+ 
+     return 0;
+@@ -2803,6 +2902,18 @@ namespace video {
          return platf::pix_fmt_e::nv12;
        case AV_PIX_FMT_P010:
          return platf::pix_fmt_e::p010;
++      case AV_PIX_FMT_YUV444P16:
++        return platf::pix_fmt_e::yuv444p16;
 +      case AV_PIX_FMT_YUV444P10:
 +        return platf::pix_fmt_e::yuv444p10;
 +      case AV_PIX_FMT_YUV444P:
@@ -712,7 +955,7 @@ index 394e7d4..7eb1404 100644
          return platf::pix_fmt_e::unknown;
      }
 diff --git a/src/video.h b/src/video.h
-index ba80474..6b3117f 100644
+index ba80474..06e9c46 100644
 --- a/src/video.h
 +++ b/src/video.h
 @@ -39,6 +39,7 @@ namespace video {
@@ -768,231 +1011,42 @@ index ba80474..6b3117f 100644
      }
    };
  
-diff --git a/src/video_colorspace.cpp b/src/video_colorspace.cpp
-index 4f5955e..9e631fb 100644
---- a/src/video_colorspace.cpp
-+++ b/src/video_colorspace.cpp
-@@ -20,10 +20,16 @@ namespace video {
+@@ -88,6 +100,7 @@ namespace video {
+       CBR,  // Some encoders don't support CBR, if not supported --> attempt constant quantatication parameter instead
+       DYNAMIC_RANGE,  // hdr
+       VUI_PARAMETERS,  // AMD encoder with VAAPI doesn't add VUI parameters to SPS
++      YUV444_MODE, //yuv444 mode support, h264 is ony 8bit+yuv444,others is 10bit + yuv444 and compatible with 8bit + yuv444
+       MAX_FLAGS
+     };
  
-     /* See video::config_t declaration for details */
+@@ -102,6 +115,7 @@ namespace video {
+         _CONVERT(CBR);
+         _CONVERT(DYNAMIC_RANGE);
+         _CONVERT(VUI_PARAMETERS);
++	_CONVERT(YUV444_MODE);
+         _CONVERT(MAX_FLAGS);
+       }
+ #undef _CONVERT
+@@ -126,6 +140,7 @@ namespace video {
+       std::vector<option_t> common_options;
+       std::vector<option_t> sdr_options;
+       std::vector<option_t> hdr_options;
++      std::vector<option_t> yuv444_options;
+       std::vector<option_t> fallback_options;
  
--    if (config.dynamicRange > 0 && hdr_display) {
-+    if ((config.dynamicRange == 1 || config.dynamicRange >= 3) && hdr_display) {
-       // Rec. 2020 with ST 2084 perceptual quantizer
-       colorspace.colorspace = colorspace_e::bt2020;
-     }
-+    else if (config.dynamicRange == 2) {
-+      colorspace.colorspace = colorspace_e::rec709;
-+      colorspace.bit_depth = 8;
-+      colorspace.full_range = 1;
-+      return colorspace;
-+    }
-     else {
-       switch (config.encoderCscMode >> 1) {
-         case 0:
-@@ -52,10 +58,12 @@ namespace video {
+       // QP option to set in the case that CBR/VBR is not supported
+@@ -312,8 +327,11 @@ namespace video {
+     /* Encoding color depth (bit depth): 0 - 8-bit, 1 - 10-bit
+        HDR encoding activates when color depth is higher than 8-bit and the display which is being captured is operating in HDR mode */
+     int dynamicRange;
++    /* If enable yuv444 encoding mode: 0 - not enable, 1 - enable yuv444 mode */
++    int Yuv444Mode;
+   };
  
-     switch (config.dynamicRange) {
-       case 0:
-+      case 2:
-         colorspace.bit_depth = 8;
-         break;
- 
-       case 1:
-+      case 3:
-         colorspace.bit_depth = 10;
-         break;
- 
-diff --git a/src_assets/linux/shaders/opengl/ConvertYUV.frag b/src_assets/linux/shaders/opengl/ConvertYUV.frag
-new file mode 100644
-index 0000000..3d7e9a8
---- /dev/null
-+++ b/src_assets/linux/shaders/opengl/ConvertYUV.frag
-@@ -0,0 +1,31 @@
-+#version 300 es
-+
-+#ifdef GL_ES
-+precision lowp float;
-+#endif
-+
-+uniform sampler2D image;
-+
-+layout(shared) uniform ColorMatrix {
-+  vec4 color_vec_y;
-+  vec4 color_vec_u;
-+  vec4 color_vec_v;
-+  vec2 range_y;
-+  vec2 range_uv;
-+};
-+
-+in vec2 tex;
-+layout(location = 0) out vec3 color;
-+
-+void main()
-+{
-+	vec3 rgb = texture(image, tex).rgb;
-+	float y = dot(color_vec_y.xyz, rgb);
-+	float u = dot(color_vec_u.xyz, rgb) + color_vec_u.w;
-+	float v = dot(color_vec_v.xyz, rgb) + color_vec_v.w;
-+
-+	y = y * range_y.x + range_y.y;
-+	u = u * range_uv.x + range_uv.y;
-+	v = v * range_uv.x + range_uv.y;
-+	color = vec3(y, u, v);
-+}
-\ No newline at end of file
-diff --git a/src_assets/windows/assets/shaders/directx/convert_vuya_planar_ps.hlsl b/src_assets/windows/assets/shaders/directx/convert_vuya_planar_ps.hlsl
-new file mode 100644
-index 0000000..304108d
---- /dev/null
-+++ b/src_assets/windows/assets/shaders/directx/convert_vuya_planar_ps.hlsl
-@@ -0,0 +1,3 @@
-+#include "include/convert_base.hlsl"
-+
-+#include "include/convert_vuya_planar_ps_base.hlsl"
-diff --git a/src_assets/windows/assets/shaders/directx/convert_vuya_planar_ps_linear.hlsl b/src_assets/windows/assets/shaders/directx/convert_vuya_planar_ps_linear.hlsl
-new file mode 100644
-index 0000000..82a0160
---- /dev/null
-+++ b/src_assets/windows/assets/shaders/directx/convert_vuya_planar_ps_linear.hlsl
-@@ -0,0 +1,3 @@
-+#include "include/convert_linear_base.hlsl"
-+
-+#include "include/convert_vuya_planar_ps_base.hlsl"
-diff --git a/src_assets/windows/assets/shaders/directx/convert_vuya_planar_ps_perceptual_quantizer.hlsl b/src_assets/windows/assets/shaders/directx/convert_vuya_planar_ps_perceptual_quantizer.hlsl
-new file mode 100644
-index 0000000..eb8a019
---- /dev/null
-+++ b/src_assets/windows/assets/shaders/directx/convert_vuya_planar_ps_perceptual_quantizer.hlsl
-@@ -0,0 +1,3 @@
-+#include "include/convert_perceptual_quantizer_base.hlsl"
-+
-+#include "include/convert_vuya_planar_ps_base.hlsl"
-diff --git a/src_assets/windows/assets/shaders/directx/convert_vuya_planar_vs.hlsl b/src_assets/windows/assets/shaders/directx/convert_vuya_planar_vs.hlsl
-new file mode 100644
-index 0000000..33e4814
---- /dev/null
-+++ b/src_assets/windows/assets/shaders/directx/convert_vuya_planar_vs.hlsl
-@@ -0,0 +1,10 @@
-+cbuffer rotate_texture_steps_cbuffer : register(b1) {
-+    int rotate_texture_steps;
-+};
-+
-+#include "include/base_vs.hlsl"
-+
-+vertex_t main_vs(uint vertex_id : SV_VertexID)
-+{
-+    return generate_fullscreen_triangle_vertex(vertex_id, rotate_texture_steps);
-+}
-diff --git a/src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_ps.hlsl b/src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_ps.hlsl
-new file mode 100644
-index 0000000..f6323ce
---- /dev/null
-+++ b/src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_ps.hlsl
-@@ -0,0 +1,3 @@
-+#include "include/convert_base.hlsl"
-+
-+#include "include/convert_yuv444_planar_yuv_ps_base.hlsl"
-diff --git a/src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_ps_linear.hlsl b/src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_ps_linear.hlsl
-new file mode 100644
-index 0000000..e2dd48f
---- /dev/null
-+++ b/src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_ps_linear.hlsl
-@@ -0,0 +1,3 @@
-+#include "include/convert_linear_base.hlsl"
-+
-+#include "include/convert_yuv444_planar_yuv_ps_base.hlsl"
-diff --git a/src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_ps_perceptual_quantizer.hlsl b/src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_ps_perceptual_quantizer.hlsl
-new file mode 100644
-index 0000000..32fc8d8
---- /dev/null
-+++ b/src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_ps_perceptual_quantizer.hlsl
-@@ -0,0 +1,3 @@
-+#include "include/convert_perceptual_quantizer_base.hlsl"
-+
-+#include "include/convert_yuv444_planar_yuv_ps_base.hlsl"
-diff --git a/src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_vs.hlsl b/src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_vs.hlsl
-new file mode 100644
-index 0000000..33e4814
---- /dev/null
-+++ b/src_assets/windows/assets/shaders/directx/convert_yuv444_planar_yuv_vs.hlsl
-@@ -0,0 +1,10 @@
-+cbuffer rotate_texture_steps_cbuffer : register(b1) {
-+    int rotate_texture_steps;
-+};
-+
-+#include "include/base_vs.hlsl"
-+
-+vertex_t main_vs(uint vertex_id : SV_VertexID)
-+{
-+    return generate_fullscreen_triangle_vertex(vertex_id, rotate_texture_steps);
-+}
-diff --git a/src_assets/windows/assets/shaders/directx/include/convert_vuya_planar_ps_base.hlsl b/src_assets/windows/assets/shaders/directx/include/convert_vuya_planar_ps_base.hlsl
-new file mode 100644
-index 0000000..c45952f
---- /dev/null
-+++ b/src_assets/windows/assets/shaders/directx/include/convert_vuya_planar_ps_base.hlsl
-@@ -0,0 +1,27 @@
-+Texture2D image : register(t0);
-+SamplerState def_sampler : register(s0);
-+
-+cbuffer color_matrix_cbuffer : register(b0) {
-+    float4 color_vec_y;
-+    float4 color_vec_u;
-+    float4 color_vec_v;
-+    float2 range_y;
-+    float2 range_uv;
-+};
-+
-+#include "include/base_vs_types.hlsl"
-+
-+float4 main_ps(vertex_t input) : SV_Target
-+{
-+    float3 rgb = CONVERT_FUNCTION(image.Sample(def_sampler, input.tex_coord, 0).rgb);
-+
-+    float y = dot(color_vec_y.xyz, rgb) + color_vec_y.w;
-+    float u = dot(color_vec_u.xyz, rgb) + color_vec_u.w;
-+    float v = dot(color_vec_v.xyz, rgb) + color_vec_v.w;
-+
-+    y = y * range_y.x + range_y.y;
-+    u = u * range_uv.x + range_uv.y;
-+    v = v * range_uv.x + range_uv.y;
-+
-+    return float4(v, u, y, 1.0f);
-+}
-diff --git a/src_assets/windows/assets/shaders/directx/include/convert_yuv444_planar_yuv_ps_base.hlsl b/src_assets/windows/assets/shaders/directx/include/convert_yuv444_planar_yuv_ps_base.hlsl
-new file mode 100644
-index 0000000..265360d
---- /dev/null
-+++ b/src_assets/windows/assets/shaders/directx/include/convert_yuv444_planar_yuv_ps_base.hlsl
-@@ -0,0 +1,27 @@
-+Texture2D image : register(t0);
-+SamplerState def_sampler : register(s0);
-+
-+cbuffer color_matrix_cbuffer : register(b0) {
-+    float4 color_vec_y;
-+    float4 color_vec_u;
-+    float4 color_vec_v;
-+    float2 range_y;
-+    float2 range_uv;
-+};
-+
-+#include "include/base_vs_types.hlsl"
-+
-+float3 main_ps(vertex_t input) : SV_Target
-+{
-+    float3 rgb = CONVERT_FUNCTION(image.Sample(def_sampler, input.tex_coord, 0).rgb);
-+
-+    float y = dot(color_vec_y.xyz, rgb) + color_vec_y.w;
-+    float u = dot(color_vec_u.xyz, rgb) + color_vec_u.w;
-+    float v = dot(color_vec_v.xyz, rgb) + color_vec_v.w;
-+
-+    y = y * range_y.x + range_y.y;
-+    u = u * range_uv.x + range_uv.y;
-+    v = v * range_uv.x + range_uv.y;
-+
-+    return float3(u, y, v);
-+}
++  extern int active_h264_mode;
+   extern int active_hevc_mode;
+   extern int active_av1_mode;
+   extern bool last_encoder_probe_supported_ref_frames_invalidation;
 -- 
 2.45.1
 

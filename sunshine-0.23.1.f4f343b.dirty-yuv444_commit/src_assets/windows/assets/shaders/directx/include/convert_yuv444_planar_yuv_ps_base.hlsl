@@ -9,6 +9,10 @@ cbuffer color_matrix_cbuffer : register(b0) {
     float2 range_uv;
 };
 
+cbuffer yuv_order_cbuffer : register(b2) {
+    int yuv_order;
+};
+
 #include "include/base_vs_types.hlsl"
 
 float3 main_ps(vertex_t input) : SV_Target
@@ -23,5 +27,10 @@ float3 main_ps(vertex_t input) : SV_Target
     u = u * range_uv.x + range_uv.y;
     v = v * range_uv.x + range_uv.y;
 
-    return float3(u, y, v);
+    if (yuv_order == 0)
+      return float3(v, u, y);
+    else if (yuv_order == 1)
+      return float3(u, y, v);
+    else
+      return float3(y, u, v);
 }

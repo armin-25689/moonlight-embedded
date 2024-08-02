@@ -100,6 +100,7 @@ namespace video {
       CBR,  // Some encoders don't support CBR, if not supported --> attempt constant quantatication parameter instead
       DYNAMIC_RANGE,  // hdr
       VUI_PARAMETERS,  // AMD encoder with VAAPI doesn't add VUI parameters to SPS
+      YUV444_MODE, //yuv444 mode support, h264 is ony 8bit+yuv444,others is 10bit + yuv444 and compatible with 8bit + yuv444
       MAX_FLAGS
     };
 
@@ -114,6 +115,7 @@ namespace video {
         _CONVERT(CBR);
         _CONVERT(DYNAMIC_RANGE);
         _CONVERT(VUI_PARAMETERS);
+	_CONVERT(YUV444_MODE);
         _CONVERT(MAX_FLAGS);
       }
 #undef _CONVERT
@@ -138,6 +140,7 @@ namespace video {
       std::vector<option_t> common_options;
       std::vector<option_t> sdr_options;
       std::vector<option_t> hdr_options;
+      std::vector<option_t> yuv444_options;
       std::vector<option_t> fallback_options;
 
       // QP option to set in the case that CBR/VBR is not supported
@@ -324,8 +327,11 @@ namespace video {
     /* Encoding color depth (bit depth): 0 - 8-bit, 1 - 10-bit
        HDR encoding activates when color depth is higher than 8-bit and the display which is being captured is operating in HDR mode */
     int dynamicRange;
+    /* If enable yuv444 encoding mode: 0 - not enable, 1 - enable yuv444 mode */
+    int Yuv444Mode;
   };
 
+  extern int active_h264_mode;
   extern int active_hevc_mode;
   extern int active_av1_mode;
   extern bool last_encoder_probe_supported_ref_frames_invalidation;
