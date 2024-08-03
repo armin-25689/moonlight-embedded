@@ -1422,6 +1422,7 @@ void evdev_map(char* device) {
   if (ioctl(devices[0].fd, EVIOCGRAB, 0) < 0)
     fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
 
+  loop_destroy();
   mapping_print(&map);
 }
 
