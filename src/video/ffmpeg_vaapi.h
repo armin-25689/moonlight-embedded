@@ -19,10 +19,6 @@
 
 int vaapi_init_lib(const char *device);
 int vaapi_init(AVCodecContext* decoder_ctx);
-#ifdef HAVE_X11
-int vaapi_queue(AVFrame* dec_frame, void *window, int width, int height);
-#endif
 bool vaapi_can_export_surface_handle(bool isTenBit);
 bool vaapi_is_can_direct_render();
-void *vaapi_get_display(bool isXDisplay);
 bool vaapi_is_support_yuv444(int needyuv444);

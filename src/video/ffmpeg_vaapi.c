@@ -20,16 +20,10 @@
 #include <va/va.h>
 #include <va/va_drm.h>
 #include <va/va_drmcommon.h>
-#ifdef HAVE_X11
-#include <va/va_x11.h>
-#endif
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vaapi.h>
 #include <libavutil/pixdesc.h>
-#ifdef HAVE_X11
-#include <X11/Xlib.h>
-#endif
 
 #include <Limelight.h>
 #include <EGL/egl.h>
@@ -82,20 +76,8 @@
 #define EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT 0x344A
 #endif
 
-typedef struct VAAPIDevicePriv {
-#ifdef HAVE_X11
-  Display *x11_display;
-#else
-  void *x11_display;
-#endif
-  int drm_fd;
-} VAAPIDevicePriv;
-
 #define MAX_SURFACES 16
 
-
-static Display *x11_display = NULL;
-static int drm_fd = -1;
 
 static AVBufferRef* device_ref;
 static VADRMPRIMESurfaceDescriptor primeDescriptor;
@@ -227,12 +209,6 @@ static int va_get_buffer(AVCodecContext* context, AVFrame* frame, int flags) {
 int vaapi_init_lib(const char *device) {
   if(av_hwdevice_ctx_create(&device_ref, AV_HWDEVICE_TYPE_VAAPI, device, NULL, 0) == 0) {
     vaapiIsSupportYuv444 = is_support_yuv444();
-    AVHWDeviceContext *ctx = (AVHWDeviceContext*) device_ref->data;
-    VAAPIDevicePriv *priv = (VAAPIDevicePriv*) ctx->user_opaque;
-    drm_fd = priv->drm_fd;
-#ifdef HAVE_X11
-    x11_display = priv->x11_display;
-#endif
     return 0;
   }
   fprintf(stderr, "Failed to initialize VAAPI lib");
@@ -244,16 +220,6 @@ int vaapi_init(AVCodecContext* decoder_ctx) {
   decoder_ctx->get_buffer2 = va_get_buffer;
   return 0;
 }
-
-#ifdef HAVE_X11
-int vaapi_queue(AVFrame* dec_frame, void *window, int width, int height) {
-  Window win = *((Window *)window);
-  VASurfaceID surface = (VASurfaceID)(uintptr_t)dec_frame->data[3];
-  AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
-  AVVAAPIDeviceContext *va_ctx = device->hwctx;
-  return vaPutSurface(va_ctx->display, surface, win, 0, 0, dec_frame->width, dec_frame->height, 0, 0, width, height, NULL, 0, 0);
-}
-#endif
 
 bool vaapi_is_can_direct_render() {
   AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
@@ -468,15 +434,6 @@ create_image_fail:
 sync_fail:
   vaapi_free_egl_images(dpy, images);
   return -1;
-}
-
-void *vaapi_get_display(bool isXDisplay) {
-#ifdef HAVE_X11
-  if (isXDisplay)
-    return x11_display;
-  else
-#endif
-    return &drm_fd;
 }
 
 int vaapi_get_plane_info (enum AVPixelFormat **pix_fmt, int *plane_num, enum PixelFormatOrder *plane_order) {

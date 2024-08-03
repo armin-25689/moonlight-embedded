@@ -149,6 +149,7 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
     if (!config->viewonly)
       evdev_start();
     loop_main();
+    loop_destroy();
     if (!config->viewonly)
       evdev_stop();
   }
@@ -257,6 +258,7 @@ int main(int argc, char* argv[]) {
       exit(-1);
     }
 
+    loop_create();
     evdev_create(config.inputs[0], NULL, config.debug_level > 0, config.rotate);
     evdev_map(config.inputs[0]);
     exit(0);
@@ -323,6 +325,10 @@ int main(int argc, char* argv[]) {
     } else if (system == SDL && config.audio_device != NULL) {
       fprintf(stderr, "You can't select a audio device for SDL\n");
       exit(-1);
+    }
+
+    if (IS_EMBEDDED(system)) {
+      loop_create();
     }
 
     config.stream.supportedVideoFormats = VIDEO_FORMAT_H264;

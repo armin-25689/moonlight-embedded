@@ -34,7 +34,6 @@
 #include <errno.h>
 #include <sys/types.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <limits.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -165,6 +164,7 @@ int evdev_gamepads = 0;
 #define QUIT_BUTTONS (PLAY_FLAG|BACK_FLAG|LB_FLAG|RB_FLAG)
 
 static bool (*handler) (struct input_event*, struct input_device*);
+static int evdev_handle(int fd, void *data);
 
 static int evdev_get_map(int* map, int length, int value) {
   for (int i = 0; i < length; i++) {
@@ -207,26 +207,33 @@ static bool evdev_init_parms(struct input_device *dev, struct input_abs_parms *p
   return true;
 }
 
-static void evdev_remove(int devindex) {
+static void evdev_remove(struct input_device *device) {
   numDevices--;
 
-  printf("Input device removed: %s (player %d)\n", libevdev_get_name(devices[devindex].dev), devices[devindex].controllerId + 1);
+  printf("Input device removed: %s (player %d)\n", libevdev_get_name(device->dev), device->controllerId + 1);
 
-  if (devices[devindex].controllerId >= 0) {
-    assignedControllerIds &= ~(1 << devices[devindex].controllerId);
-    LiSendMultiControllerEvent(devices[devindex].controllerId, assignedControllerIds, 0, 0, 0, 0, 0, 0, 0);
+  if (device->controllerId >= 0) {
+    assignedControllerIds &= ~(1 << device->controllerId);
+    LiSendMultiControllerEvent(device->controllerId, assignedControllerIds, 0, 0, 0, 0, 0, 0, 0);
   }
-  if (devices[devindex].mouseEmulation) {
-    devices[devindex].mouseEmulation = false;
-    pthread_join(devices[devindex].meThread, NULL);
+  if (device->mouseEmulation) {
+    device->mouseEmulation = false;
+    pthread_join(device->meThread, NULL);
   }
 
-  libevdev_free(devices[devindex].dev);
-  loop_remove_fd(devices[devindex].fd);
-  close(devices[devindex].fd);
+  loop_remove_fd(device->fd);
+  libevdev_free(device->dev);
+  close(device->fd);
 
-  if (devindex != numDevices && numDevices > 0)
-    memcpy(&devices[devindex], &devices[numDevices], sizeof(struct input_device));
+  for (int i=0;i<numDevices;i++) {
+    if (device->fd == devices[i].fd) {
+      if (i != numDevices && numDevices > 0) {
+        memcpy(&devices[i], &devices[numDevices], sizeof(struct input_device));
+        loop_mod_fd(devices[i].fd, &evdev_handle, EPOLLIN, (void *)(&devices[i]));
+        memset(&devices[numDevices], 0, sizeof(struct input_device));
+      }
+    }
+  }
 }
 
 static short evdev_convert_value(struct input_event *ev, struct input_device *dev, struct input_abs_parms *parms, bool reverse) {
@@ -1012,28 +1019,26 @@ static void evdev_drain(void) {
   }
 }
 
-static int evdev_handle(int fd) {
-  for (int i=0;i<numDevices;i++) {
-    if (devices[i].fd == fd) {
-      int rc;
-      struct input_event ev;
-      while ((rc = libevdev_next_event(devices[i].dev, LIBEVDEV_READ_FLAG_NORMAL, &ev)) >= 0) {
-        if (rc == LIBEVDEV_READ_STATUS_SYNC)
-          fprintf(stderr, "Error:%s(%d) cannot keep up\n", libevdev_get_name(devices[i].dev), i);
-        else if (rc == LIBEVDEV_READ_STATUS_SUCCESS) {
-          if (!isInputing && ev.type != EV_KEY)
-            break;
-          if (!handler(&ev, &devices[i]))
-            return LOOP_RETURN;
-        }
-      }
-      if (rc == -ENODEV) {
-        evdev_remove(i);
-      } else if (rc != -EAGAIN && rc < 0) {
-        fprintf(stderr, "Error: %s\n", strerror(-rc));
-        exit(EXIT_FAILURE);
+static int evdev_handle(int fd, void *data) {
+  struct input_device *device = (struct input_device *)data;
+  int rc;
+  struct input_event ev;
+  while ((rc = libevdev_next_event(device->dev, LIBEVDEV_READ_FLAG_NORMAL, &ev)) >= 0) {
+    if (rc == LIBEVDEV_READ_STATUS_SYNC)
+      fprintf(stderr, "Error:%s cannot keep up\n", libevdev_get_name(device->dev));
+    else if (rc == LIBEVDEV_READ_STATUS_SUCCESS) {
+      if (!isInputing && ev.type != EV_KEY)
+        break;
+      if (!handler(&ev, device)) {
+        return LOOP_RETURN;
       }
     }
+  }
+  if (rc == -ENODEV) {
+    evdev_remove(device);
+  } else if (rc != -EAGAIN && rc < 0) {
+    fprintf(stderr, "Error occur from evdev device: %s\n", strerror(-rc));
+    exit(EXIT_FAILURE);
   }
   return LOOP_OK;
 }
@@ -1216,12 +1221,14 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
   }
 
   int dev = numDevices;
+  if (dev > maxEpollFds) {
+    fprintf(stderr, "lager than epoll max fd number\n");
+    exit(EXIT_FAILURE);
+  }
   numDevices++;
 
   if (devices == NULL) {
-    devices = malloc(sizeof(struct input_device));
-  } else {
-    devices = realloc(devices, sizeof(struct input_device)*numDevices);
+    devices = malloc(sizeof(struct input_device) * maxEpollFds);
   }
 
   if (devices == NULL) {
@@ -1296,7 +1303,7 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
     }
   }
 
-  loop_add_fd(devices[dev].fd, &evdev_handle, POLLIN);
+  loop_add_fd1(devices[dev].fd, &evdev_handle, EPOLLIN, (void *)(&devices[dev]));
 }
 
 static void evdev_map_key(char* keyName, short* key) {
@@ -1381,6 +1388,7 @@ void evdev_map(char* device) {
 
   if (ioctl(devices[0].fd, EVIOCGRAB, 1) < 0)
     fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
+
   handler = evdev_handle_mapping_event;
 
   evdev_map_abs("Left Stick Right", &(map.abs_leftx), &(map.reverse_leftx));
@@ -1410,8 +1418,10 @@ void evdev_map(char* device) {
 
   evdev_map_key("Left Bumper(Shoulder)", &(map.btn_leftshoulder));
   evdev_map_key("Right Bumper(Shoulder)", &(map.btn_rightshoulder));
+
   if (ioctl(devices[0].fd, EVIOCGRAB, 0) < 0)
     fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
+
   mapping_print(&map);
 }
 

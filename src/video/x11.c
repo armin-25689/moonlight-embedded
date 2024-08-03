@@ -26,63 +26,28 @@
 
 #include "video.h"
 #include "ffmpeg.h"
-#ifdef HAVE_VAAPI
-#include "ffmpeg_vaapi.h"
-#endif
 #include "x11.h"
 #include "../input/x11.h"
 
 static Display *display = NULL;
-static Display *vaapi_display = NULL;
 static Window window;
 
 static int display_width, display_height, screen_width, screen_height;
 
 static bool startedMuiltiThreads = false;
-static bool isUseVaapiDisplay = false;
-
-void x_vaapi_draw(AVFrame* frame, int width, int height) {
-  #ifdef HAVE_VAAPI
-  vaapi_queue(frame, &window, width, height);
-  return;
-  #endif
-}
-
-bool x_test_vaapi_draw(AVFrame* frame, int width, int height) {
-  #ifdef HAVE_VAAPI
-  return vaapi_queue(frame, &window, width, height) != 0 ? false : true;
-  #endif
-  return false;
-}
 
 void* x_get_display(const char *device) {
   if (display == NULL) {
-/*
-#ifdef HAVE_VAAPI
-    vaapi_display = (Display *) vaapi_get_display(true);
-    if (device != NULL && vaapi_display != NULL) {
-      isUseVaapiDisplay = true;
-      display = vaapi_display;
-      return NULL;
-    }
-    else
-#endif
-*/
-    {
-      isUseVaapiDisplay = false;
-      display = XOpenDisplay(device);
-      vaapi_display = NULL;
-    }
+    display = XOpenDisplay(device);
   }
 
   return display;
 }
 
 void x_close_display() {
-  if (display != NULL && !isUseVaapiDisplay)
+  if (display != NULL)
     XCloseDisplay(display);
   display = NULL;
-  vaapi_display = NULL;
 }
 
 void x_muilti_threads() {

@@ -29,7 +29,6 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
-#include <poll.h>
 
 static Display *display;
 static Window window;
@@ -42,7 +41,7 @@ static const char data[1] = {0};
 static Cursor cursor;
 static bool grabbed = True;
 
-static int x11_handler(int fd) {
+static int x11_handler(int fd, void *data) {
   XEvent event;
 
   while (XPending(display)) {
@@ -97,7 +96,7 @@ void x11_input_init(Display* x11_display, Window x11_window) {
 
   displayFd = ConnectionNumber(display);
   if (displayFd > -1)
-    loop_add_fd(displayFd, x11_handler, POLLIN | POLLERR | POLLHUP);
+    loop_add_fd(displayFd, &x11_handler, EPOLLIN | EPOLLERR | EPOLLHUP);
 
   isMapedWindow = false;
 }
