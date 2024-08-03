@@ -1,4 +1,4 @@
---- src/main.c.orig	2024-08-01 13:37:02 UTC
+--- src/main.c.orig	2024-08-03 07:59:40 UTC
 +++ src/main.c
 @@ -42,6 +42,7 @@
  #include <client.h>
@@ -18,7 +18,15 @@
  static void applist(PSERVER_DATA server) {
    PAPP_LIST list = NULL;
    if (gs_applist(server, &list) != GS_OK) {
-@@ -166,6 +166,7 @@ static void stream(PSERVER_DATA server, PCONFIGURATION
+@@ -149,6 +149,7 @@ static void stream(PSERVER_DATA server, PCONFIGURATION
+     if (!config->viewonly)
+       evdev_start();
+     loop_main();
++    loop_destroy();
+     if (!config->viewonly)
+       evdev_stop();
+   }
+@@ -166,6 +167,7 @@ static void stream(PSERVER_DATA server, PCONFIGURATION
    }
  
    platform_stop(system);
@@ -26,7 +34,7 @@
  }
  
  static void help() {
-@@ -196,25 +197,28 @@ static void help() {
+@@ -196,25 +198,28 @@ static void help() {
    printf("\t-width <width>\t\tHorizontal resolution (default 1280)\n");
    printf("\t-height <height>\tVertical resolution (default 720)\n");
    #ifdef HAVE_EMBEDDED
@@ -61,7 +69,7 @@
    #if defined(HAVE_SDL) || defined(HAVE_X11)
    printf("\n WM options (SDL and X11 only)\n\n");
    printf("\t-windowed\t\tDisplay screen in a window\n");
-@@ -224,7 +228,9 @@ static void help() {
+@@ -224,7 +229,9 @@ static void help() {
    printf("\t-input <device>\t\tUse <device> as input. Can be used multiple times\n");
    printf("\t-audio <device>\t\tUse <device> as audio output device\n");
    #endif
@@ -72,7 +80,7 @@
    exit(0);
  }
  
-@@ -238,7 +244,7 @@ int main(int argc, char* argv[]) {
+@@ -238,7 +245,7 @@ int main(int argc, char* argv[]) {
  int main(int argc, char* argv[]) {
    CONFIGURATION config;
    config_parse(argc, argv, &config);
@@ -81,7 +89,22 @@
    if (config.action == NULL || strcmp("help", config.action) == 0)
      help();
  
-@@ -322,19 +328,52 @@ int main(int argc, char* argv[]) {
+@@ -251,6 +258,7 @@ int main(int argc, char* argv[]) {
+       exit(-1);
+     }
+ 
++    loop_create();
+     evdev_create(config.inputs[0], NULL, config.debug_level > 0, config.rotate);
+     evdev_map(config.inputs[0]);
+     exit(0);
+@@ -319,22 +327,59 @@ int main(int argc, char* argv[]) {
+       exit(-1);
+     }
+ 
++    if (IS_EMBEDDED(system)) {
++      loop_create();
++    }
++
      config.stream.supportedVideoFormats = VIDEO_FORMAT_H264;
      if (config.codec == CODEC_HEVC || (config.codec == CODEC_UNSPECIFIED && platform_prefers_codec(system, CODEC_HEVC))) {
        config.stream.supportedVideoFormats |= VIDEO_FORMAT_H265;
@@ -141,7 +164,7 @@
  
      #ifdef HAVE_SDL
      if (system == SDL)
-@@ -362,6 +401,26 @@ int main(int argc, char* argv[]) {
+@@ -362,6 +407,26 @@ int main(int argc, char* argv[]) {
            mappings = map;
          }
  
@@ -168,7 +191,7 @@
          for (int i=0;i<config.inputsCount;i++) {
            if (config.debug_level > 0)
              printf("Adding input device %s...\n", config.inputs[i]);
-@@ -371,7 +430,10 @@ int main(int argc, char* argv[]) {
+@@ -371,7 +436,10 @@ int main(int argc, char* argv[]) {
  
          udev_init(!inputAdded, mappings, config.debug_level > 0, config.rotate);
          evdev_init(config.mouse_emulation);
@@ -180,7 +203,7 @@
          #ifdef HAVE_LIBCEC
          cec_init();
          #endif /* HAVE_LIBCEC */
-@@ -398,7 +460,8 @@ int main(int argc, char* argv[]) {
+@@ -398,7 +466,8 @@ int main(int argc, char* argv[]) {
      if (config.pin > 0 && config.pin <= 9999) {
        sprintf(pin, "%04d", config.pin);
      } else {
@@ -190,7 +213,7 @@
      }
      printf("Please enter the following PIN on the target PC: %s\n", pin);
      fflush(stdout);
-@@ -406,6 +469,7 @@ int main(int argc, char* argv[]) {
+@@ -406,6 +475,7 @@ int main(int argc, char* argv[]) {
        fprintf(stderr, "Failed to pair to server: %s\n", gs_error);
      } else {
        printf("Succesfully paired\n");

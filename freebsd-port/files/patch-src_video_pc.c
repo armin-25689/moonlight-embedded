@@ -1,6 +1,6 @@
---- src/video/pc.c.orig	2024-08-01 13:37:02 UTC
+--- src/video/pc.c.orig	2024-08-03 07:59:40 UTC
 +++ src/video/pc.c
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,402 @@
 +/*
 + * This file is part of Moonlight Embedded.
 + *
@@ -27,7 +27,6 @@
 +#include <string.h>
 +#include <unistd.h>
 +#include <fcntl.h>
-+#include <poll.h>
 +
 +#include "egl.h"
 +#include "ffmpeg.h"
@@ -83,7 +82,7 @@
 +}SetupArgs;
 +static SetupArgs ffmpegArgs;
 +
-+static int window_op_handle (int pipefd) {
++static int window_op_handle (int pipefd, void *data) {
 +  char *opCode = NULL;
 +
 +  while (read(pipefd, &opCode, sizeof(char *)) > 0);
@@ -104,11 +103,12 @@
 +
 +static int (*render_handler) (AVFrame* frame);
 +
-+static int frame_handle (int pipefd) {
++static int frame_handle (int pipefd, void *data) {
 +  AVFrame* frame = NULL;
 +  while (read(pipefd, &frame, sizeof(void*)) > 0);
-+  if (frame)
++  if (frame) {
 +    return render_handler(frame);
++  }
 +
 +  return LOOP_OK;
 +}
@@ -141,15 +141,7 @@
 +  return LOOP_RETURN;
 +}
 +
-+static int vaapi_va_put (AVFrame* frame) {
-+  #ifdef HAVE_VAAPI
-+  x_vaapi_draw(frame, display_width, display_height);
-+  return LOOP_OK;
-+  #endif
-+  return LOOP_RETURN;
-+}
-+
-+static int test_vaapi_va_put (AVFrame* frame) {
++static int test_vaapi_egl_draw (AVFrame* frame) {
 +   if (firstDraw) {
 +     firstDraw = false;
 +     if (isYUV444 && (!(frame->linesize[0] == frame->linesize[2] && frame->linesize[1] == frame->linesize[0]))) {
@@ -158,33 +150,19 @@
 +     }
 +   }
 +#ifdef HAVE_VAAPI
-+  static int successTimes = 0;
-+#ifdef HAVE_X11
-+  if (!(windowType & WAYLAND_WINDOW) && x_test_vaapi_draw(frame, display_width, display_height))
-+    successTimes++;
-+  else
-+    successTimes--;
-+#else
-+  successTimes = 0;
-+#endif
++  int dcFlag = 0;
++  egl_init(display, window, frame_width, frame_height, screen_width, screen_height, dcFlag);
 +
-+  if (successTimes <= 0) {
-+    int dcFlag = 0;
-+    egl_init(display, window, frame_width, frame_height, screen_width, screen_height, dcFlag);
++  if (!vaapi_can_export_surface_handle(isTenBit) ||
++      !vaapi_is_can_direct_render()) {
++    isUseGlExt = false;
++  }
 +
-+    if (!vaapi_can_export_surface_handle(isTenBit) ||
-+        !vaapi_is_can_direct_render()) {
-+      isUseGlExt = false;
-+    }
-+
-+    if (isUseGlExt) {
-+      render_handler = vaapi_egl_draw;
-+    } else {
-+      fprintf(stderr, "Render failed and Please try another platform!\n");
-+      return LOOP_RETURN;
-+    }
-+  } else if (successTimes > 5) {
-+    render_handler = vaapi_va_put;
++  if (isUseGlExt) {
++    render_handler = vaapi_egl_draw;
++  } else {
++  fprintf(stderr, "Render failed and Please try another platform!\n");
++    return LOOP_RETURN;
 +  }
 +  return LOOP_OK;
 +#endif
@@ -202,7 +180,7 @@
 +    if (!(windowType & WAYLAND_WINDOW))
 +      x_muilti_threads();
 +    #endif
-+    if (vaapi_init_lib(windowType & WAYLAND_WINDOW ? NULL : displayDevice) != -1) {
++    if (vaapi_init_lib(NULL) != -1) {
 +      isSupportYuv444 = vaapi_is_support_yuv444(0);
 +      switch (windowType) {
 +      case X11_WINDOW:
@@ -258,6 +236,7 @@
 +      return -1;
 +    x_get_resolution(&screen_width, &screen_height);
 +    window = x_get_window();
++    printf("Based x11 window\n");
 +#endif
 +  }
 +  else {
@@ -266,6 +245,7 @@
 +      return -1;
 +    wl_get_resolution(&screen_width, &screen_height);
 +    window = wl_get_window();
++    printf("Based wayland window\n");
 +#endif
 +  }
 +  if (drFlags & DISPLAY_FULLSCREEN) {
@@ -306,7 +286,7 @@
 +    #undef FULLSCREEN
 +    render_handler = software_draw;
 +  } else {
-+    render_handler = test_vaapi_va_put;
++    render_handler = test_vaapi_egl_draw;
 +  }
 +  isTenBit = videoFormat & VIDEO_FORMAT_MASK_10BIT;
 +
@@ -315,10 +295,10 @@
 +    return -2;
 +  }
 +
-+  loop_add_fd(pipefd[0], &frame_handle, POLLIN);
++  loop_add_fd(pipefd[0], &frame_handle, EPOLLIN);
 +  fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
 +
-+  loop_add_fd(windowpipefd[0], &window_op_handle, POLLIN);
++  loop_add_fd(windowpipefd[0], &window_op_handle, EPOLLIN);
 +  fcntl(windowpipefd[0], F_SETFL, O_NONBLOCK);
 +
 +  evdev_trans_op_fd(windowpipefd[1]);
@@ -343,21 +323,18 @@
 +}
 +
 +void x11_cleanup() {
-+  #ifdef HAVE_VAAPI
-+  if (render_handler != vaapi_va_put)
-+    egl_destroy();
-+  #else
 +  egl_destroy();
-+  #endif
 +  ffmpeg_destroy();
++  if (windowType & WAYLAND_WINDOW) {
 +  #ifdef HAVE_WAYLAND
-+  if (windowType & WAYLAND_WINDOW)
 +    wl_close_display();
-+  else
 +  #endif
++  }
++  else {
 +  #ifdef HAVE_X11
 +    x_close_display();
 +  #endif
++  }
 +}
 +
 +int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {

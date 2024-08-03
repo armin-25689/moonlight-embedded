@@ -1,21 +1,17 @@
---- src/video/ffmpeg_vaapi.c.orig	2024-08-01 13:37:02 UTC
+--- src/video/ffmpeg_vaapi.c.orig	2024-08-03 07:59:40 UTC
 +++ src/video/ffmpeg_vaapi.c
-@@ -18,16 +18,167 @@
+@@ -18,16 +18,149 @@
   */
  
  #include <va/va.h>
+-#include <va/va_x11.h>
 +#include <va/va_drm.h>
 +#include <va/va_drmcommon.h>
-+#ifdef HAVE_X11
- #include <va/va_x11.h>
-+#endif
  #include <libavcodec/avcodec.h>
  #include <libavutil/hwcontext.h>
  #include <libavutil/hwcontext_vaapi.h>
+-#include <X11/Xlib.h>
 +#include <libavutil/pixdesc.h>
-+#ifdef HAVE_X11
- #include <X11/Xlib.h>
-+#endif
  
 +#include <Limelight.h>
 +#include <EGL/egl.h>
@@ -68,20 +64,8 @@
 +#define EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT 0x344A
 +#endif
 +
-+typedef struct VAAPIDevicePriv {
-+#ifdef HAVE_X11
-+  Display *x11_display;
-+#else
-+  void *x11_display;
-+#endif
-+  int drm_fd;
-+} VAAPIDevicePriv;
-+
  #define MAX_SURFACES 16
  
-+
-+static Display *x11_display = NULL;
-+static int drm_fd = -1;
 +
  static AVBufferRef* device_ref;
 +static VADRMPRIMESurfaceDescriptor primeDescriptor;
@@ -168,7 +152,7 @@
  static enum AVPixelFormat va_get_format(AVCodecContext* context, const enum AVPixelFormat* pixel_format) {
    AVBufferRef* hw_ctx = av_hwframe_ctx_alloc(device_ref);
    if (hw_ctx == NULL) {
-@@ -37,16 +188,31 @@ static enum AVPixelFormat va_get_format(AVCodecContext
+@@ -37,16 +170,31 @@ static enum AVPixelFormat va_get_format(AVCodecContext
  
    AVHWFramesContext* fr_ctx = (AVHWFramesContext*) hw_ctx->data;
    fr_ctx->format = AV_PIX_FMT_VAAPI;
@@ -201,7 +185,7 @@
    context->pix_fmt = AV_PIX_FMT_VAAPI;
    context->hw_device_ctx = device_ref;
    context->hw_frames_ctx = hw_ctx;
-@@ -58,8 +224,19 @@ static int va_get_buffer(AVCodecContext* context, AVFr
+@@ -58,8 +206,13 @@ static int va_get_buffer(AVCodecContext* context, AVFr
    return av_hwframe_get_buffer(context->hw_frames_ctx, frame, 0);
  }
  
@@ -210,12 +194,6 @@
 +int vaapi_init_lib(const char *device) {
 +  if(av_hwdevice_ctx_create(&device_ref, AV_HWDEVICE_TYPE_VAAPI, device, NULL, 0) == 0) {
 +    vaapiIsSupportYuv444 = is_support_yuv444();
-+    AVHWDeviceContext *ctx = (AVHWDeviceContext*) device_ref->data;
-+    VAAPIDevicePriv *priv = (VAAPIDevicePriv*) ctx->user_opaque;
-+    drm_fd = priv->drm_fd;
-+#ifdef HAVE_X11
-+    x11_display = priv->x11_display;
-+#endif
 +    return 0;
 +  }
 +  fprintf(stderr, "Failed to initialize VAAPI lib");
@@ -223,24 +201,14 @@
  }
  
  int vaapi_init(AVCodecContext* decoder_ctx) {
-@@ -68,9 +245,272 @@ int vaapi_init(AVCodecContext* decoder_ctx) {
+@@ -68,9 +221,253 @@ int vaapi_init(AVCodecContext* decoder_ctx) {
    return 0;
  }
  
 -void vaapi_queue(AVFrame* dec_frame, Window win, int width, int height) {
-+#ifdef HAVE_X11
-+int vaapi_queue(AVFrame* dec_frame, void *window, int width, int height) {
-+  Window win = *((Window *)window);
-   VASurfaceID surface = (VASurfaceID)(uintptr_t)dec_frame->data[3];
-   AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
-   AVVAAPIDeviceContext *va_ctx = device->hwctx;
--  vaPutSurface(va_ctx->display, surface, win, 0, 0, dec_frame->width, dec_frame->height, 0, 0, width, height, NULL, 0, 0);
-+  return vaPutSurface(va_ctx->display, surface, win, 0, 0, dec_frame->width, dec_frame->height, 0, 0, width, height, NULL, 0, 0);
-+}
-+#endif
-+
+-  VASurfaceID surface = (VASurfaceID)(uintptr_t)dec_frame->data[3];
 +bool vaapi_is_can_direct_render() {
-+  AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
+   AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
 +  AVVAAPIDeviceContext* va_ctx = (AVVAAPIDeviceContext*)device->hwctx;
 +  VAEntrypoint entrypoints[vaMaxNumEntrypoints(va_ctx->display)];
 +  int entrypointCount;
@@ -330,7 +298,8 @@
 +                        EGLImage images[4]) {
 +  ssize_t count = 0;
 +  AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
-+  AVVAAPIDeviceContext *va_ctx = device->hwctx;
+   AVVAAPIDeviceContext *va_ctx = device->hwctx;
+-  vaPutSurface(va_ctx->display, surface, win, 0, 0, dec_frame->width, dec_frame->height, 0, 0, width, height, NULL, 0, 0);
 +
 +  VASurfaceID surface_id = (VASurfaceID)(uintptr_t)frame->data[3];
 +  VAStatus st = vaExportSurfaceHandle(va_ctx->display,
@@ -452,15 +421,6 @@
 +sync_fail:
 +  vaapi_free_egl_images(dpy, images);
 +  return -1;
-+}
-+
-+void *vaapi_get_display(bool isXDisplay) {
-+#ifdef HAVE_X11
-+  if (isXDisplay)
-+    return x11_display;
-+  else
-+#endif
-+    return &drm_fd;
 +}
 +
 +int vaapi_get_plane_info (enum AVPixelFormat **pix_fmt, int *plane_num, enum PixelFormatOrder *plane_order) {

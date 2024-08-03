@@ -1,4 +1,4 @@
---- src/input/x11.c.orig	2024-02-20 04:01:31 UTC
+--- src/input/x11.c.orig	2024-08-03 07:59:40 UTC
 +++ src/input/x11.c
 @@ -18,7 +18,7 @@
   */
@@ -9,9 +9,11 @@
  
  #include "../loop.h"
  
-@@ -31,116 +31,44 @@
+@@ -29,118 +29,45 @@
+ 
+ #include <stdbool.h>
  #include <stdlib.h>
- #include <poll.h>
+-#include <poll.h>
  
 -#define ACTION_MODIFIERS (MODIFIER_SHIFT|MODIFIER_ALT|MODIFIER_CTRL)
 -#define QUIT_KEY 0x18  /* KEY_Q */
@@ -30,7 +32,8 @@
  static Cursor cursor;
  static bool grabbed = True;
  
- static int x11_handler(int fd) {
+-static int x11_handler(int fd) {
++static int x11_handler(int fd, void *data) {
    XEvent event;
 -  int button = 0;
 -  int motion_x, motion_y;
@@ -145,14 +148,14 @@
        break;
      case ClientMessage:
        if (event.xclient.data.l[0] == wm_deletemessage)
-@@ -167,5 +95,16 @@ void x11_input_init(Display* x11_display, Window x11_w
+@@ -167,5 +94,16 @@ void x11_input_init(Display* x11_display, Window x11_w
    XFreePixmap(display, blank);
    XDefineCursor(display, window, cursor);
  
 -  loop_add_fd(ConnectionNumber(display), x11_handler, POLLIN | POLLERR | POLLHUP);
 +  displayFd = ConnectionNumber(display);
 +  if (displayFd > -1)
-+    loop_add_fd(displayFd, x11_handler, POLLIN | POLLERR | POLLHUP);
++    loop_add_fd(displayFd, &x11_handler, EPOLLIN | EPOLLERR | EPOLLHUP);
 +
 +  isMapedWindow = false;
 +}

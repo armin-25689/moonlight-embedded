@@ -1,8 +1,6 @@
---- src/video/x11.h.orig	2024-08-01 13:37:02 UTC
+--- src/video/x11.h.orig	2024-08-03 07:59:40 UTC
 +++ src/video/x11.h
-@@ -0,0 +1,8 @@
-+void x_vaapi_draw(AVFrame* frame, int display_width, int display_height);
-+bool x_test_vaapi_draw(AVFrame* frame, int display_width, int display_height);
+@@ -0,0 +1,6 @@
 +void* x_get_display(const char *device);
 +void* x_get_window();
 +int x_setup(int width, int height, int drFlags);
