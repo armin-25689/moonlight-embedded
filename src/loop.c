@@ -79,7 +79,8 @@ static inline int create_epoll_data (struct epoll_event *eventsi, int fd, void *
   fd_functions[index].func = handler;
   fd_functions[index].events = events;
   eventsi->events = events;
-  eventsi->data.fd = fd;
+  // not set fd to data.fd,beacause use ptr instead. union type
+  //eventsi->data.fd = fd;
   eventsi->data.ptr = (void *)(&fd_functions[index]);
   return 0;
 }
@@ -158,6 +159,7 @@ void loop_main() {
       int ret = function->func(function->fd, function->data);
       if (ret == LOOP_RETURN) {
         done = true;
+        break;
       }
     }
   }
