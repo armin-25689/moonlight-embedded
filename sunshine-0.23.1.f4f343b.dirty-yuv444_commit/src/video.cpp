@@ -723,7 +723,8 @@ namespace video {
       },
       {},  // SDR-specific options
       {},  // HDR-specific options
-      {},  // yuv444 options
+      { { "profile"s, (int) qsv::profile_hevc_e::rext },
+      },  // yuv444 options
       {},  // Fallback options
       std::nullopt,  // QP rate control fallback
       "hevc_amf"s,
