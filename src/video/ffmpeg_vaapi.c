@@ -414,8 +414,9 @@ int vaapi_export_egl_images(AVFrame *frame, void *eglDisplay, bool eglIsSupportE
   if (primeDescriptor->num_layers > 4)
     return -1;
 
-  st = vaSyncSurface2(va_ctx->display, surface_id, 10000000);
+  st = vaSyncSurface2(va_ctx->display, surface_id, 1000000000);
   if (st != VA_STATUS_SUCCESS) {
+    fprintf(stderr, "Ffmpeg_vaapi: vaSyncSurface2() Failed: %d\n", st);
     goto sync_fail;
   }
 
@@ -496,14 +497,18 @@ int vaapi_export_egl_images(AVFrame *frame, void *eglDisplay, bool eglIsSupportE
         break;
 
       default:
+        fprintf(stderr, "Ffmpeg_vaapi: add attribs list Failed.\n");
         goto sync_fail;
+        break;
       }
     }
 
     // Terminate the attribute list
     attribs[attribIndex++] = EGL_NONE;
-    if (attribIndex > EGL_ATTRIB_COUNT)
-        goto sync_fail;
+    if (attribIndex > EGL_ATTRIB_COUNT) {
+      fprintf(stderr, "Ffmpeg_vaapi: too much attribs.\n");
+      goto sync_fail;
+    }
 
     images[i] = eglCreateImage(dpy, EGL_NO_CONTEXT,
                    EGL_LINUX_DMA_BUF_EXT,
