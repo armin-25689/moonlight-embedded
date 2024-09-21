@@ -25,7 +25,8 @@
 #define VDPAU_ACCELERATION 0x40
 #define VAAPI_ACCELERATION 0x80
 
-enum decoders {SOFTWARE, VDPAU, VAAPI};
+#include "video_internal.h"
+
 extern enum decoders ffmpeg_decoder;
 extern bool isYUV444;
 
@@ -33,5 +34,8 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
 void ffmpeg_destroy(void);
 AVFrame* ffmpeg_get_frame(bool native_frame);
 int ffmpeg_decode(unsigned char* indata, int inlen);
+int ffmpeg_decode2(unsigned char* indata, int inlen, int flags);
 int ffmpeg_is_frame_full_range(const AVFrame* frame);
 int ffmpeg_get_frame_colorspace(const AVFrame* frame);
+void ffmpeg_get_plane_info (const AVFrame *frame, enum AVPixelFormat *pix_fmt, int *plane_num, enum PixelFormatOrder *plane_order);
+int software_supported_video_format(void);

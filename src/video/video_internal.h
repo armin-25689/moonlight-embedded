@@ -1,7 +1,7 @@
 /*
  * This file is part of Moonlight Embedded.
  *
- * Copyright (C) 2017 Iwan Timmer
+ * Copyright (C) 2015-2017 Iwan Timmer
  *
  * Moonlight is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,9 +17,24 @@
  * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#pragma once
 enum PixelFormatOrder { VUYX_ORDER = 0, XVYU_ORDER, YUVX_ORDER };
+enum decoders {SOFTWARE, VDPAU, VAAPI};
+#define EGL_RENDER 0x0100
+#define X11_RENDER 0x0200
+#define DRM_RENDER 0x0400
+#define VULKAN_RENDER 0x0800
+#define MAX_FB_NUM 3
 
-void vaapi_free_egl_images(EGLDisplay dpy, EGLImage images[4]);
-ssize_t vaapi_export_egl_images(AVFrame *frame, EGLDisplay dpy, bool eglIsSupportExtDmaBufMod,
-                        EGLImage images[4]);
-int vaapi_get_plane_info(enum AVPixelFormat **pix_fmt, int *plane_num, enum PixelFormatOrder *plane_order);
+struct Source_Buffer_Info {
+  uint32_t fd;
+  uint32_t width;
+  uint32_t height;
+  uint32_t format;
+  uint32_t stride;
+  uint32_t offset;
+  void *data;
+};
+
+extern bool isYUV444;
+extern bool useHdr;

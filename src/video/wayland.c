@@ -21,8 +21,9 @@
 #include <wayland-client.h>
 #include <wayland-egl.h>
 
-#include "wayland.h"
 #include "video.h"
+#include "video_internal.h"
+#include "display.h"
 #include "xdg-shell-client-protocol.h"
 #include "wp-viewporter.h"
 #include "wlr-output-management.h"
@@ -226,7 +227,7 @@ static const struct xdg_surface_listener xdg_surface_listener = {
   .configure = xdg_surface_handle_configure,
 };
 
-int wayland_setup(int width, int height, int drFlags) {
+static int wayland_setup(int width, int height, int drFlags) {
 
   if (!wl_display) {
     fprintf(stderr, "Error: failed to open WL display.\n");
@@ -297,28 +298,39 @@ int wayland_setup(int width, int height, int drFlags) {
  return 0;
 }
 
-void wl_setup_post() {
+static void wl_setup_post(void *data) {
+  window_op_fd = *((int *)data);
   wl_surface_commit(wlsurface);
   wl_display_roundtrip(wl_display);
 }
 
-void* wl_get_display(const char *device) {
+static void* wl_get_display(const char* *device) {
   if (wl_display == NULL)
     wl_display = wl_display_connect(NULL);
 
+  if (wl_display)
+    *device = "/dev/dri/renderD128";
   return wl_display;
 }
 
-void wl_close_display() {
+static void wl_close_display() {
   if (wl_display != NULL) {
-    if (wl_output != NULL)
-      wl_output_destroy(wl_output);
-    if (wlr_output_manager != NULL)
+    if (wl_output != NULL) {
+      wl_output_release(wl_output);
+      wl_output = NULL;
+    }
+    if (wlr_output_manager != NULL) {
       zwlr_output_manager_v1_destroy(wlr_output_manager);
-    if (wl_pointer != NULL)
-      wl_pointer_destroy(wl_pointer);
-    if (wl_seat != NULL)
-      wl_seat_destroy(wl_seat);
+      wlr_output_manager = NULL;
+    }
+    if (wl_pointer != NULL) {
+      wl_pointer_release(wl_pointer);
+      wl_pointer = NULL;
+    }
+    if (wl_seat != NULL) {
+      wl_seat_release(wl_seat);
+      wl_seat = NULL;
+    }
     xdg_toplevel_destroy(xdg_toplevel);
     xdg_surface_destroy(xdg_surface);
     xdg_wm_base_destroy(xdg_wm_base);
@@ -335,20 +347,22 @@ void wl_close_display() {
   }
 }
 
-void wl_dispatch_event() {
+static int wl_dispatch_event(int width, int height, int index) {
   while(wl_display_prepare_read(wl_display) != 0)
     wl_display_dispatch_pending(wl_display);
   wl_display_flush(wl_display);
   wl_display_read_events(wl_display);
   wl_display_dispatch_pending(wl_display);
+
+  return 0;
 }
 
-void wl_get_resolution(int *width, int *height) {
+static void wl_get_resolution(int *width, int *height) {
   *width = output_width;
   *height = output_height;
 }
 
-void wl_change_cursor(const char *op) {
+static void wl_change_cursor(const char *op) {
   if (strcmp(op, "hide") == 0) {
     isGrabing  = true;
     wl_pointer_set_cursor(wl_pointer, pointerSerial, NULL, 0, 0);
@@ -357,11 +371,23 @@ void wl_change_cursor(const char *op) {
   }
 }
 
-void wl_trans_op_fd(int fd) {
-  window_op_fd = fd;
-}
-
-void* wl_get_window() {
+static void* wl_get_window() {
   return wl_window;
 }
+
+struct DISPLAY_CALLBACK display_callback_wayland = {
+  .name = "wayland",
+  .egl_platform = 0x31D8,
+  .format = NOT_CARE,
+  .display_get_display = wl_get_display,
+  .display_get_window = wl_get_window,
+  .display_close_display = wl_close_display,
+  .display_setup = wayland_setup,
+  .display_setup_post = wl_setup_post,
+  .display_put_to_screen = wl_dispatch_event,
+  .display_get_resolution = wl_get_resolution,
+  .display_change_cursor = wl_change_cursor,
+  .display_vsync_loop = NULL,
+  .renders = EGL_RENDER,
+};
 #endif

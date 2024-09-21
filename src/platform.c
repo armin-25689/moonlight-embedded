@@ -73,6 +73,12 @@ enum platform platform_check(char* name) {
       return RK;
   }
   #endif
+/*
+  if (std || strcmp(name, "drm") == 0) {
+    if (access("/dev/dri/card0", F_OK) != -1)
+      return DRM;
+  }
+*/
   #ifdef HAVE_X11
   bool x11 = strcmp(name, "x11") == 0 || strcmp(name, "wayland") == 0;
   bool vdpau = strcmp(name, "x11_vdpau") == 0;
@@ -172,6 +178,10 @@ DECODER_RENDERER_CALLBACKS* platform_get_video(enum platform system) {
   case RK:
     return (PDECODER_RENDERER_CALLBACKS) dlsym(RTLD_DEFAULT, "decoder_callbacks_rk");
   #endif
+/*
+  case DRM:
+    return &decoder_callbacks_drm;
+*/
   }
   return NULL;
 }
@@ -247,6 +257,8 @@ char* platform_name(enum platform system) {
     return "SDL2 (software decoding)";
   case FAKE:
     return "Fake (no a/v output)";
+  case DRM:
+    return "Drm with ffmpeg";
   default:
     return "Unknown";
   }

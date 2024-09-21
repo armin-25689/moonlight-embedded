@@ -32,6 +32,7 @@
 static struct FD_Function fd_functions[maxEpollFds] = {};
 static int epoll_fd = -1;
 static int sigFd;
+static bool done = false;
 
 static int loop_sig_handler(int fd, void *data) {
   struct signalfd_siginfo info;
@@ -86,6 +87,9 @@ static inline int create_epoll_data (struct epoll_event *eventsi, int fd, void *
 }
 
 static inline void fd_ctl(int fd, void *data, Fd_Handler handler, int events, int opt) {
+  if (done)
+    return;
+
   struct epoll_event event_data = {0};
 
   if (create_epoll_data(&event_data, fd, data, handler, events, opt) < 0)
@@ -111,6 +115,8 @@ void loop_mod_fd(int fd, Fd_Handler handler, int events, void *data) {
 }
 
 void loop_remove_fd(int fd) {
+  if (done)
+    return;
   int err = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
   if (err < 0) {
     fprintf(stderr, "Can not delelte fd from epoll:%d\n", errno);
@@ -147,7 +153,6 @@ void loop_init() {
 }
 
 void loop_main() {
-  bool done = false;
   while (!done) {
     struct epoll_event events[maxEpollFds] = {0};
     int fd_events = epoll_wait(epoll_fd, events, maxEpollFds, -1);

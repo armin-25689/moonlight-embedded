@@ -122,6 +122,14 @@ static const float vertices[] = {
  -1.0f, 1.0f, 0.0f, 0.0f,
 };
 
+static const float buffer_vertices[] = {
+ // pos .... // tex coords
+ 1.0f, 1.0f, 1.0f, 1.0f,
+ 1.0f, -1.0f, 1.0f, 0.0f,
+ -1.0f, -1.0f, 0.0f, 0.0f,
+ -1.0f, 1.0f, 0.0f, 1.0f,
+};
+
 static const GLuint elements[] = {
   0, 1, 2,
   2, 3, 0

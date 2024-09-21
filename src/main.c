@@ -143,6 +143,13 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
     loop_init();
 
   platform_start(system);
+  PDECODER_RENDERER_CALLBACKS videoCallback = platform_get_video(system);
+
+  if (!config->less_threads && (system == X11 || system == X11_VAAPI)) {
+    videoCallback->capabilities &= ~CAPABILITY_DIRECT_SUBMIT;
+    videoCallback->capabilities |= CAPABILITY_PULL_RENDERER;
+    videoCallback->submitDecodeUnit = NULL;
+  }
   LiStartConnection(&server->serverInfo, &config->stream, &connection_callbacks, platform_get_video(system), platform_get_audio(system, config->audio_device), NULL, drFlags, config->audio_device, 0);
 
   if (IS_EMBEDDED(system)) {
@@ -350,25 +357,19 @@ int main(int argc, char* argv[]) {
 
     // set yuv444 depend on config
     if (config.yuv444 && (system == X11_VAAPI || system == X11)) {
-      if (system == X11_VAAPI && isSupportYuv444) {
-        // some encoder dose not support yuv444 when using h264,so try use h265 instead of h264
-        if (config.stream.supportedVideoFormats != VIDEO_FORMAT_H265)
-          config.stream.supportedVideoFormats = VIDEO_FORMAT_H265;
-        config.stream.supportedVideoFormats |= VIDEO_FORMAT_H265_444;
+      if (supportedVideoFormat & VIDEO_FORMAT_MASK_YUV444) {
+        config.stream.supportedVideoFormats |= (supportedVideoFormat & VIDEO_FORMAT_MASK_H264);
+        if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_H265)
+          config.stream.supportedVideoFormats |= (supportedVideoFormat & VIDEO_FORMAT_MASK_H265);
+        if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1)
+          config.stream.supportedVideoFormats |= (supportedVideoFormat & VIDEO_FORMAT_MASK_AV1);
+        if (!config.hdr) {
+          config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_10BIT;
+        }
       }
-      else if (system == X11_VAAPI) {
+      else {
         printf("YUV444 is not supported because of platform: %d .\n", (int)system);
         config.yuv444 = false;
-      }
-      if (system == X11) {
-        config.stream.supportedVideoFormats |= VIDEO_FORMAT_H264_444;
-        if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_H265)
-          config.stream.supportedVideoFormats |= VIDEO_FORMAT_H265_444;
-        if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1)
-          config.stream.supportedVideoFormats |= VIDEO_FORMAT_AV1_444;
-        if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_H265 || 
-            config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1)
-          printf("When using x11 platform with yuv444, codec 'h264' is more recommended!\n");
       }
     }
     if (config.yuv444) {
@@ -379,6 +380,13 @@ int main(int argc, char* argv[]) {
         config.stream.colorRange = COLOR_RANGE_FULL;
       }
       printf("Try to use yuv444 mode\n");
+    }
+
+    if (system == X11) {
+      if ((config.stream.supportedVideoFormats & (VIDEO_FORMAT_MASK_H265 | VIDEO_FORMAT_MASK_AV1)) ||
+          (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444)) {
+        fprintf(stderr, "WARNING: Please set lower bitrate(-bitrate N[now: %d]) when using software decoding to avoid lag!\n", config.stream.bitrate);
+      }
     }
 
     #ifdef HAVE_SDL

@@ -18,12 +18,14 @@
  */
 
 #include <va/va.h>
+#ifdef HAVE_X11
+#include <va/va_x11.h>
+#endif
 #include <va/va_drm.h>
 #include <va/va_drmcommon.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vaapi.h>
-#include <libavutil/pixdesc.h>
 
 #include <Limelight.h>
 #include <EGL/egl.h>
@@ -34,7 +36,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "ffmpeg_vaapi_egl.h"
+#include "video_internal.h"
 
 #define EGL_ATTRIB_COUNT 30 * 2
 #ifndef EGL_EXT_image_dma_buf_import
@@ -78,22 +80,31 @@
 
 #define MAX_SURFACES 16
 
+// prepare for high444 profile. not support now
+#ifndef VAProfileH264High444
+#define VAProfileH264High444 99
+#endif
 
 static AVBufferRef* device_ref;
-static VADRMPRIMESurfaceDescriptor primeDescriptor;
+static VADRMPRIMESurfaceDescriptor primeDescriptors[MAX_FB_NUM] = {0};
+static int current_index = 0, next_index = 0;
 
 #define sw_format_slot 9
-static enum AVPixelFormat hw_sw_format[sw_format_slot] = { AV_PIX_FMT_NONE };
-static enum AVPixelFormat sharedFmt = AV_PIX_FMT_NONE;
-static bool vaapiIsSupportYuv444 = false;
-static bool isYUV444 = false;
+struct {
+  enum AVPixelFormat yuv444;
+  enum AVPixelFormat yuv444_10;
+  enum AVPixelFormat yuv420;
+  enum AVPixelFormat yuv420_10;
+} static hw_sw_format;
+static int vaapiSupportedFormat = 0;
 
-static bool is_support_yuv444() {
-  if (vaapiIsSupportYuv444)
-    return true;
+static int is_support_yuv444() {
+  if (vaapiSupportedFormat)
+    return vaapiSupportedFormat;
+
   memset(&hw_sw_format, AV_PIX_FMT_NONE, sizeof(hw_sw_format));
-  bool supported = false;
-  int sw_format = 0;
+
+  int supported_format = 0;
   int format_num = 0;
   AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
   AVVAAPIDeviceContext *va_ctx = device->hwctx;
@@ -103,22 +114,21 @@ static bool is_support_yuv444() {
   if (vaQueryImageFormats(va_ctx->display, formats, &format_num) == VA_STATUS_SUCCESS) {
     for (int i = 0;i < format_num; i++) {
       switch (formats[i].fourcc) {
+/*
       case VA_FOURCC_444P:
-        hw_sw_format[sw_format++] = AV_PIX_FMT_YUV444P;
-        supported = true;
+        break;
+*/
+      case VA_FOURCC_NV12:
+        hw_sw_format.yuv420 = AV_PIX_FMT_NV12;
+        break;
+      case VA_FOURCC_P010:
+        hw_sw_format.yuv420_10 = AV_PIX_FMT_P010;
         break;
       case VA_FOURCC_XYUV:
-        hw_sw_format[sw_format++] = AV_PIX_FMT_VUYX;
-        // vuyx need keep the first
-        if (sw_format != 0 && hw_sw_format[0] > 0) {
-          hw_sw_format[sw_format - 1] = hw_sw_format[0];
-        }
-        hw_sw_format[0] = AV_PIX_FMT_VUYX;
-        supported = true;
+        hw_sw_format.yuv444 = AV_PIX_FMT_VUYX;
         break;
       case VA_FOURCC_Y410:
-        hw_sw_format[sw_format++] = AV_PIX_FMT_XV30;
-        supported = true;
+        hw_sw_format.yuv444_10 = AV_PIX_FMT_XV30;
         break;
       }
     }
@@ -132,33 +142,61 @@ static bool is_support_yuv444() {
     fprintf(stderr, "Failed to query profiles\n");
     if (pnum > 0)
       free(profiles);
-    return false;
+    return 0;
   }
   for (int i = 0; i < profiles_count; i++) {
-    if (profiles[i] == VAProfileHEVCMain444 || profiles[i] == VAProfileHEVCMain444_10) {
-      hw_sw_format[sw_format++] = AV_PIX_FMT_NV12;
-      free(profiles);
-      return supported;
+    switch (profiles[i]) {
+    case VAProfileH264High444:
+      supported_format |= VIDEO_FORMAT_H264_HIGH8_444;
+      break;
+    case VAProfileHEVCMain444:
+      supported_format |= VIDEO_FORMAT_H265_REXT8_444;
+      break;
+    case VAProfileHEVCMain444_10:
+      supported_format |= VIDEO_FORMAT_H265_REXT10_444;
+      break;
+    case VAProfileAV1Profile1:
+      supported_format |= VIDEO_FORMAT_AV1_HIGH8_444;
+      supported_format |= VIDEO_FORMAT_AV1_HIGH10_444;
+      break;
+    case VAProfileHEVCMain10:
+      supported_format |= VIDEO_FORMAT_H265_MAIN10;
+      supported_format |= VIDEO_FORMAT_H265;
+      break;
+    case VAProfileAV1Profile0:
+      supported_format |= VIDEO_FORMAT_AV1_MAIN8;
+      supported_format |= VIDEO_FORMAT_AV1_MAIN10;
+      break;
     }
   }
+  supported_format |= VIDEO_FORMAT_H264;
 
-  fprintf(stderr, "Failed to enable yuv444 because of no correct profiles or format\n");
+  if (hw_sw_format.yuv444 < 0) {
+    supported_format &= ~(VIDEO_FORMAT_AV1_HIGH8_444 | VIDEO_FORMAT_H265_REXT8_444 | VIDEO_FORMAT_H264_HIGH8_444);
+  }
+  if (hw_sw_format.yuv444_10 < 0) {
+    supported_format &= ~(VIDEO_FORMAT_AV1_HIGH10_444 | VIDEO_FORMAT_H265_REXT10_444);
+  }
+  if (hw_sw_format.yuv420_10 < 0) {
+    supported_format &= ~(VIDEO_FORMAT_AV1_MAIN10 | VIDEO_FORMAT_H265_MAIN10);
+  }
+
+  if (!supported_format)
+    fprintf(stderr, "Failed to enable yuv444 because of no correct profiles or format\n");
   if (pnum > 0)
     free(profiles);
-  return false;
+  return supported_format;
 }
 
-static enum AVPixelFormat get_format_from_slot () {
-  enum AVPixelFormat yuv444_fmt = AV_PIX_FMT_NONE;
-  for (int i = 0; i < sw_format_slot; i++) {
-    if (hw_sw_format[i] != AV_PIX_FMT_NONE) {
-      yuv444_fmt = hw_sw_format[i];
-      hw_sw_format[i] = AV_PIX_FMT_NONE;
-      printf("Try to use pixel format for yuv444: %s \n", av_get_pix_fmt_name(yuv444_fmt));
-      return yuv444_fmt;
-    }
-  }
-  return AV_PIX_FMT_NONE;
+static enum AVPixelFormat get_format_from_slot (bool useHDR, bool yuv444) {
+  if (yuv444 && useHDR)
+    return hw_sw_format.yuv444_10;
+  else if (yuv444)
+    return hw_sw_format.yuv444;
+  else if (useHDR)
+    return hw_sw_format.yuv420_10;
+  else
+    return hw_sw_format.yuv420;
 }
 
 static enum AVPixelFormat va_get_format(AVCodecContext* context, const enum AVPixelFormat* pixel_format) {
@@ -170,19 +208,11 @@ static enum AVPixelFormat va_get_format(AVCodecContext* context, const enum AVPi
 
   AVHWFramesContext* fr_ctx = (AVHWFramesContext*) hw_ctx->data;
   fr_ctx->format = AV_PIX_FMT_VAAPI;
-  if (isYUV444 && !vaapiIsSupportYuv444) {
-    isYUV444 = false;
-    fprintf(stderr, "Failed to initialize VAAPI frame context because of not supported YUV444 format");
+  fr_ctx->sw_format = get_format_from_slot(useHdr, isYUV444);
+  if (fr_ctx->sw_format == AV_PIX_FMT_NONE) {
+    fprintf(stderr, "Failed to initialize VAAPI frame context because of no pix_fomat");
     return AV_PIX_FMT_NONE;
-  } else if (isYUV444) {
-    fr_ctx->sw_format = get_format_from_slot();
-    if (fr_ctx->sw_format == AV_PIX_FMT_NONE) {
-      fprintf(stderr, "Failed to initialize VAAPI frame context because of no pix_fomat");
-      return AV_PIX_FMT_NONE;
-    }
   }
-  else
-    fr_ctx->sw_format = AV_PIX_FMT_NV12;
   fr_ctx->width = context->coded_width;
   fr_ctx->height = context->coded_height;
   fr_ctx->initial_pool_size = MAX_SURFACES + 1;
@@ -192,8 +222,6 @@ static enum AVPixelFormat va_get_format(AVCodecContext* context, const enum AVPi
     av_buffer_unref(&hw_ctx);
     return AV_PIX_FMT_NONE;
   }
-
-  sharedFmt = fr_ctx->sw_format;
 
   context->pix_fmt = AV_PIX_FMT_VAAPI;
   context->hw_device_ctx = device_ref;
@@ -208,7 +236,7 @@ static int va_get_buffer(AVCodecContext* context, AVFrame* frame, int flags) {
 
 int vaapi_init_lib(const char *device) {
   if(av_hwdevice_ctx_create(&device_ref, AV_HWDEVICE_TYPE_VAAPI, device, NULL, 0) == 0) {
-    vaapiIsSupportYuv444 = is_support_yuv444();
+    vaapiSupportedFormat = is_support_yuv444();
     return 0;
   }
   fprintf(stderr, "Failed to initialize VAAPI lib");
@@ -221,34 +249,43 @@ int vaapi_init(AVCodecContext* decoder_ctx) {
   return 0;
 }
 
-bool vaapi_is_can_direct_render() {
+#ifdef HAVE_X11
+void vaapi_queue(uint8_t* data[3], Window win, int width, int height, int frame_width, int frame_height) {
+  VASurfaceID surface = (VASurfaceID)(uintptr_t)data[3];
   AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
-  AVVAAPIDeviceContext* va_ctx = (AVVAAPIDeviceContext*)device->hwctx;
-  VAEntrypoint entrypoints[vaMaxNumEntrypoints(va_ctx->display)];
-  int entrypointCount;
-  VAStatus status = vaQueryConfigEntrypoints(va_ctx->display, VAProfileNone, entrypoints, &entrypointCount);
-  if (status == VA_STATUS_SUCCESS) {
-    for (int i = 0; i < entrypointCount; i++) {
-      // Without VAEntrypointVideoProc support, the driver will crash inside vaPutSurface()
-      if (entrypoints[i] == VAEntrypointVideoProc)
-        return true;
-    }
-  }
-  return false;
+  AVVAAPIDeviceContext *va_ctx = device->hwctx;
+  vaPutSurface(va_ctx->display, surface, win, 0, 0, frame_width, frame_height, 0, 0, width, height, NULL, 0, 0);
 }
+#endif
 
-// Ensure that vaExportSurfaceHandle() is supported by the VA-API driver
-bool vaapi_can_export_surface_handle(bool isTenBit) {
-  AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
-  AVVAAPIDeviceContext* va_ctx = (AVVAAPIDeviceContext*)device->hwctx;
-  VASurfaceID surfaceId;
-  VAStatus st;
-  VADRMPRIMESurfaceDescriptor descriptor;
+bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDisplay, bool *directRenderSupport) {
+  bool isTenBit = false;
+  *directRenderSupport = false;
+  VADisplay dpy;
+
+  if (strcmp(renderName, "x11") == 0){
+#ifdef HAVE_X11
+    dpy = vaGetDisplay((Display *)nativeDisplay);
+#endif
+  }
+  else {
+    dpy = vaGetDisplayDRM(*((int *)nativeDisplay));
+  }
+
+  if (!dpy)
+    return false;
+
+  int major,min;
+  if (vaInitialize(dpy, &major, &min) != VA_STATUS_SUCCESS) {
+    vaTerminate(dpy);
+    return false;
+  }
+  
   VASurfaceAttrib attrs[2];
   int attributeCount = 0;
 
   // FFmpeg handles setting these quirk flags for us
-  if (!(va_ctx->driver_quirks & AV_VAAPI_DRIVER_QUIRK_ATTRIB_MEMTYPE)) {
+  if (true) {
     attrs[attributeCount].type = VASurfaceAttribMemoryType;
     attrs[attributeCount].flags = VA_SURFACE_ATTRIB_SETTABLE;
     attrs[attributeCount].value.type = VAGenericValueTypeInteger;
@@ -265,9 +302,11 @@ bool vaapi_can_export_surface_handle(bool isTenBit) {
   attrs[attributeCount].value.value.i = isTenBit ? VA_FOURCC_P010 : VA_FOURCC_NV12;
   attributeCount++;
 
+  VASurfaceID surfaceId;
+  VAStatus st;
   unsigned int rtformat = 0;
   rtformat = isTenBit ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420;
-  st = vaCreateSurfaces(va_ctx->display,
+  st = vaCreateSurfaces(dpy,
               rtformat,
               1280,
               720,
@@ -275,66 +314,115 @@ bool vaapi_can_export_surface_handle(bool isTenBit) {
               1,
               attrs,
               attributeCount);
-  if (st != VA_STATUS_SUCCESS)
+  if (st != VA_STATUS_SUCCESS) {
+    vaTerminate(dpy);
     return false;
+  }
 
-  st = vaExportSurfaceHandle(va_ctx->display,
+  // test can direct render
+#ifdef HAVE_X11
+  if (strcmp(renderName,"x11") == 0) {
+    VAEntrypoint entrypoints[vaMaxNumEntrypoints(dpy)];
+    int entrypointCount;
+    VAStatus status = vaQueryConfigEntrypoints(dpy, VAProfileNone, entrypoints, &entrypointCount);
+    if (status == VA_STATUS_SUCCESS) {
+      for (int i = 0; i < entrypointCount; i++) {
+        // Without VAEntrypointVideoProc support, the driver will crash inside vaPutSurface()
+        if (entrypoints[i] == VAEntrypointVideoProc) {
+          Display *display = (Display *)nativeDisplay;
+          Window win = XCreateSimpleWindow(display, DefaultRootWindow(display), 0, 0, 1280, 720, 0, 0, 0);
+          printf("FFMPEG_VAAPI(WARNING): Test vaPutSurface() may let moonlight crash,if meet please use modesetting driver instead!\n");
+          st = vaPutSurface(dpy, surfaceId, win, 0, 0, 1280, 720, 0, 0, 1280, 720, NULL, 0, 0);
+          if (st == VA_STATUS_SUCCESS) {
+            printf("FFMPEG_VAAPI: Support vaPutSurface()!\n");
+            *directRenderSupport = true;
+          }
+          XDestroyWindow(display, win);
+        }
+      }
+    }
+  }
+#endif
+
+  VADRMPRIMESurfaceDescriptor descriptor;
+
+  st = vaExportSurfaceHandle(dpy,
                  surfaceId,
                  VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
                  VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
                  &descriptor);
 
-  vaDestroySurfaces(va_ctx->display, &surfaceId, 1);
+  vaDestroySurfaces(dpy, &surfaceId, 1);
 
-  if (st != VA_STATUS_SUCCESS)
+  if (st != VA_STATUS_SUCCESS) {
+    vaTerminate(dpy);
     return false;
+  }
 
   for (size_t i = 0; i < descriptor.num_objects; ++i) {
     close(descriptor.objects[i].fd);
   }
 
+  vaTerminate(dpy);
+#ifdef HAVE_X11
+  if (strcmp(renderName,"x11") == 0 && !(*directRenderSupport)) {
+    return false;
+  }
+#endif
   return true;
 }
 
-void vaapi_free_egl_images(EGLDisplay dpy, 
-                   EGLImage images[4]) {
-  for (size_t i = 0; i < primeDescriptor.num_layers; ++i) {
-    eglDestroyImage(dpy, images[i]);
+void vaapi_free_egl_images(void *eglDisplay, void *eglImages[4], void *descriptor) {
+  EGLImage* *images = (EGLImage **)eglImages;
+  int startNum = 0,closeNum = 0;
+  for (size_t i = 0; i < MAX_FB_NUM; ++i) {
+    if ((VADRMPRIMESurfaceDescriptor *)descriptor == &primeDescriptors[i]) {
+      startNum = i;
+      closeNum = i + 1;
+    }
   }
-  for (size_t i = 0; i < primeDescriptor.num_objects; ++i) {
-    close(primeDescriptor.objects[i].fd);
+  for (size_t h = startNum; h < closeNum; h++) {
+    for (size_t i = 0; i < primeDescriptors[h].num_layers; ++i) {
+      eglDestroyImage((EGLDisplay)eglDisplay, images[i]);
+    }
+    for (size_t i = 0; i < primeDescriptors[h].num_objects; ++i) {
+      close(primeDescriptors[h].objects[i].fd);
+    }
+    primeDescriptors[h].num_layers = 0;
+    primeDescriptors[h].num_objects = 0;
   }
-  primeDescriptor.num_layers = 0;
-  primeDescriptor.num_objects = 0;
 }
 
-ssize_t vaapi_export_egl_images(AVFrame *frame, EGLDisplay dpy, bool eglIsSupportExtDmaBufMod,
-                        EGLImage images[4]) {
+int vaapi_export_egl_images(AVFrame *frame, void *eglDisplay, bool eglIsSupportExtDmaBufMod,
+                        void *eglImages[4], void **descriptor) {
+  EGLImage* *images = (EGLImage **)eglImages;
+  EGLDisplay dpy = (EGLDisplay)eglDisplay;
   ssize_t count = 0;
   AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
   AVVAAPIDeviceContext *va_ctx = device->hwctx;
+  VADRMPRIMESurfaceDescriptor *primeDescriptor = &primeDescriptors[current_index];
 
   VASurfaceID surface_id = (VASurfaceID)(uintptr_t)frame->data[3];
   VAStatus st = vaExportSurfaceHandle(va_ctx->display,
                     surface_id,
                     VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
                     VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
-                    &primeDescriptor);
+                    primeDescriptor);
   if (st != VA_STATUS_SUCCESS)
     return -1;
 
-  if (primeDescriptor.num_layers > 4)
+  if (primeDescriptor->num_layers > 4)
     return -1;
 
-  st = vaSyncSurface(va_ctx->display, surface_id);
+  st = vaSyncSurface2(va_ctx->display, surface_id, 10000000);
   if (st != VA_STATUS_SUCCESS) {
     goto sync_fail;
   }
 
-  for (size_t i = 0; i < primeDescriptor.num_layers; ++i) {
+  for (size_t i = 0; i < primeDescriptor->num_layers; ++i) {
     // Max 30 attributes (1 key + 1 value for each)
     EGLAttrib attribs[EGL_ATTRIB_COUNT] = {
-      EGL_LINUX_DRM_FOURCC_EXT, primeDescriptor.layers[i].drm_format,
+      EGL_LINUX_DRM_FOURCC_EXT, primeDescriptor->layers[i].drm_format,
       EGL_WIDTH, i == 0 ? frame->width : (isYUV444 ? frame->width : frame->width / 2),
       EGL_HEIGHT, i == 0 ? frame->height : (isYUV444 ? frame->height : frame->height / 2),
 /*
@@ -345,65 +433,65 @@ ssize_t vaapi_export_egl_images(AVFrame *frame, EGLDisplay dpy, bool eglIsSuppor
     };
 
     int attribIndex = 6;
-    for (size_t j = 0; j < primeDescriptor.layers[i].num_planes; j++) {
+    for (size_t j = 0; j < primeDescriptor->layers[i].num_planes; j++) {
       switch (j) {
       case 0:
         attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_FD_EXT;
-        attribs[attribIndex++] = primeDescriptor.objects[primeDescriptor.layers[i].object_index[j]].fd;
+        attribs[attribIndex++] = primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].fd;
         attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
-        attribs[attribIndex++] = primeDescriptor.layers[i].offset[0];
+        attribs[attribIndex++] = primeDescriptor->layers[i].offset[0];
         attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
-        attribs[attribIndex++] = primeDescriptor.layers[i].pitch[0];
+        attribs[attribIndex++] = primeDescriptor->layers[i].pitch[0];
         if (eglIsSupportExtDmaBufMod) {
           attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor.objects[primeDescriptor.layers[i].object_index[j]].drm_format_modifier & 0xFFFFFFFF);
+          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier & 0xFFFFFFFF);
           attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor.objects[primeDescriptor.layers[i].object_index[j]].drm_format_modifier >> 32);
+          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier >> 32);
         }
         break;
 
       case 1:
         attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_FD_EXT;
-        attribs[attribIndex++] = primeDescriptor.objects[primeDescriptor.layers[i].object_index[j]].fd;
+        attribs[attribIndex++] = primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].fd;
         attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_OFFSET_EXT;
-        attribs[attribIndex++] = primeDescriptor.layers[i].offset[1];
+        attribs[attribIndex++] = primeDescriptor->layers[i].offset[1];
         attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_PITCH_EXT;
-        attribs[attribIndex++] = primeDescriptor.layers[i].pitch[1];
+        attribs[attribIndex++] = primeDescriptor->layers[i].pitch[1];
         if (eglIsSupportExtDmaBufMod) {
           attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor.objects[primeDescriptor.layers[i].object_index[j]].drm_format_modifier & 0xFFFFFFFF);
+          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier & 0xFFFFFFFF);
           attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor.objects[primeDescriptor.layers[i].object_index[j]].drm_format_modifier >> 32);
+          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier >> 32);
         }
         break;
 
       case 2:
         attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_FD_EXT;
-        attribs[attribIndex++] = primeDescriptor.objects[primeDescriptor.layers[i].object_index[j]].fd;
+        attribs[attribIndex++] = primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].fd;
         attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_OFFSET_EXT;
-        attribs[attribIndex++] = primeDescriptor.layers[i].offset[2];
+        attribs[attribIndex++] = primeDescriptor->layers[i].offset[2];
         attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_PITCH_EXT;
-        attribs[attribIndex++] = primeDescriptor.layers[i].pitch[2];
+        attribs[attribIndex++] = primeDescriptor->layers[i].pitch[2];
         if (eglIsSupportExtDmaBufMod) {
           attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor.objects[primeDescriptor.layers[i].object_index[j]].drm_format_modifier & 0xFFFFFFFF);
+          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier & 0xFFFFFFFF);
           attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor.objects[primeDescriptor.layers[i].object_index[j]].drm_format_modifier >> 32);
+          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier >> 32);
         }
         break;
 
       case 3:
         attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_FD_EXT;
-        attribs[attribIndex++] = primeDescriptor.objects[primeDescriptor.layers[i].object_index[j]].fd;
+        attribs[attribIndex++] = primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].fd;
         attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_OFFSET_EXT;
-        attribs[attribIndex++] = primeDescriptor.layers[i].offset[3];
+        attribs[attribIndex++] = primeDescriptor->layers[i].offset[3];
         attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_PITCH_EXT;
-        attribs[attribIndex++] = primeDescriptor.layers[i].pitch[3];
+        attribs[attribIndex++] = primeDescriptor->layers[i].pitch[3];
         if (eglIsSupportExtDmaBufMod) {
           attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor.objects[primeDescriptor.layers[i].object_index[j]].drm_format_modifier & 0xFFFFFFFF);
+          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier & 0xFFFFFFFF);
           attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor.objects[primeDescriptor.layers[i].object_index[j]].drm_format_modifier >> 32);
+          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier >> 32);
         }
         break;
 
@@ -427,47 +515,18 @@ ssize_t vaapi_export_egl_images(AVFrame *frame, EGLDisplay dpy, bool eglIsSuppor
 
     ++count;
   }
-  return count;
+  current_index = next_index;
+  next_index = (current_index + 1) % MAX_FB_NUM;
+  *descriptor = &primeDescriptors[current_index];
+  return (int)count;
 
 create_image_fail:
-  primeDescriptor.num_layers = count;
+  primeDescriptor->num_layers = count;
 sync_fail:
-  vaapi_free_egl_images(dpy, images);
+  vaapi_free_egl_images(eglDisplay, eglImages, primeDescriptor);
   return -1;
 }
 
-int vaapi_get_plane_info (enum AVPixelFormat **pix_fmt, int *plane_num, enum PixelFormatOrder *plane_order) {
-  *pix_fmt = &sharedFmt;
-  int planes = av_pix_fmt_count_planes(sharedFmt);
-  *plane_num = planes <= 0 ? 4 : planes;
-  switch (sharedFmt) {
-  case AV_PIX_FMT_VUYX:
-    *plane_order = VUYX_ORDER;
-    break;
-  case AV_PIX_FMT_XV30:
-  case AV_PIX_FMT_XV36:
-    *plane_order = XVYU_ORDER;
-    break;
-  case AV_PIX_FMT_YUV420P:
-  case AV_PIX_FMT_YUV444P:
-  case AV_PIX_FMT_YUV444P10:
-    *plane_order = YUVX_ORDER;
-    break;
-  case AV_PIX_FMT_NV12:
-  case AV_PIX_FMT_NV16:
-  case AV_PIX_FMT_NV24:
-  case AV_PIX_FMT_P010:
-  case AV_PIX_FMT_P016:
-    *plane_order = YUVX_ORDER;
-    break;
-  default:
-    *plane_order = YUVX_ORDER;
-    break;
-  }
-  return 0;
-}
-
-bool vaapi_is_support_yuv444(int needyuv444) {
-  isYUV444 = needyuv444 > 0 ? true : false;
-  return vaapiIsSupportYuv444;
+int vaapi_supported_video_format() {
+  return vaapiSupportedFormat;
 }

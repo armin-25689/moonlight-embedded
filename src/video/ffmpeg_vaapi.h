@@ -19,6 +19,8 @@
 
 int vaapi_init_lib(const char *device);
 int vaapi_init(AVCodecContext* decoder_ctx);
-bool vaapi_can_export_surface_handle(bool isTenBit);
-bool vaapi_is_can_direct_render();
-bool vaapi_is_support_yuv444(int needyuv444);
+bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDisplay, bool *directRenderSupport);
+int vaapi_supported_video_format(void);
+void vaapi_free_egl_images(void *eglDisplay, void *eglImages[4], void *descriptor);
+ssize_t vaapi_export_egl_images(AVFrame *frame, void *eglDisplay, bool eglIsSupportExtDmaBufMod,
+                        void *eglImages[4], void **descriptor);

@@ -21,10 +21,12 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
 
 int write_bool(char *path, bool val) {
   int fd = open(path, O_RDWR);
@@ -63,4 +65,33 @@ bool ensure_buf_size(void **buf, size_t *buf_size, size_t required_size) {
   }
 
   return true;
+}
+
+int get_drm_render_fd(char exportedPath[64]) {
+  int fd = -1;
+  char path[64];
+  int n, max_devices = 8;
+  for (n = 0; n < max_devices; n++) {
+    snprintf(path, sizeof(path), "/dev/dri/renderD%d", 128 + n);
+    fd = open(path, O_RDWR);
+    if (fd < 0) {
+      if (errno == ENOENT) {
+        if (n != max_devices - 1) {
+          fprintf(stderr, "No drm render device %s,try next drm render node.\n", path);
+          continue;
+        }
+        fprintf(stderr, "No available render node.\n");
+      }
+      else {
+        fprintf(stderr, "Cannot open drm node: /dev/dri/renderD128 + %d.\n", n);
+      }
+      break;
+    }
+    else {
+      memcpy(exportedPath, path, strlen(path) + 1);
+      break;
+    }
+  }
+
+  return fd;
 }

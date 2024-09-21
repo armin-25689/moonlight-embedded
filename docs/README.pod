@@ -105,12 +105,11 @@ Will still use H.264 if server doesn't support HEVC or AV1.
 
 =item B<-yuv444>
 
-Try to use yuv444 format.Better color display but not efficiency.
+Try to use yuv444 format.Better video quality but not efficiency.
 Note:Now only support hevc(h265) with xvuy format use vaapi platform.
-Need sunshine host support and just support vaapi or x11 platform.
-If meet h264+YUV444P, use 'x11' platform instead.
-See games/moonlight-embedded-devel source code directory:
-'sunshine-yuv444-diff'.
+Need sunshine host support(version >=24.0) and just support vaapi or
+x11 platform.
+If meet h264+YUV444P, 'x11' platform is recommended.
 
 =item B<-fakegrab>
 

@@ -60,6 +60,7 @@ static struct option long_options[] = {
   {"mapping", required_argument, NULL, 'k'},
   {"swapxyab", no_argument, NULL, 'K'},
   {"nosops", no_argument, NULL, 'l'},
+  {"lessthreads", no_argument, NULL, 'L'},
   {"audio", required_argument, NULL, 'm'},
   {"localaudio", no_argument, NULL, 'n'},
   {"config", required_argument, NULL, 'o'},
@@ -191,6 +192,9 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
     break;
   case 'l':
     config->sops = false;
+    break;
+  case 'L':
+    config->less_threads = true;
     break;
   case 'm':
     config->audio_device = value;
@@ -420,6 +424,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->inputsCount = 0;
   config->yuv444 = false;
   config->fakegrab = false;
+  config->less_threads = false;
   config->sdlgp = false;
   config->swapxyab = false;
   config->mapping = get_path("gamecontrollerdb.txt", getenv("XDG_DATA_DIRS"));
@@ -449,11 +454,11 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
     struct passwd *pw = getpwuid(getuid());
     const char *dir;
     if ((dir = getenv("XDG_CACHE_DIR")) != NULL)
-      sprintf(config->key_dir, "%s" MOONLIGHT_PATH, dir);
+      snprintf(config->key_dir, sizeof(config->key_dir), "%s" MOONLIGHT_PATH, dir);
     else if ((dir = getenv("HOME")) != NULL)
-      sprintf(config->key_dir, "%s" DEFAULT_CACHE_DIR MOONLIGHT_PATH, dir);
+      snprintf(config->key_dir, sizeof(config->key_dir), "%s" DEFAULT_CACHE_DIR MOONLIGHT_PATH, dir);
     else
-      sprintf(config->key_dir, "%s" DEFAULT_CACHE_DIR MOONLIGHT_PATH, pw->pw_dir);
+      snprintf(config->key_dir, sizeof(config->key_dir), "%s" DEFAULT_CACHE_DIR MOONLIGHT_PATH, pw->pw_dir);
   }
 
   if (config->stream.bitrate == -1) {

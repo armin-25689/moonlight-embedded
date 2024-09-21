@@ -45,6 +45,18 @@
 #include <math.h>
 
 #define QUITCODE "quit"
+#define MAX_MT_TOUCH_FINGER 5
+#define ONE_FINGER_EVENT 0x01
+#define TWO_FINGER_EVENT 0x02
+#define THREE_FINGER_EVENT 0x04
+#define FOUR_FINGER_EVENT 0x08
+#define FIVE_FINGER_EVENT 0x10
+#define ZERO_FINGER_EVENT 0x20
+#define SPECIAL_FINGER_EVENT 0x40
+#define MOVING_MT_EVENT 0x100
+#define LEFT_MT_EVENT 0x200
+#define RIGHT_MT_EVENT 0x400
+#define CLEAN_MT_EVENT (SPECIAL_FINGER_EVENT | LEFT_MT_EVENT | RIGHT_MT_EVENT)
 
 static int keyboardpipefd = -1;
 static const char *quitstate = QUITCODE;
@@ -60,6 +72,7 @@ static bool isInputing = true;
 static bool isGrabed = false;
 static bool sdlgp = false;
 static bool swapXYAB = false;
+static bool gameMode = false;
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 #define int16_to_le(val) val
@@ -93,13 +106,30 @@ struct input_device {
   int32_t mouseDeltaX, mouseDeltaY, mouseVScroll, mouseHScroll;
   int32_t touchDownX, touchDownY, touchX, touchY;
   #endif
-  int fingersNum;
-  int maxFingersNum;
+  struct {
+    int32_t slotValueX[MAX_MT_TOUCH_FINGER];
+    int32_t slotValueY[MAX_MT_TOUCH_FINGER];
+    int32_t touchDownX[MAX_MT_TOUCH_FINGER];
+    int32_t touchDownY[MAX_MT_TOUCH_FINGER];
+    uint32_t up_event;
+    uint32_t down_event;
+    uint32_t pre_down_event;
+    uint32_t end_event;
+    uint32_t mtSlot;
+    uint32_t fingerMaxNum;
+    bool isMoving;
+    bool needWait;
+    uint32_t mtEvent;
+    uint32_t mtEventLast;
+    int interval;
+    int rightIndex; // for gamemode
+    int leftIndex; // for gamemode
+  } mt_info; // precision touchpda
   int mtPalm;
-  int mtSlot;
-  bool isDraging;
-  bool isDraged;
-  bool isMoving;
+  int mtXMax;
+  int mtYMax;
+  uint32_t mtLastEvent;
+  struct timeval touchUpTime;
   struct timeval touchDownTime;
   struct timeval btnDownTime;
   short controllerId;
@@ -161,6 +191,7 @@ int evdev_gamepads = 0;
 #define QUIT_KEY KEY_Q
 #define GRAB_KEY KEY_Z
 #define FAKE_GRAB_KEY KEY_M
+#define GAME_MODE_KEY KEY_G
 #define QUIT_BUTTONS (PLAY_FLAG|BACK_FLAG|LB_FLAG|RB_FLAG)
 
 static bool (*handler) (struct input_event*, struct input_device*);
@@ -371,8 +402,408 @@ static void send_controller_arrival(struct input_device *dev) {
                                supportedButtonFlags, capabilities);
 }
 
+static bool evdev_mt_touchpad_handle_event(struct input_event *ev, struct input_device *dev) {
+  if (!isInputing)
+    return true;
+  switch (ev->type) {
+  case EV_SYN:
+
+    if (dev->mt_info.interval > 0 || dev->mt_info.mtEventLast != dev->mt_info.mtEvent) {
+      memcpy(dev->mt_info.touchDownX, dev->mt_info.slotValueX, sizeof(int32_t) * MAX_MT_TOUCH_FINGER);
+      memcpy(dev->mt_info.touchDownY, dev->mt_info.slotValueY, sizeof(int32_t) * MAX_MT_TOUCH_FINGER);
+      dev->mt_info.interval--;
+      if (dev->mt_info.mtEventLast != dev->mt_info.mtEvent) {
+        dev->mt_info.isMoving = false;
+        dev->mt_info.needWait = true;
+        if ((dev->mtLastEvent & (LEFT_MT_EVENT | RIGHT_MT_EVENT) && dev->mt_info.mtEventLast < dev->mt_info.mtEvent) ||
+            ((dev->mtLastEvent & (LEFT_MT_EVENT | RIGHT_MT_EVENT)) == 0)) {
+          dev->mt_info.up_event = dev->mt_info.mtEvent; 
+        }
+        if (dev->mt_info.pre_down_event) {
+          dev->mt_info.down_event |= dev->mt_info.pre_down_event;
+          dev->mt_info.pre_down_event = 0;
+        }
+        // for event that not moved,such as click
+        if (dev->mt_info.mtEvent > dev->mt_info.end_event) {
+          dev->mt_info.end_event = dev->mt_info.mtEvent;
+        }
+        dev->mt_info.interval = gameMode ? 1 : 2;
+        //dev->mt_info.interval = dev->mt_info.mtEventLast < dev->mt_info.mtEvent ? 1 : 3 * dev->mt_info.fingersNum;
+        dev->mt_info.mtEventLast = dev->mt_info.mtEvent;
+        if (dev->mt_info.mtEvent == 0) {
+          dev->mt_info.down_event |= dev->mt_info.end_event;
+          dev->mtLastEvent &= CLEAN_MT_EVENT;
+          dev->mtLastEvent |= dev->mt_info.down_event;
+        }
+      }
+      if ((dev->mtLastEvent & SPECIAL_FINGER_EVENT) &&
+          ((dev->mt_info.up_event == 0) || (dev->mt_info.mtEvent == 0)) &&
+          ((dev->mt_info.pre_down_event & SPECIAL_FINGER_EVENT) == 0)) {
+        LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+        dev->mtLastEvent &= ~SPECIAL_FINGER_EVENT;
+      }
+
+      goto click_event;
+    }
+
+    if (dev->mt_info.isMoving) {
+      int nowDistanceX = 0;
+      int nowDistanceY = 0;
+      //for (int i = 0; i < dev->mt_info.fingerMaxNum; i++) {
+      for (int i = 0; i < MAX_MT_TOUCH_FINGER; i++) {
+        if (dev->mt_info.slotValueX[i] != 0 || dev->mt_info.slotValueY[i] != 0) {
+          int tempX = dev->mt_info.slotValueX[i] - dev->mt_info.touchDownX[i];
+          int tempY = dev->mt_info.slotValueY[i] - dev->mt_info.touchDownY[i];
+          nowDistanceX = (abs(tempX) > abs(nowDistanceX)) ? tempX : nowDistanceX;
+          nowDistanceY = (abs(tempY) > abs(nowDistanceY)) ? tempY : nowDistanceY;
+          dev->mt_info.touchDownX[i] = dev->mt_info.slotValueX[i];
+          dev->mt_info.touchDownY[i] = dev->mt_info.slotValueY[i];
+        }
+      }
+      if (dev->mt_info.mtEvent & THREE_FINGER_EVENT || dev->mtLastEvent & (LEFT_MT_EVENT | RIGHT_MT_EVENT)) {
+        dev->mouseDeltaX += nowDistanceX;
+        dev->mouseDeltaY += nowDistanceY;
+      }
+      else if (dev->mt_info.mtEvent & TWO_FINGER_EVENT) {
+        float specialBase = 10.0;
+        bool needX = (abs(nowDistanceX) > abs(nowDistanceY));
+        int multiZ = needX ? abs(nowDistanceX) : abs(nowDistanceY);
+        int multi = multiZ / specialBase;
+        multi = multi < 1 ? 1 : multi;
+        float restrain = 0.2;
+        LiSendHighResHScrollEvent((short)(nowDistanceX * (needX ? multi : restrain)));
+        LiSendHighResScrollEvent((short)(nowDistanceY * (needX ? restrain : multi)));
+      }
+      else if (dev->mt_info.mtEvent & ONE_FINGER_EVENT) {
+        dev->mouseDeltaX += nowDistanceX;
+        dev->mouseDeltaY += nowDistanceY;
+      }
+    }
+
+    if (dev->mt_info.needWait) {
+      int nowdeltax = 0;
+      int nowdeltay = 0;
+      //for (int i = 0; i < dev->mt_info.fingerMaxNum; i++) {
+      for (int i = 0; i < MAX_MT_TOUCH_FINGER; i++) {
+        if (dev->mt_info.slotValueX[i] != 0 || dev->mt_info.slotValueY[i] != 0) {
+          int tempX = dev->mt_info.slotValueX[i] - dev->mt_info.touchDownX[i];
+          int tempY = dev->mt_info.slotValueY[i] - dev->mt_info.touchDownY[i];
+          nowdeltax = (abs(tempX) > abs(nowdeltax)) ? tempX : nowdeltax;
+          nowdeltay = (abs(tempY) > abs(nowdeltay)) ? tempY : nowdeltay;
+        }
+      }
+      if (nowdeltax * nowdeltax + nowdeltay * nowdeltay >= dev->mtPalm * dev->mtPalm) {
+        if (dev->mtLastEvent & (LEFT_MT_EVENT | RIGHT_MT_EVENT)) {
+         // dev->mt_info.pre_down_event &= ~ONE_FINGER_EVENT;
+        }
+        dev->mt_info.pre_down_event |= MOVING_MT_EVENT;
+        dev->mt_info.end_event = ZERO_FINGER_EVENT;
+        dev->mt_info.isMoving = true;
+        dev->mt_info.needWait = false;
+        memcpy(dev->mt_info.touchDownX, dev->mt_info.slotValueX, sizeof(int32_t) * MAX_MT_TOUCH_FINGER);
+        memcpy(dev->mt_info.touchDownY, dev->mt_info.slotValueY, sizeof(int32_t) * MAX_MT_TOUCH_FINGER);
+      }
+    }
+
+click_event:
+
+    // event release
+    // down.1 special
+    if (dev->mt_info.down_event) {
+      if (dev->mt_info.down_event & SPECIAL_FINGER_EVENT) {
+        // reset down_event for store normal event
+        dev->mtLastEvent &= ~SPECIAL_FINGER_EVENT;
+        if ((dev->mt_info.down_event & MOVING_MT_EVENT) == 0) {
+          struct timeval elapsedTime;
+          timersub(&ev->time, &dev->touchUpTime, &elapsedTime);
+          int itime = elapsedTime.tv_sec * 1000 + elapsedTime.tv_usec / 1000;
+          itime = itime <= 0 ? (TOUCH_CLICK_DELAY / 1000) : itime;
+          if (itime <= (TOUCH_CLICK_DELAY / 250)) {
+            // release special event first
+            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+            usleep(TOUCH_CLICK_DELAY / 10);
+            // then
+            LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+            usleep(TOUCH_CLICK_DELAY / 2);
+            if (libevdev_has_event_pending(dev->dev) == 0) {
+              LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+            }
+            else {
+              dev->mtLastEvent |= SPECIAL_FINGER_EVENT;
+            }
+          }
+          else {
+            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+          }
+          dev->touchUpTime = ev->time;
+        }
+        else {
+          LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+        }
+      }
+      // down.2 three
+      if (dev->mt_info.down_event & THREE_FINGER_EVENT) {
+        if (dev->mt_info.down_event & MOVING_MT_EVENT) {
+          LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+        }
+        else {
+          LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_MIDDLE);
+          usleep(TOUCH_CLICK_DELAY);
+          LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_MIDDLE);
+        }
+      }
+      // down.3 two
+      if (dev->mt_info.down_event & TWO_FINGER_EVENT) {
+        if ((dev->mt_info.down_event & MOVING_MT_EVENT) == 0) {
+          LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_RIGHT);
+          usleep(TOUCH_CLICK_DELAY);
+          LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+        }
+      }
+      // down.4 one
+      if (dev->mt_info.down_event & ONE_FINGER_EVENT) {
+        if (!(dev->mt_info.down_event & MOVING_MT_EVENT)) {
+        }
+        if ((dev->mt_info.down_event & MOVING_MT_EVENT) == 0) {
+          LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+          usleep(TOUCH_CLICK_DELAY);
+          if (libevdev_has_event_pending(dev->dev) == 0) {
+            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+          }
+          else {
+            dev->mtLastEvent |= SPECIAL_FINGER_EVENT;
+          }
+          dev->touchUpTime = ev->time;
+        }
+      }
+      dev->mt_info.down_event = 0;
+    }
+
+    switch (dev->mt_info.up_event) {
+      // event cancel
+    case THREE_FINGER_EVENT:
+      if (dev->mt_info.isMoving) {
+        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+        dev->mt_info.pre_down_event |= THREE_FINGER_EVENT;
+        dev->mt_info.end_event = ZERO_FINGER_EVENT;
+        dev->mt_info.up_event = 0;
+      }
+      break;
+    case TWO_FINGER_EVENT:
+      if (dev->mtLastEvent & SPECIAL_FINGER_EVENT && dev->mtLastEvent & (LEFT_MT_EVENT | RIGHT_MT_EVENT)) {
+        dev->mt_info.pre_down_event |= SPECIAL_FINGER_EVENT;
+        dev->mt_info.end_event = ZERO_FINGER_EVENT;
+        dev->mt_info.up_event = 0;
+      }
+      else if (dev->mtLastEvent & (LEFT_MT_EVENT | RIGHT_MT_EVENT)) {
+        dev->mt_info.pre_down_event |= ONE_FINGER_EVENT;
+        dev->mt_info.end_event = ZERO_FINGER_EVENT;
+        dev->mt_info.up_event = 0;
+      }
+      break;
+    case ONE_FINGER_EVENT:
+      if (dev->mtLastEvent & SPECIAL_FINGER_EVENT) {
+        dev->mt_info.pre_down_event |= SPECIAL_FINGER_EVENT;
+        dev->mt_info.end_event = ZERO_FINGER_EVENT;
+        dev->mt_info.up_event = 0;
+      }
+      break;
+    default:
+      dev->mt_info.up_event = 0;
+      break;
+    }
+
+    if (dev->mt_info.mtEventLast == 0) {
+      memset(&dev->mt_info, 0, sizeof(dev->mt_info));
+    }
+
+    if (dev->mouseDeltaX != 0 || dev->mouseDeltaY != 0) {
+      switch (dev->rotate) {
+      case 90:
+        LiSendMouseMoveEvent(dev->mouseDeltaY, -dev->mouseDeltaX);
+        break;
+      case 180:
+        LiSendMouseMoveEvent(-dev->mouseDeltaX, -dev->mouseDeltaY);
+        break;
+      case 270:
+        LiSendMouseMoveEvent(-dev->mouseDeltaY, dev->mouseDeltaX);
+        break;
+      default:
+        LiSendMouseMoveEvent(dev->mouseDeltaX, dev->mouseDeltaY);
+        break;
+      }
+      dev->mouseDeltaX = 0;
+      dev->mouseDeltaY = 0;
+    }
+    break;
+
+  case EV_KEY:
+    if (ev->code > KEY_MAX)
+      return true;
+    switch (ev->code) {
+    case BTN_TOUCH:
+      // event start or end
+      if (ev->value == 1) {
+        dev->touchDownTime = ev->time;
+      }
+      break;
+    case BTN_TOOL_FINGER:
+      if (ev->value == 1) {
+        dev->mt_info.mtEvent |= ONE_FINGER_EVENT;
+      }
+      else {
+        dev->mt_info.mtEvent &= ~ONE_FINGER_EVENT;
+      }
+      break;
+    case BTN_TOOL_DOUBLETAP:
+      if (ev->value == 1) {
+        dev->mt_info.mtEvent |= TWO_FINGER_EVENT;
+      }
+      else {
+        dev->mt_info.mtEvent &= ~TWO_FINGER_EVENT;
+      }
+      break;
+    case BTN_TOOL_TRIPLETAP:
+      if (ev->value == 1) {
+        dev->mt_info.mtEvent |= THREE_FINGER_EVENT;
+      }
+      else {
+        dev->mt_info.mtEvent &= ~THREE_FINGER_EVENT;
+      }
+      break;
+    case BTN_TOOL_QUADTAP:
+      if (ev->value == 1) {
+        dev->mt_info.mtEvent |= FOUR_FINGER_EVENT;
+      }
+      else {
+        dev->mt_info.mtEvent &= ~FOUR_FINGER_EVENT;
+      }
+      break;
+    case BTN_TOOL_QUINTTAP:
+      if (ev->value == 1) {
+        dev->mt_info.mtEvent |= FIVE_FINGER_EVENT;
+      }
+      else {
+        dev->mt_info.mtEvent &= ~FIVE_FINGER_EVENT;
+      }
+      break;
+    // mouse action
+    case BTN_LEFT:
+      // disable press click when using gameMode
+      if (gameMode) {
+        break;
+      }
+      // set end_event none
+      dev->mt_info.end_event = ZERO_FINGER_EVENT;
+      if (!ev->value && dev->mtLastEvent & LEFT_MT_EVENT) {
+        LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+        dev->mtLastEvent &= ~LEFT_MT_EVENT;
+      }
+      else if (!ev->value && dev->mtLastEvent & RIGHT_MT_EVENT) {
+        LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+        dev->mtLastEvent &= ~RIGHT_MT_EVENT;
+      }
+      else if (ev->value && dev->mt_info.slotValueX[0] > (dev->mtXMax * 0.5) && dev->mt_info.slotValueY[0] > (dev->mtYMax * 0.8)) {
+        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_RIGHT);
+        dev->mtLastEvent |= (ev->value ? RIGHT_MT_EVENT : 0);
+      }
+      else if (ev->value) {
+        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+        dev->mtLastEvent |= (ev->value ? LEFT_MT_EVENT : 0);
+      }
+      break;
+    case BTN_RIGHT:
+      dev->mt_info.end_event = ZERO_FINGER_EVENT;
+      LiSendMouseButtonEvent(ev->value ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+      break;
+    case BTN_MIDDLE:
+      dev->mt_info.end_event = ZERO_FINGER_EVENT;
+      LiSendMouseButtonEvent(ev->value ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, BUTTON_MIDDLE);
+      break;
+    }
+    break;
+  case EV_ABS:
+    if (ev->code > ABS_MAX)
+      return true;
+    switch (ev->code) {
+    case ABS_MT_TRACKING_ID:
+      if (ev->value == -1) {
+        dev->mt_info.slotValueX[dev->mt_info.mtSlot] = 0;
+        dev->mt_info.touchDownX[dev->mt_info.mtSlot] = 0;
+        dev->mt_info.slotValueY[dev->mt_info.mtSlot] = 0;
+        dev->mt_info.touchDownY[dev->mt_info.mtSlot] = 0;
+      }
+      if (gameMode) {
+        if (ev->value != -1) {
+          if (dev->mt_info.slotValueX[dev->mt_info.mtSlot] > (dev->mtXMax * 0.5) && dev->mt_info.slotValueY[dev->mt_info.mtSlot] > (dev->mtYMax * 0.78)) {
+            if ((dev->mtLastEvent & RIGHT_MT_EVENT) == 0) {
+              dev->mt_info.rightIndex = dev->mt_info.mtSlot;
+              LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_RIGHT);
+              dev->mtLastEvent |= RIGHT_MT_EVENT;
+              if ((dev->mtLastEvent & LEFT_MT_EVENT) == 0) {
+                dev->mt_info.leftIndex = -1;
+              }
+            }
+          }
+          else if (dev->mt_info.slotValueX[dev->mt_info.mtSlot] <= (dev->mtXMax * 0.5) && dev->mt_info.slotValueY[dev->mt_info.mtSlot] > (dev->mtYMax * 0.78)) {
+            if ((dev->mtLastEvent & LEFT_MT_EVENT) == 0) {
+              dev->mt_info.leftIndex = dev->mt_info.mtSlot;
+              LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+              dev->mtLastEvent |= LEFT_MT_EVENT;
+              if ((dev->mtLastEvent & RIGHT_MT_EVENT) == 0) {
+                dev->mt_info.rightIndex = -1;
+              }
+            }
+          }
+        }
+        else {
+          if ((dev->mtLastEvent & RIGHT_MT_EVENT) && dev->mt_info.rightIndex == dev->mt_info.mtSlot) {
+            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_RIGHT);
+            dev->mtLastEvent &= ~RIGHT_MT_EVENT;
+            dev->mt_info.rightIndex = -1;
+          }
+          else if ((dev->mtLastEvent & LEFT_MT_EVENT) && dev->mt_info.leftIndex == dev->mt_info.mtSlot) {
+            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+            dev->mtLastEvent &= ~LEFT_MT_EVENT;
+            dev->mt_info.leftIndex = -1;
+          }
+        }
+      }
+      break;
+    case ABS_MT_SLOT:
+      if (dev->mt_info.fingerMaxNum < (ev->value + 1)) {
+        dev->mt_info.fingerMaxNum = (ev->value + 1);
+      }
+      dev->mt_info.mtSlot = ev->value;
+      break;
+    case ABS_MT_POSITION_X:
+      if (abs(ev->value) > dev->mtXMax)
+        break;
+      if (dev->mt_info.touchDownX[dev->mt_info.mtSlot] == 0) {
+        dev->mt_info.touchDownX[dev->mt_info.mtSlot] = ev->value;
+      }
+      dev->mt_info.slotValueX[dev->mt_info.mtSlot] = ev->value;
+      break;
+    case ABS_MT_POSITION_Y:
+      if (abs(ev->value) > dev->mtYMax)
+        break;
+      if (dev->mt_info.touchDownY[dev->mt_info.mtSlot] == 0) {
+        dev->mt_info.touchDownY[dev->mt_info.mtSlot] = ev->value;
+      }
+      dev->mt_info.slotValueY[dev->mt_info.mtSlot] = ev->value;
+      break;
+    }
+    break;
+  }
+  return true;
+}
+
 static bool evdev_handle_event(struct input_event *ev, struct input_device *dev) {
   bool gamepadModified = false;
+
+  if (dev->mtPalm > 0) {
+    return evdev_mt_touchpad_handle_event(ev, dev);
+  }
 
   switch (ev->type) {
   case EV_SYN:
@@ -424,24 +855,6 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
         LiSendMultiControllerEvent(dev->controllerId, assignedControllerIds, dev->buttonFlags, dev->leftTrigger, dev->rightTrigger, dev->leftStickX, dev->leftStickY, dev->rightStickX, dev->rightStickY);
       dev->gamepadModified = false;
     }
-    if (dev->isDraging) {
-      int nowdeltax = dev->touchX - dev->touchDownX;
-      int nowdeltay = dev->touchY - dev->touchDownY;
-      if (nowdeltax * nowdeltax + nowdeltay * nowdeltay >= dev->mtPalm * dev->mtPalm) {
-        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
-        dev->isDraging = false;
-        dev->isDraged = true;
-      } else {
-        struct timeval elapsedTime;
-        timersub(&ev->time, &dev->touchDownTime, &elapsedTime);
-        int holdTimeMs = elapsedTime.tv_sec * 1000 + elapsedTime.tv_usec / 1000;
-        if (holdTimeMs >= TOUCH_RCLICK_TIME) {
-          LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
-          dev->isDraging = false;
-          dev->isDraged = true;
-        }
-      }
-    }
     break;
   case EV_KEY:
     if (ev->code > KEY_MAX)
@@ -483,6 +896,9 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
             fakeGrabKey = true;
           }
           waitingToSwitchGrabOnModifierUp = true;
+          return true;
+        } else if (ev->code == GAME_MODE_KEY) {
+          gameMode = !gameMode;
           return true;
         }
       }
@@ -553,109 +969,26 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
         mouseCode = BUTTON_X2;
         break;
       case BTN_TOUCH:
+        if (!dev->is_touchscreen)
+          break;
         if (ev->value == 1) {
           dev->touchDownTime = ev->time;
-          if (dev->is_mouse && dev->mtSlot == -1) {
-            dev->fingersNum = 1;
-            dev->maxFingersNum = 1;
-          }
         } else {
           if (dev->touchDownX != TOUCH_UP && dev->touchDownY != TOUCH_UP) {
             int deltaX = dev->touchX - dev->touchDownX;
             int deltaY = dev->touchY - dev->touchDownY;
-            int nowpalm = dev->is_touchscreen ? TOUCH_CLICK_RADIUS : dev->mtPalm;
-            struct timeval elapsedTime;
-            timersub(&ev->time, &dev->touchDownTime, &elapsedTime);
-            int holdTimeMs = elapsedTime.tv_sec * 1000 + elapsedTime.tv_usec / 1000;
-            int button;
-            if (dev->is_touchscreen && deltaX * deltaX + deltaY * deltaY < nowpalm * nowpalm) {
-              button = holdTimeMs >= TOUCH_RCLICK_TIME ? BUTTON_RIGHT : BUTTON_LEFT;
+            if (deltaX * deltaX + deltaY * deltaY < TOUCH_CLICK_RADIUS * TOUCH_CLICK_RADIUS) {
+              struct timeval elapsedTime;
+              timersub(&ev->time, &dev->touchDownTime, &elapsedTime);
+              int holdTimeMs = elapsedTime.tv_sec * 1000 + elapsedTime.tv_usec / 1000;
+              int button = holdTimeMs >= TOUCH_RCLICK_TIME ? BUTTON_RIGHT : BUTTON_LEFT;
               LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, button);
               usleep(TOUCH_CLICK_DELAY);
               LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, button);
-            } else if (dev->mtPalm > 0 && !dev->isMoving) {
-              if (holdTimeMs < TOUCH_RCLICK_TIME) {
-                switch (dev->maxFingersNum) {
-                case 1:
-                  button = BUTTON_LEFT;
-                  break;
-                case 2:
-                  button = BUTTON_RIGHT;
-                  break;
-                case 3:
-                  button = BUTTON_MIDDLE;
-                  break;
-                default:
-                  dev->touchDownX = TOUCH_UP;
-                  dev->touchDownY = TOUCH_UP;
-                  dev->fingersNum = 0;
-                  dev->maxFingersNum = 0;
-                  dev->isMoving = false;
-                  dev->mtSlot = -1;
-                  return true;
-                }
-                LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, button);
-                usleep(TOUCH_CLICK_DELAY);
-                LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, button);
-              }
             }
           }
           dev->touchDownX = TOUCH_UP;
           dev->touchDownY = TOUCH_UP;
-          dev->fingersNum = 0;
-          dev->maxFingersNum = 0;
-          dev->isMoving = false;
-          dev->mtSlot = -1;
-        }
-        break;
-      case BTN_TOOL_FINGER:
-        if (dev->mtPalm <= 0)
-          break;
-        if (ev->value == 1) {
-          dev->fingersNum = 1;
-        }
-        break;
-      case BTN_TOOL_DOUBLETAP:
-        if (dev->mtPalm <= 0)
-          break;
-        if (ev->value == 1) {
-          if (dev->maxFingersNum < 2)
-            dev->maxFingersNum = 2;
-          dev->fingersNum = 2;
-        }
-        break;
-      case BTN_TOOL_TRIPLETAP:
-        if (dev->mtPalm <= 0)
-          break;
-        if (ev->value == 1) {
-          dev->isDraging = true;
-          if (dev->maxFingersNum < 3)
-            dev->maxFingersNum = 3;
-          dev->fingersNum = 3;
-        } else {
-          if (dev->isDraged) {
-            LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
-          }
-          dev->isDraging = false;
-          dev->isDraged = false;
-        }
-        break;
-      case BTN_TOOL_QUADTAP:
-        if (dev->mtPalm <= 0)
-          break;
-        if (ev->value == 1) {
-          if (dev->maxFingersNum < 4)
-            dev->maxFingersNum = 4;
-          dev->fingersNum = 4;
-        }
-        break;
-      case BTN_TOOL_QUINTTAP:
-        if (dev->mtPalm <= 0)
-          break;
-        if (ev->value == 1) {
-          if (dev->maxFingersNum < 5)
-            dev->maxFingersNum = 5;
-          dev->fingersNum = 5;
         }
         break;
       default:
@@ -818,55 +1151,6 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
           dev->touchY = ev->value;
         } else {
           dev->mouseDeltaY += (ev->value - dev->touchY);
-          dev->touchY = ev->value;
-        }
-        break;
-      }
-      break;
-    }
-    if (dev->mtPalm > 0) {
-      int nowdistance = 0;
-      switch (ev->code) {
-      case ABS_MT_SLOT:
-        if (dev->maxFingersNum < ev->value + 1)
-          dev->maxFingersNum = ev->value + 1;
-        dev->mtSlot = ev->value;
-        break;
-      case ABS_MT_POSITION_X:
-        if (dev->mtSlot > 0 || ev->value < 0)
-          break;
-        if (dev->touchDownX == TOUCH_UP) {
-          dev->touchDownX = ev->value;
-          dev->touchX = ev->value;
-        } else {
-          nowdistance = ev->value - dev->touchX;
-          if (!dev->isMoving && abs(ev->value - dev->touchDownX) >= dev->mtPalm)
-            dev->isMoving = true;
-          if (dev->isMoving) {
-            if (dev->fingersNum == 2)
-              LiSendHighResHScrollEvent((short)nowdistance);
-            else
-              dev->mouseDeltaX += nowdistance;
-          }
-          dev->touchX = ev->value;
-        }
-        break;
-      case ABS_MT_POSITION_Y:
-        if (dev->mtSlot > 0 || ev->value < 0)
-          break;
-        if (dev->touchDownY == TOUCH_UP) {
-          dev->touchDownY = ev->value;
-          dev->touchY = ev->value;
-        } else {
-          nowdistance = ev->value - dev->touchY;
-          if (!dev->isMoving && abs(ev->value - dev->touchDownY) >= dev->mtPalm)
-            dev->isMoving = true;
-          if (dev->isMoving) {
-            if (dev->fingersNum == 2)
-              LiSendHighResScrollEvent((short)nowdistance);
-            else
-              dev->mouseDeltaY += nowdistance;
-          }
           dev->touchY = ev->value;
         }
         break;
@@ -1253,8 +1537,17 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
                    libevdev_has_event_code(evdev, EV_KEY, BTN_TOOL_DOUBLETAP) && 
                    libevdev_has_event_code(evdev, EV_KEY, BTN_TOUCH) && 
                    libevdev_has_event_code(evdev, EV_ABS, ABS_X))) {
-    devices[dev].mtPalm = 25;
-    devices[dev].mtSlot = -1;
+    const struct input_absinfo *info = libevdev_get_abs_info(evdev, ABS_MT_SLOT);
+    if (info && info->maximum < 10) {
+      devices[dev].mtPalm = (int)libevdev_get_abs_resolution(evdev, ABS_X) * 0.5;
+      devices[dev].mtXMax = libevdev_get_abs_maximum(evdev, ABS_X);
+      devices[dev].mtYMax = libevdev_get_abs_maximum(evdev, ABS_Y);
+      if (devices[dev].mtPalm <= 0 || devices[dev].mtXMax <= 0 || devices[dev].mtYMax <= 0) {
+        devices[dev].mtPalm = 0;
+        devices[dev].mtXMax = 0;
+        devices[dev].mtYMax = 0;
+      }
+    }
   }
 
 
@@ -1493,7 +1786,7 @@ void fake_grab_window(bool grabstat) {
     return;
   freeallkey();
   evdev_drain();
-#if defined(HAVE_X11) || defined(HAVE_WAYLAND)
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM)
   write(keyboardpipefd, !grabstat ? &ungrabcode : &grabcode, sizeof(char *));
 #endif
   isInputing = grabstat;
@@ -1515,7 +1808,7 @@ void grab_window(bool grabstat) {
     isGrabed = grabstat;
 
     if (!(!fakeGrab && fakeGrabKey)) {
-#if defined(HAVE_X11) || defined(HAVE_WAYLAND)
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM)
       write(keyboardpipefd, !grabstat ? &ungrabcode : &grabcode, sizeof(char *));
 #endif
     }
@@ -1867,7 +2160,7 @@ static int x11_sdl_event_handle(void *pointer) {
   while (!done && SDL_WaitEvent(&event)) {
     switch (x11_sdlinput_handle_event(&event)) {
     case SDL_QUIT_APPLICATION:
-#if defined(HAVE_X11) || defined(HAVE_WAYLAND)
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM)
       write(keyboardpipefd, &quitstate, sizeof(char *));
 #endif
       done = true;

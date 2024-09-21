@@ -18,6 +18,7 @@
  */
 
 #include <libavcodec/avcodec.h>
+#include <libavutil/pixdesc.h>
 
 #include <stdlib.h>
 #include <pthread.h>
@@ -25,10 +26,14 @@
 #include <stdbool.h>
 
 #include <Limelight.h>
+#include "video_internal.h"
 #include "ffmpeg.h"
 #ifdef HAVE_VAAPI
 #include "ffmpeg_vaapi.h"
 #endif
+// lack conditions
+#include "drm_base.h"
+#include "drm_base_ffmpeg.h"
 
 // General decoder and renderer state
 static AVPacket* pkt;
@@ -39,10 +44,12 @@ static AVFrame** dec_frames;
 static int dec_frames_cnt;
 static int current_frame, next_frame;
 
-bool isSupportYuv444 = false;
+int supportedVideoFormat = 0;
 bool wantYuv444 = false;
 bool isYUV444 = false;
+bool useHdr = false;
 enum decoders ffmpeg_decoder;
+enum renders {DEFAULT = 0, DRM = 0x200};
 
 #define BYTES_PER_PIXEL 4
 
@@ -61,28 +68,29 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
     return -1;
   }
 
+  enum renders render = perf_lvl & DRM_RENDER ? DRM : DEFAULT;
   ffmpeg_decoder = perf_lvl & VAAPI_ACCELERATION ? VAAPI : SOFTWARE;
   if (wantYuv444 && !(videoFormat & VIDEO_FORMAT_MASK_YUV444)) {
-    if (isSupportYuv444) {
+    if (supportedVideoFormat) {
       printf("Could not start yuv444 stream because of server support, fallback to yuv420 format\n");
     }
     else {
       printf("Could not start yuv444 stream because of client support, fallback to yuv420 format\n");
     }
   }
-  if (videoFormat & VIDEO_FORMAT_MASK_YUV444 && isSupportYuv444) {
+  if (videoFormat & VIDEO_FORMAT_MASK_YUV444) {
     isYUV444 = true;
+  }
+  if (videoFormat & VIDEO_FORMAT_MASK_10BIT) {
+    useHdr = true;
   }
 
   for (int try = 0; try < 6; try++) {
-    if (videoFormat & VIDEO_FORMAT_MASK_H264) {
+    if (videoFormat & VIDEO_FORMAT_MASK_AV1) {
       if (ffmpeg_decoder == SOFTWARE) {
-        if (try == 0) decoder = avcodec_find_decoder_by_name("h264_nvv4l2"); // Tegra
-        if (try == 1) decoder = avcodec_find_decoder_by_name("h264_nvmpi"); // Tegra
-        if (try == 2) decoder = avcodec_find_decoder_by_name("h264_omx"); // VisionFive
-        if (try == 3) decoder = avcodec_find_decoder_by_name("h264_v4l2m2m"); // Stateful V4L2
+        if (try == 0) decoder = avcodec_find_decoder_by_name("libdav1d");
       }
-      if (try == 4) decoder = avcodec_find_decoder_by_name("h264"); // Software and hwaccel
+      if (try == 1) decoder = avcodec_find_decoder_by_name("av1"); // Hwaccel
     } else if (videoFormat & VIDEO_FORMAT_MASK_H265) {
       if (ffmpeg_decoder == SOFTWARE) {
         if (try == 0) decoder = avcodec_find_decoder_by_name("hevc_nvv4l2"); // Tegra
@@ -91,11 +99,14 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
         if (try == 3) decoder = avcodec_find_decoder_by_name("hevc_v4l2m2m"); // Stateful V4L2
       }
       if (try == 4) decoder = avcodec_find_decoder_by_name("hevc"); // Software and hwaccel
-    } else if (videoFormat & VIDEO_FORMAT_MASK_AV1) {
+    } else if (videoFormat & VIDEO_FORMAT_MASK_H264) {
       if (ffmpeg_decoder == SOFTWARE) {
-        if (try == 0) decoder = avcodec_find_decoder_by_name("libdav1d");
+        if (try == 0) decoder = avcodec_find_decoder_by_name("h264_nvv4l2"); // Tegra
+        if (try == 1) decoder = avcodec_find_decoder_by_name("h264_nvmpi"); // Tegra
+        if (try == 2) decoder = avcodec_find_decoder_by_name("h264_omx"); // VisionFive
+        if (try == 3) decoder = avcodec_find_decoder_by_name("h264_v4l2m2m"); // Stateful V4L2
       }
-      if (try == 1) decoder = avcodec_find_decoder_by_name("av1"); // Hwaccel
+      if (try == 4) decoder = avcodec_find_decoder_by_name("h264"); // Software and hwaccel
     } else {
       printf("Video format not supported\n");
       return -1;
@@ -137,22 +148,31 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
     else
       decoder_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
+    AVDictionary* dict = NULL;
     #ifdef HAVE_VAAPI
     if (ffmpeg_decoder == VAAPI) {
       vaapi_init(decoder_ctx);
-      #define NEED_YUV444 1
-      if (videoFormat & VIDEO_FORMAT_MASK_YUV444)
-        isSupportYuv444 = vaapi_is_support_yuv444(NEED_YUV444);
-      #undef NEED_YUV444
     }
     #endif
+    // need conditions111111111111111111
+    if (render == DRM) {
+      ffmpeg_bind_drm_ctx(decoder_ctx, &dict);
+    }
 
-    int err = avcodec_open2(decoder_ctx, decoder, NULL);
+    AVDictionary* *dictPtr = NULL;
+    if(dict)
+      dictPtr = &dict;
+    int err = avcodec_open2(decoder_ctx, decoder, dictPtr);
     if (err < 0) {
       printf("Couldn't open codec: %s\n", decoder->name);
       avcodec_free_context(&decoder_ctx);
       continue;
     }
+
+    if (dictPtr != NULL)
+      av_dict_free(&dict);
+
+    break;
   }
 
   if (decoder == NULL) {
@@ -169,14 +189,24 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
     return -1;
   }
 
+  int widthMulti = -1;
+  if (ffmpeg_decoder == SOFTWARE) {
+    if (render == DRM) {
+// condition111111111111111111111111
+      widthMulti = get_drm_dbum_aligned(-1, decoder_ctx->pix_fmt, width, height);
+    }
+    else {
+      widthMulti = isYUV444 ? 64 : 128;
+    }
+  }
+
   for (int i = 0; i < buffer_count; i++) {
     dec_frames[i] = av_frame_alloc();
     if (dec_frames[i] == NULL) {
       fprintf(stderr, "Couldn't allocate frame");
       return -1;
     }
-    if (ffmpeg_decoder == SOFTWARE) {
-      int widthMulti = isYUV444 ? 64 : 128;
+    if (widthMulti > 0) {
       if (width % widthMulti != 0) {
         dec_frames[i]->format = decoder_ctx->pix_fmt;
         dec_frames[i]->width = decoder_ctx->width;
@@ -213,7 +243,12 @@ void ffmpeg_destroy(void) {
 }
 
 AVFrame* ffmpeg_get_frame(bool native_frame) {
+  av_frame_unref(dec_frames[next_frame]);
+
   int err = avcodec_receive_frame(decoder_ctx, dec_frames[next_frame]);
+
+  av_packet_unref(pkt);
+
   if (err == 0) {
     current_frame = next_frame;
     next_frame = (current_frame+1) % dec_frames_cnt;
@@ -230,11 +265,12 @@ AVFrame* ffmpeg_get_frame(bool native_frame) {
 
 // packets must be decoded in order
 // indata must be inlen + AV_INPUT_BUFFER_PADDING_SIZE in length
-int ffmpeg_decode(unsigned char* indata, int inlen) {
+static inline int ffmpeg_decode_packet(unsigned char* indata, int inlen, int flags) {
   int err;
 
   pkt->data = indata;
   pkt->size = inlen;
+  pkt->flags = flags;
 
   err = avcodec_send_packet(decoder_ctx, pkt);
   if (err < 0) {
@@ -244,6 +280,14 @@ int ffmpeg_decode(unsigned char* indata, int inlen) {
   }
 
   return err < 0 ? err : 0;
+}
+
+int ffmpeg_decode(unsigned char* indata, int inlen) {
+  return ffmpeg_decode_packet(indata, inlen, 0);
+}
+
+int ffmpeg_decode2(unsigned char* indata, int inlen, int flags) {
+  return ffmpeg_decode_packet(indata, inlen, flags);
 }
 
 int ffmpeg_is_frame_full_range(const AVFrame* frame) {
@@ -263,4 +307,62 @@ int ffmpeg_get_frame_colorspace(const AVFrame* frame) {
   default:
     return COLORSPACE_REC_601;
   }
+}
+
+void ffmpeg_get_plane_info (const AVFrame *frame, enum AVPixelFormat *pix_fmt, int *plane_num, enum PixelFormatOrder *plane_order) {
+  if (frame->hw_frames_ctx) {
+    AVHWFramesContext *fr_ctx = (AVHWFramesContext *)frame->hw_frames_ctx->data;
+    if (fr_ctx) {
+       *pix_fmt = fr_ctx->sw_format;
+    }
+  }
+  else {
+    *pix_fmt = decoder_ctx->pix_fmt;
+  }
+  printf("Try to use pixel format: %s \n", av_get_pix_fmt_name(*pix_fmt));
+
+  int planes = av_pix_fmt_count_planes(*pix_fmt);
+  *plane_num = planes <= 0 ? 4 : planes;
+  switch (*pix_fmt) {
+  case AV_PIX_FMT_VUYX:
+    *plane_order = VUYX_ORDER;
+    break;
+  case AV_PIX_FMT_XV30:
+  case AV_PIX_FMT_XV36:
+    *plane_order = XVYU_ORDER;
+    break;
+  case AV_PIX_FMT_YUV420P:
+  case AV_PIX_FMT_YUV444P:
+  case AV_PIX_FMT_YUVJ420P:
+  case AV_PIX_FMT_YUVJ444P:
+  case AV_PIX_FMT_YUV444P10:
+    *plane_order = YUVX_ORDER;
+    break;
+  case AV_PIX_FMT_NV12:
+  case AV_PIX_FMT_NV16:
+  case AV_PIX_FMT_NV24:
+  case AV_PIX_FMT_P010:
+  case AV_PIX_FMT_P016:
+    *plane_order = YUVX_ORDER;
+    break;
+  default:
+    *plane_order = YUVX_ORDER;
+    break;
+  }
+  return;
+}
+
+int software_supported_video_format() {
+  int format = 0;
+  format |= VIDEO_FORMAT_H264;
+  format |= VIDEO_FORMAT_H264_HIGH8_444;
+  format |= VIDEO_FORMAT_H265_REXT8_444;
+  format |= VIDEO_FORMAT_H265_REXT10_444;
+  format |= VIDEO_FORMAT_H265_MAIN10;
+  format |= VIDEO_FORMAT_H265;
+  format |= VIDEO_FORMAT_AV1_HIGH8_444;
+  format |= VIDEO_FORMAT_AV1_HIGH10_444;
+  format |= VIDEO_FORMAT_AV1_MAIN8;
+  format |= VIDEO_FORMAT_AV1_MAIN10;
+  return format;
 }

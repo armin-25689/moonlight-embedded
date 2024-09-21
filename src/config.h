@@ -52,6 +52,7 @@ typedef struct _CONFIGURATION {
   bool swapxyab;
   bool yuv444;
   bool fakegrab;
+  bool less_threads;
 } CONFIGURATION, *PCONFIGURATION;
 
 extern bool inputAdded;
