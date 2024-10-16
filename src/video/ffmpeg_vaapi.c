@@ -38,46 +38,6 @@
 
 #include "video_internal.h"
 
-#define EGL_ATTRIB_COUNT 30 * 2
-#ifndef EGL_EXT_image_dma_buf_import
-#define EGL_LINUX_DMA_BUF_EXT             0x3270
-#define EGL_LINUX_DRM_FOURCC_EXT          0x3271
-#define EGL_DMA_BUF_PLANE0_FD_EXT         0x3272
-#define EGL_DMA_BUF_PLANE0_OFFSET_EXT     0x3273
-#define EGL_DMA_BUF_PLANE0_PITCH_EXT      0x3274
-#define EGL_DMA_BUF_PLANE1_FD_EXT         0x3275
-#define EGL_DMA_BUF_PLANE1_OFFSET_EXT     0x3276
-#define EGL_DMA_BUF_PLANE1_PITCH_EXT      0x3277
-#define EGL_DMA_BUF_PLANE2_FD_EXT         0x3278
-#define EGL_DMA_BUF_PLANE2_OFFSET_EXT     0x3279
-#define EGL_DMA_BUF_PLANE2_PITCH_EXT      0x327A
-#define EGL_YUV_COLOR_SPACE_HINT_EXT      0x327B
-#define EGL_SAMPLE_RANGE_HINT_EXT         0x327C
-#define EGL_YUV_CHROMA_HORIZONTAL_SITING_HINT_EXT 0x327D
-#define EGL_YUV_CHROMA_VERTICAL_SITING_HINT_EXT 0x327E
-#define EGL_ITU_REC601_EXT                0x327F
-#define EGL_ITU_REC709_EXT                0x3280
-#define EGL_ITU_REC2020_EXT               0x3281
-#define EGL_YUV_FULL_RANGE_EXT            0x3282
-#define EGL_YUV_NARROW_RANGE_EXT          0x3283
-#define EGL_YUV_CHROMA_SITING_0_EXT       0x3284
-#define EGL_YUV_CHROMA_SITING_0_5_EXT     0x3285
-#endif
-
-#ifndef EGL_EXT_image_dma_buf_import_modifiers
-#define EGL_DMA_BUF_PLANE3_FD_EXT         0x3440
-#define EGL_DMA_BUF_PLANE3_OFFSET_EXT     0x3441
-#define EGL_DMA_BUF_PLANE3_PITCH_EXT      0x3442
-#define EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT 0x3443
-#define EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT 0x3444
-#define EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT 0x3445
-#define EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT 0x3446
-#define EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT 0x3447
-#define EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT 0x3448
-#define EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT 0x3449
-#define EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT 0x344A
-#endif
-
 #define MAX_SURFACES 16
 
 // prepare for high444 profile. not support now
@@ -372,8 +332,7 @@ bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDispla
   return true;
 }
 
-void vaapi_free_egl_images(void *eglDisplay, void *eglImages[4], void *descriptor) {
-  EGLImage* *images = (EGLImage **)eglImages;
+void vaapi_free_egl_images(void *eglImages[4], void *descriptor, void(*render_unmap_buffer) (void* image[4], int planes)) {
   int startNum = 0,closeNum = 0;
   for (size_t i = 0; i < MAX_FB_NUM; ++i) {
     if ((VADRMPRIMESurfaceDescriptor *)descriptor == &primeDescriptors[i]) {
@@ -382,8 +341,8 @@ void vaapi_free_egl_images(void *eglDisplay, void *eglImages[4], void *descripto
     }
   }
   for (size_t h = startNum; h < closeNum; h++) {
-    for (size_t i = 0; i < primeDescriptors[h].num_layers; ++i) {
-      eglDestroyImage((EGLDisplay)eglDisplay, images[i]);
+    if (render_unmap_buffer != NULL) {
+      render_unmap_buffer(eglImages, primeDescriptors[h].num_layers);
     }
     for (size_t i = 0; i < primeDescriptors[h].num_objects; ++i) {
       close(primeDescriptors[h].objects[i].fd);
@@ -393,14 +352,18 @@ void vaapi_free_egl_images(void *eglDisplay, void *eglImages[4], void *descripto
   }
 }
 
-int vaapi_export_egl_images(AVFrame *frame, void *eglDisplay, bool eglIsSupportExtDmaBufMod,
-                        void *eglImages[4], void **descriptor) {
-  EGLImage* *images = (EGLImage **)eglImages;
-  EGLDisplay dpy = (EGLDisplay)eglDisplay;
+int vaapi_export_egl_images(AVFrame *frame, void *eglImages[4], void **descriptor,
+      int(*render_map_buffer) (struct Source_Buffer_Info *buffer, int planes,
+                               int composeOrSeperate, void* image[4])) {
   ssize_t count = 0;
   AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
   AVVAAPIDeviceContext *va_ctx = device->hwctx;
   VADRMPRIMESurfaceDescriptor *primeDescriptor = &primeDescriptors[current_index];
+
+  if (render_map_buffer == NULL) {
+    fprintf(stderr, "Ffmpeg_vaapi: Has no export images function implement.\n");
+    return -1;
+  }
 
   VASurfaceID surface_id = (VASurfaceID)(uintptr_t)frame->data[3];
   VAStatus st = vaExportSurfaceHandle(va_ctx->display,
@@ -408,118 +371,41 @@ int vaapi_export_egl_images(AVFrame *frame, void *eglDisplay, bool eglIsSupportE
                     VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
                     VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
                     primeDescriptor);
-  if (st != VA_STATUS_SUCCESS)
+  if (st != VA_STATUS_SUCCESS) {
+    fprintf(stderr, "Ffmpeg_vaapi: vaExportSurfaceHandle() Failed: %d\n", st);
     return -1;
+  }
 
-  if (primeDescriptor->num_layers > 4)
-    return -1;
-
-  st = vaSyncSurface2(va_ctx->display, surface_id, 1000000000);
+  st = vaSyncSurface2(va_ctx->display, surface_id, 10000000000);
   if (st != VA_STATUS_SUCCESS) {
     fprintf(stderr, "Ffmpeg_vaapi: vaSyncSurface2() Failed: %d\n", st);
     goto sync_fail;
   }
 
+  int planes = 0;
+  struct Source_Buffer_Info buffer_info = {0};
   for (size_t i = 0; i < primeDescriptor->num_layers; ++i) {
-    // Max 30 attributes (1 key + 1 value for each)
-    EGLAttrib attribs[EGL_ATTRIB_COUNT] = {
-      EGL_LINUX_DRM_FOURCC_EXT, primeDescriptor->layers[i].drm_format,
-      EGL_WIDTH, i == 0 ? frame->width : (isYUV444 ? frame->width : frame->width / 2),
-      EGL_HEIGHT, i == 0 ? frame->height : (isYUV444 ? frame->height : frame->height / 2),
-/*
-      // need test111111111111
-      EGL_WIDTH, frame->linesize[i],
-      EGL_HEIGHT, i == 0 ? frame->height : (isYUV444 ? frame->height : frame->height / 2),
-*/
-    };
-
-    int attribIndex = 6;
     for (size_t j = 0; j < primeDescriptor->layers[i].num_planes; j++) {
-      switch (j) {
-      case 0:
-        attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_FD_EXT;
-        attribs[attribIndex++] = primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].fd;
-        attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
-        attribs[attribIndex++] = primeDescriptor->layers[i].offset[0];
-        attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
-        attribs[attribIndex++] = primeDescriptor->layers[i].pitch[0];
-        if (eglIsSupportExtDmaBufMod) {
-          attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier & 0xFFFFFFFF);
-          attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier >> 32);
-        }
-        break;
-
-      case 1:
-        attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_FD_EXT;
-        attribs[attribIndex++] = primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].fd;
-        attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_OFFSET_EXT;
-        attribs[attribIndex++] = primeDescriptor->layers[i].offset[1];
-        attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_PITCH_EXT;
-        attribs[attribIndex++] = primeDescriptor->layers[i].pitch[1];
-        if (eglIsSupportExtDmaBufMod) {
-          attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier & 0xFFFFFFFF);
-          attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier >> 32);
-        }
-        break;
-
-      case 2:
-        attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_FD_EXT;
-        attribs[attribIndex++] = primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].fd;
-        attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_OFFSET_EXT;
-        attribs[attribIndex++] = primeDescriptor->layers[i].offset[2];
-        attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_PITCH_EXT;
-        attribs[attribIndex++] = primeDescriptor->layers[i].pitch[2];
-        if (eglIsSupportExtDmaBufMod) {
-          attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier & 0xFFFFFFFF);
-          attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier >> 32);
-        }
-        break;
-
-      case 3:
-        attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_FD_EXT;
-        attribs[attribIndex++] = primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].fd;
-        attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_OFFSET_EXT;
-        attribs[attribIndex++] = primeDescriptor->layers[i].offset[3];
-        attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_PITCH_EXT;
-        attribs[attribIndex++] = primeDescriptor->layers[i].pitch[3];
-        if (eglIsSupportExtDmaBufMod) {
-          attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier & 0xFFFFFFFF);
-          attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT;
-          attribs[attribIndex++] = (EGLint)(primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier >> 32);
-        }
-        break;
-
-      default:
-        fprintf(stderr, "Ffmpeg_vaapi: add attribs list Failed.\n");
-        goto sync_fail;
-        break;
+      if (planes > 3) {
+        fprintf(stderr, "Ffmpeg_vaapi: Planes number is too big(%d).\n", planes + 1);
+        goto create_image_fail;
       }
+      buffer_info.format[planes] = primeDescriptor->layers[i].drm_format;
+      buffer_info.width[planes] = planes == 0 ? frame->width : (isYUV444 ? frame->width : frame->width / 2);
+      buffer_info.height[planes] = planes == 0 ? frame->height : (isYUV444 ? frame->height : frame->height / 2);
+      buffer_info.fd[planes] = primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].fd;
+      buffer_info.offset[planes] = primeDescriptor->layers[i].offset[j];
+      buffer_info.stride[planes] = primeDescriptor->layers[i].pitch[j];
+      buffer_info.modifiers[planes] = primeDescriptor->objects[primeDescriptor->layers[i].object_index[j]].drm_format_modifier;
+      planes++;
     }
-
-    // Terminate the attribute list
-    attribs[attribIndex++] = EGL_NONE;
-    if (attribIndex > EGL_ATTRIB_COUNT) {
-      fprintf(stderr, "Ffmpeg_vaapi: too much attribs.\n");
-      goto sync_fail;
-    }
-
-    images[i] = eglCreateImage(dpy, EGL_NO_CONTEXT,
-                   EGL_LINUX_DMA_BUF_EXT,
-                   NULL, attribs);
-    if (!images[i]) {
-      fprintf(stderr, "eglCreateImage() Failed: %d\n", eglGetError());
-      goto create_image_fail;
-    }
-
     ++count;
   }
+
+  if (render_map_buffer(&buffer_info, planes, (count != planes) ? COMPOSE_PLANE : SEPERATE_PLANE, eglImages) < 0) {
+    goto create_image_fail;
+  }
+
   current_index = next_index;
   next_index = (current_index + 1) % MAX_FB_NUM;
   *descriptor = &primeDescriptors[current_index];
@@ -528,7 +414,7 @@ int vaapi_export_egl_images(AVFrame *frame, void *eglDisplay, bool eglIsSupportE
 create_image_fail:
   primeDescriptor->num_layers = count;
 sync_fail:
-  vaapi_free_egl_images(eglDisplay, eglImages, primeDescriptor);
+  vaapi_free_egl_images(eglImages, primeDescriptor, NULL);
   return -1;
 }
 

@@ -32,133 +32,128 @@
 #include <Limelight.h>
 
 // include glsl
+#include "egl.h"
 #include "egl_glsl.h"
 #include "video_internal.h"
 #include "render.h"
-// test
-#include "gbm.h"
 
-#ifndef EGL_PLATFORM_X11_KHR
-#define EGL_PLATFORM_X11_KHR 0x31D5
-#endif
-#ifndef EGL_PLATFORM_WAYLAND_KHR
-#define EGL_PLATFORM_WAYLAND_KHR 0x31D8
-#endif
-#ifndef EGL_PLATFORM_GBM_KHR
-#define EGL_PLATFORM_GBM_KHR 0x31D7
-#endif
-#ifndef EGL_CONTEXT_MAJOR_VERSION_KHR
-#define EGL_CONTEXT_MAJOR_VERSION_KHR 0x3098
-#endif
-#ifndef EGL_CONTEXT_MINOR_VERSION_KHR
-#define EGL_CONTEXT_MINOR_VERSION_KHR 0x30FB
-#endif
-#ifndef EGL_OPENGL_ES3_BIT_KHR
-#define EGL_OPENGL_ES3_BIT_KHR 0x0040
-#endif
-
-static struct EXTSTATE {
-  bool eglIsSupportExtDmaBuf;
-  bool eglIsSupportExtDmaBufMod;
-  bool eglIsSupportExtSurfaceless;
-  bool eglIsSupportExtImageOES;
-} ExtState = {0};
-
-struct Import_Buffer_Info {
-  EGLImage image[4];
-  GLuint texture[4];
-  GLuint framebuffer[4];
-};
+static struct EGL_Base egl_base = {0};
 static struct Import_Buffer_Info out_fb[MAX_FB_NUM] = {0};
-static struct Import_Buffer_Info *back_out_fb = NULL;
+static struct EXTSTATE ExtState = {0};
 
-static const EGLint context_attributes[] = { EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 0,  EGL_NONE };
 static EGLDisplay display = EGL_NO_DISPLAY;
 static EGLSurface surface = EGL_NO_SURFACE;
 static EGLContext context = EGL_NO_CONTEXT;
 static EGLConfig config;
 static EGLSync eglsync = EGL_NO_SYNC;
 
-struct {
-  int width;
-  int height;
-  int screen_width;
-  int screen_height;
-  float cutwidth;
-  GLuint VAO;
-  GLuint shader_program_packed;
-  GLuint shader_program_nv12;
-  GLuint shader_program_yuv;
-  GLuint common_vertex_shader;
-  GLuint yuv_fragment_shader;
-  GLuint nv12_fragment_shader;
-  GLuint packed_fragment_shader;
-} static egl_base;
-
 static GLuint texture_id[4], texture_uniform[7];
-// for planeNum 0, 1, 2, 3, 4
-static GLuint *shaders[5] = { &egl_base.shader_program_nv12, &egl_base.shader_program_packed, &egl_base.shader_program_nv12, &egl_base.shader_program_yuv, &egl_base.shader_program_nv12 };
 
 static const float *colorOffsets;
 static const float *colorspace;
 static int egl_max_planes = 4;
 static int planeNum = 4, imageNum = 0;
 static const int *yuvOrder;
-static bool eglVSync = false;
-static bool display_buffer = false;
-static int displayBufferPlaneNum = 0;
-static int displayBufferNum = 0;
-static int current = 0, next = 0;
 
 static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES = NULL;
 static PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC glEGLImageTargetTexStorageEXT;
 
-static int map_gbm_bo_to_framebuffer(struct Import_Buffer_Info out_fb[MAX_FB_NUM]) {
-  struct Source_Buffer_Info buffers[MAX_FB_NUM] = {0};
-  export_bo(buffers, &displayBufferNum, &displayBufferPlaneNum);
+// for planeNum 0, 1, 2, 3, 4
+static GLuint *shaders[5] = { &egl_base.shader_program_nv12, &egl_base.shader_program_packed, &egl_base.shader_program_nv12, &egl_base.shader_program_yuv, &egl_base.shader_program_nv12 };
+static const EGLint context_attributes[] = { EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 0,  EGL_NONE };
 
-  if (displayBufferNum > MAX_FB_NUM)
-    return -1;
+static void egl_unmap_eglimage(EGLImage eglImage[4], int bufferPlaneNum) {
+  for (int i = 0; i < bufferPlaneNum; i++) {
+    eglDestroyImage(display, eglImage[i]);
+  }
+}
 
-  for (int i = 0; i < displayBufferNum; i++) {
-    for (int j = 0; j < displayBufferPlaneNum; j++) {
-      const EGLAttrib attrs[] = { EGL_DMA_BUF_PLANE0_FD_EXT,
-                               buffers[i].fd,
-                               EGL_WIDTH,
-                               buffers[i].width,
-                               EGL_HEIGHT,
-                               buffers[i].height,
-                               EGL_LINUX_DRM_FOURCC_EXT,
-                               buffers[i].format,
-                               EGL_DMA_BUF_PLANE0_PITCH_EXT,
-                               buffers[i].stride,
-                               EGL_DMA_BUF_PLANE0_OFFSET_EXT,
-                               buffers[i].offset,
-                               EGL_NONE };
+static int egl_map_buffer_to_eglimage(struct Source_Buffer_Info *buffer, int bufferPlaneNum, int composeOrSeperate, EGLImage eglImage[4]) {
+  // layers
+  int planes = composeOrSeperate == COMPOSE_PLANE ? 1 : bufferPlaneNum;
+  // planes in layers
+  int planesi = composeOrSeperate == COMPOSE_PLANE ? bufferPlaneNum : 1;
 
-      out_fb[i].image[j] = eglCreateImage(display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT,
-                             NULL, attrs);
-      if (out_fb[i].image[j] == EGL_NO_IMAGE) {
-        fprintf(stderr, "Failed to make image from buffer object: %x\n",
-               eglGetError());
-               return -1;
+  for (int j = 0; j < planes; j++) {
+    int attrsNum = 0;
+    EGLAttrib attrs[MAX_EGL_ATTRS_NUM] = {0};
+    attrs[attrsNum++] = EGL_WIDTH;
+    attrs[attrsNum++] = buffer->width[j];
+    attrs[attrsNum++] = EGL_HEIGHT;
+    attrs[attrsNum++] = buffer->height[j];
+    attrs[attrsNum++] = EGL_LINUX_DRM_FOURCC_EXT,
+    attrs[attrsNum++] = buffer->format[j];
+
+    for (int k = 0; k < planesi; k++) {
+      attrs[attrsNum++] = eglImageAttrsSlot.fd[k];
+      attrs[attrsNum++] = buffer->fd[j + k];
+      attrs[attrsNum++] = eglImageAttrsSlot.pitch[k];
+      attrs[attrsNum++] = buffer->stride[j + k];
+      attrs[attrsNum++] = eglImageAttrsSlot.offset[k];
+      attrs[attrsNum++] = buffer->offset[j + k];
+      if (buffer->modifiers[k] == 0) {
+        continue;
       }
+      if (ExtState.eglIsSupportExtDmaBufMod) {
+        attrs[attrsNum++] = eglImageAttrsSlot.lo_modi[k];
+        attrs[attrsNum++] = (EGLint)(buffer->modifiers[j + k] & 0xFFFFFFFF);
+        attrs[attrsNum++] = eglImageAttrsSlot.hi_modi[k];
+        attrs[attrsNum++] = (EGLint)(buffer->modifiers[j + k] >> 32);
+      }
+    }
 
+    attrs[attrsNum++] = EGL_NONE;
+
+    eglImage[j] = eglCreateImage(display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT,
+                                 NULL, attrs);
+    if (eglImage[j] == EGL_NO_IMAGE) {
+      fprintf(stderr, "Failed to make image from buffer object: %x\n", eglGetError());
+      egl_unmap_eglimage(eglImage, j);
+      return -1;
+    }
+  }
+
+  return 0;
+}
+
+static int map_display_buffer_framebuffer(struct Import_Buffer_Info out_fb[MAX_FB_NUM], void(*display_exported_buffer)(struct Source_Buffer_Info *buffer, int *buffersNum, int *planesNum)) {
+  struct Source_Buffer_Info buffers[MAX_FB_NUM] = {0};
+
+  if (!display_exported_buffer) {
+    printf("EGL: Has no display_exported_buffer\n");
+    return -1;
+  }
+  display_exported_buffer(buffers, &egl_base.displayBufferNum, &egl_base.displayBufferPlaneNum);
+
+  if (egl_base.displayBufferNum > MAX_FB_NUM) {
+    printf("EGL: Buffers num for display is so large\n");
+    return -1;
+  }
+
+  for (int i = 0; i < egl_base.displayBufferNum; i++) {
+    glGenFramebuffers(1, &out_fb[i].framebuffer);
+
+    if (egl_map_buffer_to_eglimage(&buffers[i], egl_base.displayBufferPlaneNum, SEPERATE_PLANE, out_fb[i].image) < 0) {
+      // may be not needed
+      glDeleteFramebuffers(1, &out_fb[i].framebuffer);
+      return -1;
+    }
+
+    for (int j = 0; j < egl_base.displayBufferPlaneNum; j++) {
       glGenTextures(1, &out_fb[i].texture[j]);
       glBindTexture(GL_TEXTURE_2D, out_fb[i].texture[j]);
       glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, out_fb[i].image[j]);
       glBindTexture(GL_TEXTURE_2D, 0);
 
-      glGenFramebuffers(1, &out_fb[i].framebuffer[j]);
-      glBindFramebuffer(GL_FRAMEBUFFER, out_fb[i].framebuffer[j]);
+      glBindFramebuffer(GL_FRAMEBUFFER, out_fb[i].framebuffer);
       glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                              GL_TEXTURE_2D, out_fb[i].texture[j], 0);
 
       if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-         fprintf(stderr,
-                 "Failed framebuffer check for created target buffer: %x\n",
-                 glCheckFramebufferStatus(GL_FRAMEBUFFER));
-        glDeleteFramebuffers(1, &out_fb[i].framebuffer[j]);
+        fprintf(stderr, "Failed framebuffer check for created target buffer: %x\n",
+                glCheckFramebufferStatus(GL_FRAMEBUFFER));
+        // test if clear use egl_destroy when falied1111111111111111111111111111
+        glDeleteFramebuffers(1, &out_fb[i].framebuffer);
         glDeleteTextures(1, &out_fb[i].texture[j]);
         eglDestroyImage(display, out_fb[i].image[j]);
         return -1;
@@ -341,8 +336,13 @@ static int egl_create(struct Render_Init_Info *paras) {
   // get our config from the config class
   const EGLint *attribute_list;
   static const EGLint attribute_list_8bit[] = { EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, EGL_DONT_CARE, EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_DEPTH_SIZE, 24, EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER, EGL_NONE };
-  //static const EGLint attribute_list_10bit[] = { EGL_BUFFER_SIZE, 32, EGL_RED_SIZE, 10, EGL_GREEN_SIZE, 10, EGL_BLUE_SIZE, 10, EGL_ALPHA_SIZE, 2, EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_DEPTH_SIZE, 24, EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER, EGL_NONE };
-  attribute_list = attribute_list_8bit;
+  static const EGLint attribute_list_10bit[] = { EGL_RED_SIZE, 10, EGL_GREEN_SIZE, 10, EGL_BLUE_SIZE, 10, EGL_ALPHA_SIZE, EGL_DONT_CARE, EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_DEPTH_SIZE, 24, EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER, EGL_NONE };
+  if (useHdr) {
+    attribute_list = attribute_list_10bit;
+  }
+  else {
+    attribute_list = attribute_list_8bit;
+  }
 
   EGLint totalConfigsFound = 0;
   if (paras->format > 0) {
@@ -394,7 +394,7 @@ static int egl_init(struct Render_Init_Info *paras) {
   egl_base.screen_width = paras->screen_width;
   egl_base.screen_height = paras->screen_height;
   bool is_full_screen = paras->is_full_screen;
-  display_buffer = paras->use_display_buffer;
+  egl_base.display_buffer = paras->use_display_buffer;
 
   // glteximage2d needs the width that must to be a multiple of 64 because it has a 
   // minimum width of 64
@@ -413,7 +413,7 @@ static int egl_init(struct Render_Init_Info *paras) {
   }
 
   // finally we can create a new surface using this config and window
-  if (!display_buffer || (display_buffer && !ExtState.eglIsSupportExtSurfaceless)) {
+  if (!egl_base.display_buffer || (egl_base.display_buffer && !ExtState.eglIsSupportExtSurfaceless)) {
     surface = eglCreatePlatformWindowSurface(display, config, paras->window, NULL);
     if (surface == EGL_NO_SURFACE) {
       fprintf(stderr, "EGL: couldn't get a valid egl surface\n");
@@ -423,12 +423,12 @@ static int egl_init(struct Render_Init_Info *paras) {
 
   eglMakeCurrent(display, surface, surface, context);
 
-  if (display_buffer) {
+  if (egl_base.display_buffer) {
     if (glEGLImageTargetTexture2DOES == NULL) {
       fprintf(stderr, "EGL: extension glEGLImageTargetTexture2DOES not found\n");
       return -1;
     }
-    if (map_gbm_bo_to_framebuffer(out_fb) < 0) {
+    if (map_display_buffer_framebuffer(out_fb, paras->display_exported_buffer) < 0) {
       fprintf(stderr, "EGL: map_gbm_bo_to_framebuffer failed\n");
       return -1;
     }
@@ -467,7 +467,7 @@ static int egl_init(struct Render_Init_Info *paras) {
   glGenBuffers(1, &ebo);
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
 
-  if (!display_buffer) {
+  if (!egl_base.display_buffer) {
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
   }
   else {
@@ -512,7 +512,7 @@ static int egl_init(struct Render_Init_Info *paras) {
 
   // for software render ,because we want cut the not needed view range
   egl_base.cutwidth = egl_render.decoder_type != SOFTWARE ? 1 : ((float)frame_width / egl_base.width - ((isYUV444 || frame_width == egl_base.width) ? 0 : 0.0002));
-  if (display_buffer) {
+  if (egl_base.display_buffer) {
     glViewport(0, 0, egl_base.screen_width, egl_base.screen_height);
   }
   else if (egl_render.decoder_type == SOFTWARE && frame_width != egl_base.width) {
@@ -522,9 +522,6 @@ static int egl_init(struct Render_Init_Info *paras) {
     else
       glViewport(0, 0, egl_base.width, egl_base.height);
   }
-
-  egl_render.data = display;
-  egl_render.extension_support = ExtState.eglIsSupportExtDmaBufMod; 
 
   eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
   return 0;
@@ -578,7 +575,7 @@ static inline void egl_draw_vaapi(EGLImage image[4]) {
 static void egl_choose_config_from_frame(struct Render_Config *config) {
   eglMakeCurrent(display, surface, surface, context);
 
-  eglVSync = config->vsync;
+  egl_base.eglVSync = config->vsync;
   eglSwapInterval(display, 0);
 
   bool fullRange = false;
@@ -623,11 +620,11 @@ static int egl_draw(union Render_Image images) {
   if (eglsync != EGL_NO_SYNC)
     eglDestroySync(display, eglsync);
 
-  if (display_buffer) {
-    current = next;
-    next = (current + 1) % displayBufferNum;
-    back_out_fb = &out_fb[current];
-    glBindFramebuffer(GL_FRAMEBUFFER, back_out_fb->framebuffer[0]);
+  if (egl_base.display_buffer) {
+    egl_base.current = egl_base.next;
+    egl_base.next = (egl_base.current + 1) % egl_base.displayBufferNum;
+    egl_base.back_out_fb = &out_fb[egl_base.current];
+    glBindFramebuffer(GL_FRAMEBUFFER, egl_base.back_out_fb->framebuffer);
   }
 
   glClear(GL_COLOR_BUFFER_BIT);
@@ -644,24 +641,24 @@ static int egl_draw(union Render_Image images) {
 
   eglsync = eglCreateSync(display, EGL_SYNC_FENCE, NULL);
 
-  if (!display_buffer) {
+  if (!egl_base.display_buffer) {
     eglSwapBuffers(display, surface);
   }
   else {
     glFlush();
   }
 
-  if (eglVSync) {
+  if (egl_base.eglVSync) {
     if (eglsync != EGL_NO_SYNC) {
       eglClientWaitSync(display, eglsync, EGL_SYNC_FLUSH_COMMANDS_BIT, EGL_FOREVER);
     }
   }
 
-  return current;
+  return egl_base.current;
 }
 
 static void egl_destroy() {
-  if (!eglVSync) {
+  if (!egl_base.eglVSync) {
     if (eglsync != EGL_NO_SYNC) {
       eglClientWaitSync(display, eglsync, EGL_SYNC_FLUSH_COMMANDS_BIT, EGL_FOREVER);
     }
@@ -670,11 +667,11 @@ static void egl_destroy() {
     eglDestroySync(display, eglsync);
   if (egl_base.width != 0) {
     eglMakeCurrent(display, surface, surface, context);
-    if (display_buffer) {
+    if (egl_base.display_buffer) {
       glBindFramebuffer(GL_FRAMEBUFFER, 0);
-      for (int i = 0; i < displayBufferNum; i++) {
-        for (int j = 0; j < displayBufferPlaneNum; j++) {
-            glDeleteFramebuffers(1, &out_fb[i].framebuffer[j]);
+      for (int i = 0; i < egl_base.displayBufferNum; i++) {
+        glDeleteFramebuffers(1, &out_fb[i].framebuffer);
+        for (int j = 0; j < egl_base.displayBufferPlaneNum; j++) {
             glDeleteTextures(1, &out_fb[i].texture[j]);
             eglDestroyImage(display, out_fb[i].image[j]);
         }
@@ -699,23 +696,13 @@ static void egl_destroy() {
     eglDestroySurface(display, surface);
   if (context != EGL_NO_CONTEXT)
     eglDestroyContext(display, context);
-  // eglTerminate will let app Freeze.why...............
   if (display != EGL_NO_DISPLAY)
     eglTerminate(display);
   display = EGL_NO_DISPLAY;
   surface = EGL_NO_SURFACE;
   context = EGL_NO_CONTEXT;
   memset(out_fb, 0, sizeof(out_fb));
-  back_out_fb = NULL;
-  eglVSync = false;
-  display_buffer = false;
-  displayBufferPlaneNum = 0;
-  displayBufferNum = 0;
-  current = 0;
-  next = 0;
-  egl_render.data = NULL;
   egl_render.is_hardaccel_support = false;
-  egl_render.extension_support = false;
   return;
 }
 
@@ -726,10 +713,11 @@ struct RENDER_CALLBACK egl_render = {
   .render_type = EGL_RENDER,
   .decoder_type = SOFTWARE,
   .data = NULL,
-  .extension_support = false,
   .render_create = egl_create,
   .render_init = egl_init,
   .render_sync_config = egl_choose_config_from_frame,
   .render_draw = egl_draw,
   .render_destroy = egl_destroy,
+  .render_map_buffer = egl_map_buffer_to_eglimage,
+  .render_unmap_buffer = egl_unmap_eglimage,
 };

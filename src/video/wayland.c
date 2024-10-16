@@ -379,6 +379,7 @@ struct DISPLAY_CALLBACK display_callback_wayland = {
   .name = "wayland",
   .egl_platform = 0x31D8,
   .format = NOT_CARE,
+  .hdr_support = false,
   .display_get_display = wl_get_display,
   .display_get_window = wl_get_window,
   .display_close_display = wl_close_display,
@@ -388,6 +389,7 @@ struct DISPLAY_CALLBACK display_callback_wayland = {
   .display_get_resolution = wl_get_resolution,
   .display_change_cursor = wl_change_cursor,
   .display_vsync_loop = NULL,
+  .display_exported_buffer_info = NULL,
   .renders = EGL_RENDER,
 };
 #endif

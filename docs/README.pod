@@ -106,7 +106,7 @@ Will still use H.264 if server doesn't support HEVC or AV1.
 =item B<-yuv444>
 
 Try to use yuv444 format.Better video quality but not efficiency.
-Note:Now only support hevc(h265) with xvuy format use vaapi platform.
+Note: hevc(h265) with yuv444 format is the more common combination.
 Need sunshine host support(version >=24.0) and just support vaapi or
 x11 platform.
 If meet h264+YUV444P, 'x11' platform is recommended.
@@ -152,7 +152,9 @@ By default the gamecontrollerdb.txt provided by Moonlight Embedded is used.
 =item B<-platform> [I<PLATFORM>]
 
 Select platform for audio and video output and input.
-<PLATFORM> can be vaapi, sdl, x11, x11_vaapi, wayland_vaapi, rk or fake etc.
+<PLATFORM> can be vaapi, x11, x11_vaapi, wayland_vaapi, rk or fake etc.
+
+Platform 'x11/x11_vaapi/vaapi' will choose x11/wayland/gbm display automatically.
 
 =item B<-nounsupported>
 
@@ -209,34 +211,45 @@ Only available when X11 or SDL platform is used.
 
 Moonlight Embedded will load a configuration file from:
 
-  $XDG_CONFIG_HOME/moonlight/moonlight.conf (fallback to ~/.config/moonlight/moonlight.conf)
+  $XDG_CONFIG_HOME/moonlight/moonlight.conf
+  (fallback to ~/.config/moonlight/moonlight.conf)
 
-If no user specified configuration file is available the configuration will be loaded from:
+If no user specified configuration file is available the configuration will
+be loaded from:
 
   /usr/local/etc/moonlight/moonlight.conf
 
-A documented example configuration file can be found at /usr/local/etc/moonlight/moonlight.conf.
+A documented example configuration file can be found at
+/usr/local/etc/moonlight/moonlight.conf.
 
 =head1 GAMEPAD
 
- Xbox360 controller need xb360gp(4) or 'multimedia/webcamd and cuse(3)'
+ Xbox360 controller need xb360gp(4) or 'multimedia/webcamd and cuse(3)'.
  X-input or d-input gamepads need hgame(4) or webcamd.
- FreeBSD supports some controllers.Please see hgame(4) xb360gp(4) ps4dshock(4) and FreeBSD forums
+ FreeBSD supports some controllers.Please see hgame(4) xb360gp(4)
+ ps4dshock(4) and FreeBSD forums.
  Embedded platforms such as 'x11/x11_vaapi/vaapi' use evdev driver.
  May be only evdev(not sdl) could support xbox360 seriers on FreeBSD.
- Use '$ moonlight map -input /dev/input/eventN >> ~/.config/moonlight/gamecontrollerdb.txt' 
+ Use '$ moonlight map -input /dev/input/eventN >>
+      ~/.config/moonlight/gamecontrollerdb.txt' 
  to create mapping for embedded(not sdl) platform.
  Or use 'x11/antimicrox' to create mapping for sdl platform.
- $HOME/.config/moonlight/gamecontrollerdb.txt could be created and used by default.
+ $HOME/.config/moonlight/gamecontrollerdb.txt could be created and used
+ by default.
 
- Option '-sdlgp' can enable sdl gamepad driver instead of evdev for embedded platform.
+ Option '-sdlgp' can enable sdl gamepad driver instead of evdev for
+ embedded platform.
  Note: No rumble feature now.
 
 =head1 KEYBOARD SHORTCUTS
 
- Use Ctrl+Alt+Shift+Q or Play+Back+LeftShoulder+RightShoulder to quit the streaming session.
+ Use Ctrl+Alt+Shift+Q or Play+Back+LeftShoulder+RightShoulder to quit the
+ streaming session.
  Use Ctrl+Alt+Shift+Z to Grab/Ungrab keyboard.
  Use Ctrl+Alt+Shift+M to fakeGrab/normalGrab keyboard.
+ Use Ctrl+Alt+Shift+G to Enable/Disable vitual key on the top of touchpad
+ for the windows precision touchpad.
+
  It could not grab the keyboard Using sdl platform.
 
 =head1 EXAMPLE
@@ -247,20 +260,24 @@ Pair:
 Connect:
  The following cmd means to connect 192.168.0.1 with a resolution 2560x1600.
   # moonlight stream -app Desktop -width 2560 -height 1600 192.168.0.1
- The following cmd means to connect 192.168.0.1 with a resolution 1080p and the fps 120.And try to decoding with GPU.
+ The following cmd means to connect 192.168.0.1 with a resolution 1080p
+ and the fps 120.And try to decoding with GPU.
   # moonlight stream -app Steam -width 1920 -height 1080 -fps 120 \ 
                      -platform 'x11_vaapi' 192.168.0.1
-  Do not want grab keyboard and mouse:
+ Do not want grab keyboard and mouse:
   # moonlight stream -app Desktop -width 1920 -height 1080 -fps 120 \
                      -platform 'vaapi' -fakegrab 192.168.0.1
+ Try yuv444 video mode for better video quality:
+  # moonlight stream -app Desktop -width 1920 -height 1080 -fps 120 \
+                     -platform 'vaapi' -yuv444 -codec hevc 192.168.0.1
 
 =head1 COMMENTS
 
- Platform 'sdl' and 'x11' is soft decoding.
+ Platform 'sdl' and 'x11' is decoding with cpu.
  Only platform 'x11/vaapi/x11_vaapi/wayland' support yuv444 video mode.
  Only some gpu support yuv444 video mode. And need sunshine host support.
- Platform '*vaapi' is decoding by gpu.
- If you want to use GPU decoding for intel gpu,you must do:
+ Platform '*vaapi' is decoding with gpu.
+ If you want to decoding with intel gpu,you must do:
    1.Use platform 'x11_vaapi' or 'wayland_vaapi' or 'vaapi'
    2.Install package:libva-intel-driver/libva-intel-media-driver.
 

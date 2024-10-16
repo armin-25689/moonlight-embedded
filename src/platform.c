@@ -73,18 +73,26 @@ enum platform platform_check(char* name) {
       return RK;
   }
   #endif
-/*
-  if (std || strcmp(name, "drm") == 0) {
-    if (access("/dev/dri/card0", F_OK) != -1)
-      return DRM;
+
+  #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM) || defined(HAVE_DRM)
+  const char *displayName = NULL;
+  bool x11 = strcmp(name, "x11") == 0 || strcmp(name, "wayland") == 0 || strcmp(name, "gbm") == 0 || strcmp(name, "drm") == 0 || strcmp(name, "software") == 0 || strcmp(name, "X11") == 0;
+  bool vaapi = strcmp(name, "x11_vaapi") == 0 || strcmp(name, "vaapi") == 0 || strcmp(name, "wayland_vaapi") == 0 || strcmp(name, "x11_vdpau") == 0 || strcmp(name, "gbm_vaapi") == 0;
+  if (name != NULL) {
+    switch (*name) {
+    case 'X':
+      displayName = "x11";
+      break;
+    case 'd':
+      displayName = "drm";
+      break;
+    default:
+      displayName = NULL;
+      break;
+    }
   }
-*/
-  #ifdef HAVE_X11
-  bool x11 = strcmp(name, "x11") == 0 || strcmp(name, "wayland") == 0;
-  bool vdpau = strcmp(name, "x11_vdpau") == 0;
-  bool vaapi = strcmp(name, "x11_vaapi") == 0 || strcmp(name, "vaapi") == 0 || strcmp(name, "wayland_vaapi") == 0;
-  if (std || x11 || vdpau || vaapi) {
-    int init = x11_init(std || vdpau, std || vaapi);
+  if (std || x11 || vaapi) {
+    int init = x11_init(displayName, std || vaapi);
     #ifdef HAVE_VAAPI
     if (init == INIT_VAAPI)
       return X11_VAAPI;
@@ -142,7 +150,7 @@ void platform_stop(enum platform system) {
 
 DECODER_RENDERER_CALLBACKS* platform_get_video(enum platform system) {
   switch (system) {
-  #ifdef HAVE_X11
+  #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM) || defined(HAVE_DRM)
   case X11:
     return &decoder_callbacks_x11;
   #ifdef HAVE_VAAPI
@@ -178,10 +186,6 @@ DECODER_RENDERER_CALLBACKS* platform_get_video(enum platform system) {
   case RK:
     return (PDECODER_RENDERER_CALLBACKS) dlsym(RTLD_DEFAULT, "decoder_callbacks_rk");
   #endif
-/*
-  case DRM:
-    return &decoder_callbacks_drm;
-*/
   }
   return NULL;
 }
@@ -230,6 +234,11 @@ bool platform_prefers_codec(enum platform system, enum codecs codec) {
     }
     return false;
   case CODEC_AV1:
+    switch (system) {
+    case X11:
+    case X11_VAAPI:
+      return true;
+    }
     return false;
   }
   return false;
@@ -248,7 +257,7 @@ char* platform_name(enum platform system) {
   case RK:
     return "Rockchip VPU";
   case X11:
-    return "X Window System (software decoding)";
+    return "X/Waylnd/GBM/DRM display System (software decoding)";
   case X11_VAAPI:
     return "X Window System (VAAPI)";
   case X11_VDPAU:
@@ -257,8 +266,6 @@ char* platform_name(enum platform system) {
     return "SDL2 (software decoding)";
   case FAKE:
     return "Fake (no a/v output)";
-  case DRM:
-    return "Drm with ffmpeg";
   default:
     return "Unknown";
   }

@@ -68,22 +68,28 @@ struct Drm_Info {
   uint32_t conn_hdr_metadata_prop_id;
   uint32_t conn_colorspace_prop_id;
   uint32_t conn_max_bpc_prop_id;
+  uint32_t have_atomic;
+  uint32_t have_plane;
 };
 
 struct Soft_Mapping_Info {
+  uint32_t fb_id;
   uint32_t handle;
   uint32_t pitch;
   uint64_t size;
-  uint8_t* mapping;
+  uint8_t* buffer;
   int primeFd;
 };
 
 // return NULL is  failed
 struct Drm_Info *drm_init (const char *device, uint32_t drmformat, bool usehdr);
 void drm_close();
+void drm_restore_display();
 bool drm_is_support_yuv444 (int format);
 // true is current info,false is old info.
-struct Drm_Info *get_drm_info(bool current);
+struct Drm_Info *get_drm_info (bool current);
 
 void convert_display (int *src_w, int *src_h, int *dst_w, int *dst_h, int *dst_x, int *dst_y);
-int get_drm_dbum_aligned(int fd, int pixfmt, int width, int height);
+int get_drm_dbum_aligned (int fd, int pixfmt, int width, int height);
+int drm_flip_buffer (uint32_t fd, uint32_t crtc_id, uint32_t fb_id);
+int drm_get_plane_info (struct Drm_Info *drm_info, uint32_t format);

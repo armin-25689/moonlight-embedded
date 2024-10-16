@@ -45,11 +45,12 @@ static int dec_frames_cnt;
 static int current_frame, next_frame;
 
 int supportedVideoFormat = 0;
+bool supportedHDR = false;
+bool wantHdr = false;
 bool wantYuv444 = false;
 bool isYUV444 = false;
 bool useHdr = false;
 enum decoders ffmpeg_decoder;
-enum renders {DEFAULT = 0, DRM = 0x200};
 
 #define BYTES_PER_PIXEL 4
 
@@ -68,7 +69,7 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
     return -1;
   }
 
-  enum renders render = perf_lvl & DRM_RENDER ? DRM : DEFAULT;
+  int render = perf_lvl & RENDER_MASK;
   ffmpeg_decoder = perf_lvl & VAAPI_ACCELERATION ? VAAPI : SOFTWARE;
   if (wantYuv444 && !(videoFormat & VIDEO_FORMAT_MASK_YUV444)) {
     if (supportedVideoFormat) {
@@ -78,6 +79,10 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
       printf("Could not start yuv444 stream because of client support, fallback to yuv420 format\n");
     }
   }
+  if (wantHdr && !(videoFormat & VIDEO_FORMAT_MASK_10BIT)) {
+    printf("No HDR support.\n");
+  }
+
   if (videoFormat & VIDEO_FORMAT_MASK_YUV444) {
     isYUV444 = true;
   }
@@ -155,7 +160,7 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
     }
     #endif
     // need conditions111111111111111111
-    if (render == DRM) {
+    if (render == DRM_RENDER) {
       ffmpeg_bind_drm_ctx(decoder_ctx, &dict);
     }
 
@@ -191,7 +196,7 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
 
   int widthMulti = -1;
   if (ffmpeg_decoder == SOFTWARE) {
-    if (render == DRM) {
+    if (render == DRM_RENDER) {
 // condition111111111111111111111111
       widthMulti = get_drm_dbum_aligned(-1, decoder_ctx->pix_fmt, width, height);
     }
@@ -243,13 +248,10 @@ void ffmpeg_destroy(void) {
 }
 
 AVFrame* ffmpeg_get_frame(bool native_frame) {
-  av_frame_unref(dec_frames[next_frame]);
-
   int err = avcodec_receive_frame(decoder_ctx, dec_frames[next_frame]);
 
-  av_packet_unref(pkt);
-
   if (err == 0) {
+    av_packet_unref(pkt);
     current_frame = next_frame;
     next_frame = (current_frame+1) % dec_frames_cnt;
 
@@ -317,7 +319,8 @@ void ffmpeg_get_plane_info (const AVFrame *frame, enum AVPixelFormat *pix_fmt, i
     }
   }
   else {
-    *pix_fmt = decoder_ctx->pix_fmt;
+    *pix_fmt = frame->format;
+    //*pix_fmt = decoder_ctx->pix_fmt;
   }
   printf("Try to use pixel format: %s \n", av_get_pix_fmt_name(*pix_fmt));
 

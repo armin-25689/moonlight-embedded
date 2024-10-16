@@ -54,7 +54,6 @@ static void* x_get_display(const char* *device) {
 /*
   x_multi_threads();
 */
-
   if (display == NULL) {
     display = XOpenDisplay(*device);
   }
@@ -154,6 +153,7 @@ struct DISPLAY_CALLBACK display_callback_x11 = {
   .name = "x11",
   .egl_platform = 0x31D5,
   .format = NOT_CARE,
+  .hdr_support = false,
   .display_get_display = x_get_display,
   .display_get_window = x_get_window,
   .display_close_display = x_close_display,
@@ -163,6 +163,7 @@ struct DISPLAY_CALLBACK display_callback_x11 = {
   .display_get_resolution = x_get_resolution,
   .display_change_cursor = x_change_cursor,
   .display_vsync_loop = NULL,
+  .display_exported_buffer_info = NULL,
   .renders = (EGL_RENDER | X11_RENDER),
 };
 
@@ -173,7 +174,6 @@ struct RENDER_CALLBACK x11_render = {
   .render_type = X11_RENDER,
   .decoder_type = VAAPI,
   .data = NULL,
-  .extension_support = false,
   .render_create = x_render_create,
   .render_init = x_render_init,
   .render_sync_config = NULL,

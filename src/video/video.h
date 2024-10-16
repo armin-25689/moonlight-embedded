@@ -30,13 +30,14 @@
 #define DISPLAY_ROTATE_270 24
 
 #define INIT_EGL 1
-#define INIT_VDPAU 2
-#define INIT_VAAPI 3
+#define INIT_VAAPI 2
+#define INIT_VDPAU 3
+#define INIT_DRM 4
 
 #define INITIAL_DECODER_BUFFER_SIZE (256*1024)
 
 #ifdef HAVE_X11
-int x11_init(bool vdpau, bool vaapi);
+int x11_init(const char *displayName, bool vaapi);
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11;
 #ifdef HAVE_VAAPI
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vaapi;
@@ -48,7 +49,8 @@ extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vdpau;
 #ifdef HAVE_SDL
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_sdl;
 #endif
-//extern DECODER_RENDERER_CALLBACKS decoder_callbacks_drm;
 
 extern int supportedVideoFormat;
+extern bool supportedHDR;
 extern bool wantYuv444;
+extern bool wantHdr;

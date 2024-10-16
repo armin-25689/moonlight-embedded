@@ -19,20 +19,26 @@
 
 #pragma once
 enum PixelFormatOrder { VUYX_ORDER = 0, XVYU_ORDER, YUVX_ORDER };
-enum decoders {SOFTWARE, VDPAU, VAAPI};
+enum decoders {SOFTWARE = 0, VDPAU, VAAPI};
 #define EGL_RENDER 0x0100
 #define X11_RENDER 0x0200
 #define DRM_RENDER 0x0400
 #define VULKAN_RENDER 0x0800
+#define RENDER_MASK (EGL_RENDER | X11_RENDER | DRM_RENDER | VULKAN_RENDER)
+// argument for render_map_buffer
+#define COMPOSE_PLANE 1
+#define SEPERATE_PLANE 0
+
 #define MAX_FB_NUM 3
 
 struct Source_Buffer_Info {
-  uint32_t fd;
-  uint32_t width;
-  uint32_t height;
-  uint32_t format;
-  uint32_t stride;
-  uint32_t offset;
+  uint32_t fd[4];
+  uint32_t width[4];
+  uint32_t height[4];
+  uint32_t format[4];
+  uint32_t stride[4];
+  uint32_t offset[4];
+  uint64_t modifiers[4];
   void *data;
 };
 

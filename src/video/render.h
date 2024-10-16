@@ -10,6 +10,7 @@ struct Render_Config {
   bool full_color_range;
   bool use_hdr;
   bool vsync;
+  int linesize[4];
 };
 struct Render_Init_Info {
   int frame_width;
@@ -23,6 +24,7 @@ struct Render_Init_Info {
   int egl_platform;
   void *display;
   void *window;
+  void(*display_exported_buffer)(struct Source_Buffer_Info *buffer, int *buffersNum, int *planesNum);
 };
 union Render_Image {
   struct {
@@ -37,7 +39,6 @@ struct RENDER_CALLBACK {
   int render_type;
   int decoder_type;
   bool is_hardaccel_support;
-  bool extension_support;
   void *data;
   union Render_Image images[MAX_FB_NUM];
   int (*render_create) (struct Render_Init_Info *paras);
@@ -45,6 +46,8 @@ struct RENDER_CALLBACK {
   void (*render_sync_config) (struct Render_Config *config);
   int (*render_draw) (union Render_Image image);
   void (*render_destroy) ();
+  int (*render_map_buffer) (struct Source_Buffer_Info *buffer, int planes, int composeOrSeperate, void* image[4]);
+  void (*render_unmap_buffer) (void* image[4], int planes);
 };
 
 extern struct RENDER_CALLBACK egl_render;

@@ -24,7 +24,6 @@ static enum AVPixelFormat sw_pix_fmt = AV_PIX_FMT_NV12;
 
 static AVBufferRef* device_ref = NULL;
 
-static bool useHDR = false;
 static bool drmIsSupportYuv444 = false;
 
 void convert_display (int *src_w, int *src_h, int *dst_w, int *dst_h, int *dst_x, int *dst_y) {
@@ -193,16 +192,25 @@ static int drm_choose_crtc (int fd) {
   return 0;
 }
 
-static int drm_choose_plane (int fd, uint32_t format) {
-  drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
-  drmModePlaneRes* res = drmModeGetPlaneResources(fd);
+static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
+  if (!drm_info->have_plane) {
+    drm_info->have_plane = drmSetClientCap(drm_info->fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) == 0 ? 1 : 0;
+  }
+  if (!drm_info->have_plane) {
+    fprintf(stderr, "DRM:Client not support plane.\n");
+    return -1;
+  }
+
+  memset(drm_info->plane_formats, 0, sizeof(drm_info->plane_formats));
+
+  drmModePlaneRes* res = drmModeGetPlaneResources(drm_info->fd);
   if (!res) {
     fprintf(stderr, "Could not get res for plane\n");
     return -1;
   }
 
   for (int  i = 0; i < res->count_planes; i++) {
-    drmModePlane* plane = drmModeGetPlane(fd, res->planes[i]);
+    drmModePlane* plane = drmModeGetPlane(drm_info->fd, res->planes[i]);
     if (!plane)
       continue;
 
@@ -212,14 +220,14 @@ static int drm_choose_plane (int fd, uint32_t format) {
       switch (plane->formats[j]) {
       case DRM_FORMAT_Y410:
       case DRM_FORMAT_YUV444:
+      case DRM_FORMAT_AYUV:
 	drmIsSupportYuv444 = true;
-        current_drm_info.plane_formats[formats_index++] = plane->formats[j];
+        drm_info->plane_formats[formats_index++] = plane->formats[j];
         break;
       case DRM_FORMAT_YUV420:
       case DRM_FORMAT_P010:
       case DRM_FORMAT_NV12:
-      case DRM_FORMAT_AYUV:
-	current_drm_info.plane_formats[formats_index++] = plane->formats[j];
+	drm_info->plane_formats[formats_index++] = plane->formats[j];
 	break;
       }
       if (formats_index >= NEEDED_DRM_FORMAT_NUM)
@@ -230,36 +238,36 @@ static int drm_choose_plane (int fd, uint32_t format) {
 
     // at least need support yuv444 and yuv420
     // but normaly just support nv12 and p010
-    if (formats_index < 1 || !found_format) {
+    if (!found_format) {
       formats_index = 0;
-      memset(current_drm_info.plane_formats, 0, sizeof(current_drm_info.plane_formats));
+      memset(drm_info->plane_formats, 0, sizeof(drm_info->plane_formats));
       drmIsSupportYuv444 = false;
       drmModeFreePlane(plane);
       continue;
     }
 
-    if ((plane->possible_crtcs & (1 << current_drm_info.crtc_index))) {
-      drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(fd,res->planes[i], DRM_MODE_OBJECT_PLANE);
+    if ((plane->possible_crtcs & (1 << drm_info->crtc_index))) {
+      drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(drm_info->fd,res->planes[i], DRM_MODE_OBJECT_PLANE);
       if (!props) {
         formats_index = 0;
         drmIsSupportYuv444 = false;
-        memset(current_drm_info.plane_formats, 0, sizeof(current_drm_info.plane_formats));
+        memset(drm_info->plane_formats, 0, sizeof(drm_info->plane_formats));
 	drmModeFreePlane(plane);
         continue;
       }
 
       for (int j = 0; j < props->count_props; j++) {
-        drmModePropertyPtr prop = drmModeGetProperty(fd, props->props[j]);
+        drmModePropertyPtr prop = drmModeGetProperty(drm_info->fd, props->props[j]);
         if (!prop)
           continue;
         if (strcmp(prop->name, "type") == 0 && (props->prop_values[j] == DRM_PLANE_TYPE_PRIMARY || props->prop_values[j] == DRM_PLANE_TYPE_OVERLAY)) {
-          current_drm_info.plane_id = plane->plane_id;
+          drm_info->plane_id = plane->plane_id;
         }
         else if (strcmp(prop->name, "COLOR_ENCODING") == 0) {
-          current_drm_info.plane_color_encoding_prop_id  = prop->prop_id;
+          drm_info->plane_color_encoding_prop_id  = prop->prop_id;
         }
         else if (strcmp(prop->name, "COLOR_RANGE") == 0) {
-          current_drm_info.plane_color_range_prop_id  = prop->prop_id;
+          drm_info->plane_color_range_prop_id  = prop->prop_id;
         }
         drmModeFreeProperty(prop);
       }
@@ -269,12 +277,16 @@ static int drm_choose_plane (int fd, uint32_t format) {
   }
   drmModeFreePlaneResources(res);
 
-  if (current_drm_info.plane_id == 0) {
+  if (drm_info->plane_id == 0) {
     fprintf(stderr, "Could not get plane info\n");
     return -1;
   }
 
   return 0;
+}
+
+static int drm_choose_plane (int fd, uint32_t format) {
+  return drm_get_plane (&current_drm_info, format);
 }
 
 static int drm_get_connector_hdr_props (int fd) {
@@ -295,7 +307,7 @@ static int drm_get_connector_hdr_props (int fd) {
     else if (strcmp(prop->name, "Colorspace") == 0) {
       current_drm_info.conn_colorspace_prop_id = prop->prop_id;
     }
-    else if (strcmp(prop->name, "max bpc") == 0 && useHDR) {
+    else if (strcmp(prop->name, "max bpc") == 0) {
       current_drm_info.conn_max_bpc_prop_id = prop->prop_id;
     }
     drmModeFreeProperty(prop);
@@ -396,33 +408,56 @@ int ffmpeg_init_drm_hw_ctx(const char *device, const enum AVPixelFormat pixel_fo
 struct Drm_Info * drm_init (const char *device, uint32_t drmformat, bool usehdr) {
   if (device != NULL)
     drm_device = device;
+  if (access("/dev/dri/card0", F_OK) == -1) {
+    fprintf(stderr, "No /dev/dri/card0 device.\n");
+    return NULL;
+  }
   current_drm_info.fd = -1;
   current_drm_info.fd = open(drm_device, O_RDWR | O_CLOEXEC);
   if (current_drm_info.fd < 0) {
     perror("Could not open /dev/dri/card0");
     return NULL;
   }
-  if (drm_choose_crtc(current_drm_info.fd) < 0 || drm_choose_plane(current_drm_info.fd, drmformat) < 0) {
-    return NULL;
+
+  if (drm_choose_crtc(current_drm_info.fd) < 0) {
+    goto exit;
   }
-  if (drm_get_connector_hdr_props(current_drm_info.fd) == 0 && useHDR) {
-    if (drm_set_connector_hdr_mode(current_drm_info.fd, true) < 0) {
-      useHDR = false;
+
+  if (drmformat > 0 && drm_choose_plane(current_drm_info.fd, drmformat) < 0) {
+    goto exit;
+  }
+
+  if (usehdr) {
+    if (drm_get_connector_hdr_props(current_drm_info.fd) < 0  || drm_set_connector_hdr_mode(current_drm_info.fd, true) < 0) {
+      goto exit;
     }
   }
 
   return &current_drm_info;
+
+exit:
+  close(current_drm_info.fd);
+  current_drm_info.fd = -1;
+  return NULL;
+}
+
+int drm_get_plane_info (struct Drm_Info *drm_info, uint32_t format) {
+  return drm_get_plane(drm_info, format);
 }
 
 void drm_close() {
+  close(current_drm_info.fd);
+  current_drm_info.fd = -1;
+}
+
+void drm_restore_display() {
   // todo....
+  // reset HDR state
   // restore crtc and connector to original status
   // atomic change
   if (current_drm_info.connector_id != 0) {
     drmModeSetCrtc(current_drm_info.fd, current_drm_info.crtc_id, old_drm_info.crtc_fb_id, 0, 0, &current_drm_info.connector_id, 1, &old_drm_info.crtc_mode);
   }
-  close(current_drm_info.fd);
-  current_drm_info.fd = -1;
 }
 
 bool drm_is_support_yuv444(int format) {
@@ -520,5 +555,39 @@ void printf_props () {
     }
   drmModeFreeObjectProperties(propss);
   continue;
+}
+*/
+static void page_flip_handler(int fd, unsigned int frame, unsigned int sec,
+                              unsigned int usec, void *data) {
+  int *done = data;
+  *done = 1;
+}
+
+static drmEventContext evctx = {
+  .version = DRM_EVENT_CONTEXT_VERSION,
+  .page_flip_handler = page_flip_handler,
+};
+
+int drm_flip_buffer(uint32_t fd, uint32_t crtc_id, uint32_t fb_id) {
+  int done = 0;
+  int res = drmModePageFlip(fd, crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, &done);
+  if (res < 0) {
+    fprintf(stderr, "drmModePageFlip() failed: %d", res);
+    return -1;
+  }
+
+  while (!done) {
+    drmHandleEvent(fd, &evctx);
+  }
+  
+  return 0;
+}
+/*
+static int gbm_wait_vsync(uint32_t fd, uint32_t crtc_index) {
+  union drm_wait_vblank vb = {0};
+  vb.request.type= DRM_VBLANK_RELATIVE | ((crtc_index << DRM_VBLANK_HIGH_CRTC_SHIFT) & DRM_VBLANK_HIGH_CRTC_MASK);
+  vb.request.sequence = 1;
+  vb.request.signal = 0;
+  return ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &vb);
 }
 */

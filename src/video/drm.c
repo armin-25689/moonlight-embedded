@@ -4,7 +4,6 @@
 #include <libdrm/drm_fourcc.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
-#include <libyuv/convert_from.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <math.h>
@@ -15,28 +14,18 @@
 
 #include "drm_base.h"
 #include "drm_base_ffmpeg.h"
-#include "ffmpeg.h"
 #include "video.h"
-#include "../loop.h"
-#include "../util.h"
+#include "video_internal.h"
 
-#define SLICES_PER_FRAME 4
-#define FRAME_BUFFER_COUNT 2
-
-static struct Drm_Info current_drm_info = {0},old_drm_info = {0};
-static struct Soft_Mapping_Info sw_mapping[FRAME_BUFFER_COUNT] = {0};
+static struct Drm_Info current_drm_info = {0};
+static struct Soft_Mapping_Info sw_mapping[MAX_FB_NUM] = {0};
 static const char *drm_device = "/dev/dri/card0";
-static void* ffmpeg_buffer = NULL;
-static size_t ffmpeg_buffer_size = 0;
-static int pipefd[2];
-static int display_width = 0, display_height = 0, x_offset = 0, y_offset = 0;
-static int frame_width, frame_height;
-static int current_mapping = 0, next_mapping = 0;
+static int display_width, display_height, screen_width, screen_height, frame_width, frame_height;
+static int current = 0, next = 0;
 static uint32_t fb_id = 0;
+static uint32_t plane_format = 0;
 static uint32_t hdr_metadata_blob_id;
-
-static bool useHDR = false;
-static bool first_draw = true;
+static int pix_fmt = -1;
 
 static int set_drm_hdr_metadata (int fd, bool enable) {
   if (current_drm_info.conn_hdr_metadata_prop_id != 0 && enable) {
@@ -85,16 +74,17 @@ static int set_drm_hdr_metadata (int fd, bool enable) {
 }
 
 static bool map_software_frame(AVFrame *frame, AVDRMFrameDescriptor *mappedFrame) {
-  // now only support nv12
-  //uint32_t drmFormat = isYUV444 ? DRM_FORMAT_YUV444 : DRM_FORMAT_YUV420;
-
   //first convert to nv12
   uint32_t drmFormat;
-  drmFormat = DRM_FORMAT_NV12;
-  //bool threePlane = false;
   int bpc = 8;
-/*
-  switch (frame->format) {
+  switch (pix_fmt) {
+  case AV_PIX_FMT_XV30:
+    drmFormat = DRM_FORMAT_XVYU2101010;
+    bpc = 16;
+    break;
+  case AV_PIX_FMT_VUYX:
+    drmFormat = DRM_FORMAT_XVUY8888;
+    break;
   case AV_PIX_FMT_NV12:
     drmFormat = DRM_FORMAT_NV12;
     break;
@@ -108,49 +98,79 @@ static bool map_software_frame(AVFrame *frame, AVDRMFrameDescriptor *mappedFrame
   case AV_PIX_FMT_YUV420P:
   case AV_PIX_FMT_YUVJ420P:
     drmFormat = DRM_FORMAT_YUV420;
-    threePlane = true;
     break;
   case AV_PIX_FMT_YUV444P:
   case AV_PIX_FMT_YUVJ444P:
-    threePlane = true;
     drmFormat = DRM_FORMAT_YUV444;
     break;
+  case AV_PIX_FMT_YUV444P10:
+  case AV_PIX_FMT_YUVJ444P10:
+    drmFormat = DRM_FORMAT_Q410;
+    bpc = 16;
+    break;
   default:
-    drmFormat = DRM_FORMAT_NV12;
+    fprintf(stderr, "DRM: Unkown av pix format(%d) here.\n", pix_fmt);
+    return -1;
     break;
   }
-*/
-  // 2 is nvxx, 3 is yuv444
-  current_mapping = next_mapping;
-  next_mapping = (current_mapping + 1) % FRAME_BUFFER_COUNT;
+  bool found = false;
+  for (int i = 0; i < NEEDED_DRM_FORMAT_NUM; i++) {
+    if (drmFormat == current_drm_info.plane_formats[i]) {
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    struct Drm_Info drm_info = {0};
+    drm_info.fd = current_drm_info.fd;
+    drm_info.fd = current_drm_info.crtc_index;
+    if (drm_get_plane_info(&drm_info, drmFormat) < 0) {
+      if (drm_get_plane_info(&current_drm_info, DRM_FORMAT_NV12) < 0) {
+        fprintf(stderr, "No plane here.\n");
+        return -1;
+      }
+      drmFormat = DRM_FORMAT_NV12;
+    }
+    else {
+      convert_format_op = NULL;
+      current_drm_info.plane_id = drm_info.plane_id;
+      current_drm_info.plane_color_encoding_prop_id  = drm_info.plane_color_encoding_prop_id;
+      current_drm_info.plane_color_range_prop_id  = drm_info.plane_color_range_prop_id;
+      memcpy(current_drm_info.plane_formats, drm_info.plane_formats, sizeof(drm_info.plane_formats));
+    }
+  }
 
-  if (sw_mapping[current_mapping].handle == 0) {
+  // 2 is nvxx, 3 is yuv444
+  current = next;
+  next = (current + 1) % MAX_FB_NUM;
+
+  if (sw_mapping[current].handle == 0) {
     struct drm_mode_create_dumb createBuf = {};
-    createBuf.width = frame->width;
-    createBuf.height = frame->height * 2;
+    createBuf.width = frame_width;
+    createBuf.height = frame_height * 2;
     createBuf.bpp = bpc;
     if (drmIoctl(current_drm_info.fd, DRM_IOCTL_MODE_CREATE_DUMB, &createBuf) < 0) {
       fprintf(stderr, "Could not create drm dumb\n");
       return false;
     }
-    sw_mapping[current_mapping].handle = createBuf.handle;
-    sw_mapping[current_mapping].pitch = createBuf.pitch;
-    sw_mapping[current_mapping].size = createBuf.size;
+    sw_mapping[current].handle = createBuf.handle;
+    sw_mapping[current].pitch = createBuf.pitch;
+    sw_mapping[current].size = createBuf.size;
 
     struct drm_mode_map_dumb mapBuf = {};
-    mapBuf.handle = sw_mapping[current_mapping].handle;
+    mapBuf.handle = sw_mapping[current].handle;
     if (drmIoctl(current_drm_info.fd, DRM_IOCTL_MODE_MAP_DUMB, &mapBuf) < 0) {
       fprintf(stderr, "Could not map dumb\n");
       return false;
     }
 
-    sw_mapping[current_mapping].mapping = (uint8_t*)mmap(NULL, sw_mapping[current_mapping].size, PROT_WRITE, MAP_SHARED, current_drm_info.fd, mapBuf.offset);
-    if (sw_mapping[current_mapping].mapping == MAP_FAILED) {
+    sw_mapping[current].buffer = (uint8_t*)mmap(NULL, sw_mapping[current].size, PROT_WRITE, MAP_SHARED, current_drm_info.fd, mapBuf.offset);
+    if (sw_mapping[current].buffer == MAP_FAILED) {
       fprintf(stderr, "Could not map dumb to userspace\n");
       return false;
     }
 
-    if (drmPrimeHandleToFD(current_drm_info.fd, sw_mapping[current_mapping].handle, O_CLOEXEC, &sw_mapping[current_mapping].primeFd) < 0) {
+    if (drmPrimeHandleToFD(current_drm_info.fd, sw_mapping[current].handle, O_CLOEXEC, &sw_mapping[current].primeFd) < 0) {
       fprintf(stderr, "Software drm mapping: drmPrimeHandleToFD() faild\n");
       return false;
     }
@@ -159,9 +179,9 @@ static bool map_software_frame(AVFrame *frame, AVDRMFrameDescriptor *mappedFrame
   // We use a single dumb buffer for semi/fully planar formats because some DRM
   // drivers (i915, at least) don't support multi-buffer FBs.
   mappedFrame->nb_objects = 1;
-  mappedFrame->objects[0].fd = sw_mapping[current_mapping].primeFd;
+  mappedFrame->objects[0].fd = sw_mapping[current].primeFd;
   mappedFrame->objects[0].format_modifier = DRM_FORMAT_MOD_LINEAR;
-  mappedFrame->objects[0].size = sw_mapping[current_mapping].size;
+  mappedFrame->objects[0].size = sw_mapping[current].size;
 
   mappedFrame->nb_layers = 1;
 
@@ -176,36 +196,36 @@ static bool map_software_frame(AVFrame *frame, AVDRMFrameDescriptor *mappedFrame
   for (int i = 0; i < 2; i++) {
     AVDRMPlaneDescriptor *plane = &layer->planes[layer->nb_planes];
     nb_planes[i] = layer->nb_planes;
-    plane->pitch = sw_mapping[current_mapping].pitch;
+    plane->pitch = sw_mapping[current].pitch;
     plane->object_index = 0;
     plane->offset = i == 0 ? 0 : (layer->planes[layer->nb_planes - 1].offset + lastPlaneSize);
     offset[i] = plane->offset;
     pitch[i] = plane->pitch;
-    plane_height[i] = (i == 0 || isYUV444) ? frame->height : (frame->height / 2);
+    plane_height[i] = (i == 0 || isYUV444) ? frame_height : (frame_height / 2);
     layer->nb_planes++;
     lastPlaneSize = plane->pitch * plane_height[i];
   }
 
   
-  switch (frame->format) {
+  switch (pix_fmt) {
   case AV_PIX_FMT_YUVJ420P:
   case AV_PIX_FMT_YUV420P:
     I420ToNV12(frame->data[0], frame->linesize[0],
                frame->data[1], frame->linesize[1],
                frame->data[2], frame->linesize[2],
-               sw_mapping[current_mapping].mapping, sw_mapping[current_mapping].pitch,
-               sw_mapping[current_mapping].mapping + layer->planes[nb_planes[0]].offset + sw_mapping[current_mapping].pitch * frame->height, sw_mapping[current_mapping].pitch,
+               sw_mapping[current].buffer, sw_mapping[current].pitch,
+               sw_mapping[current].buffer + layer->planes[nb_planes[0]].offset + sw_mapping[current].pitch * frame->height, sw_mapping[current].pitch,
                frame->width, frame->height);
     break;
   case AV_PIX_FMT_NV12:
     for (int i = 0; i < 2; i++) {
       if (frame->data[i] != NULL) {
         if (frame->linesize[i] == pitch[i]) {
-          memcpy(sw_mapping[current_mapping].mapping + offset[i], frame->data[i], pitch[i] * plane_height[i]);
+          memcpy(sw_mapping[current].buffer + offset[i], frame->data[i], pitch[i] * plane_height[i]);
         }
         else {
           for (int j = 0; j < plane_height[i]; j++) {
-            memcpy(sw_mapping[current_mapping].mapping + (j * pitch[i]) + offset[i], frame->data[i] + (j * frame->linesize[i]), (frame->linesize[i] < (int)pitch[i] ? frame->linesize[i] : (int)pitch[i]));
+            memcpy(sw_mapping[current].buffer + (j * pitch[i]) + offset[i], frame->data[i] + (j * frame->linesize[i]), (frame->linesize[i] < (int)pitch[i] ? frame->linesize[i] : (int)pitch[i]));
           }
         }
       }
@@ -219,7 +239,7 @@ static bool map_software_frame(AVFrame *frame, AVDRMFrameDescriptor *mappedFrame
   return true;
 }
 
-static int add_fb_for_frame(AVFrame *frame, uint32_t *new_fb_id) {
+static int add_fb_for_frame(uint8_t *frame_data[3], uint32_t *new_fb_id) {
   AVDRMFrameDescriptor* drmFrame;
   AVDRMFrameDescriptor mappedFrame = {0};
   uint32_t handles[4] = {};
@@ -228,7 +248,7 @@ static int add_fb_for_frame(AVFrame *frame, uint32_t *new_fb_id) {
   uint64_t modifiers[4] = {};
   uint32_t flags = 0;
 
-  if (frame->format != AV_PIX_FMT_DRM_PRIME) {
+  if (pix_fmt != AV_PIX_FMT_DRM_PRIME) {
     if (!map_software_frame(frame, &mappedFrame)) {
       fprintf(stderr, "Could not map software frame to drm frame\n");
       return -1;
@@ -238,7 +258,7 @@ static int add_fb_for_frame(AVFrame *frame, uint32_t *new_fb_id) {
     }
   }
   else {
-    drmFrame = (AVDRMFrameDescriptor*)frame->data[0];
+    drmFrame = (AVDRMFrameDescriptor*)frame_data[0];
   }
 
   if (drmFrame->nb_layers != 1) {
@@ -258,14 +278,14 @@ static int add_fb_for_frame(AVFrame *frame, uint32_t *new_fb_id) {
     modifiers[i] = object->format_modifier;
 
     // Pass along the modifiers to DRM if there are some in the descriptor
-    if (modifiers[i] != DRM_FORMAT_MOD_INVALID && frame->format == AV_PIX_FMT_DRM_PRIME) {
+    if (modifiers[i] != DRM_FORMAT_MOD_INVALID && pix_fmt == AV_PIX_FMT_DRM_PRIME) {
       flags |= DRM_MODE_FB_MODIFIERS;
     }
   }
 
   // Create a frame buffer object from the PRIME buffer
   // NB: It is an error to pass modifiers without DRM_MODE_FB_MODIFIERS set.
-  if (drmModeAddFB2WithModifiers(current_drm_info.fd, frame->width, frame->height, drmFrame->layers[0].format, handles, pitches, offsets, (flags & DRM_MODE_FB_MODIFIERS) ? modifiers : NULL, new_fb_id, flags) < 0) {
+  if (drmModeAddFB2WithModifiers(current_drm_info.fd, frame_width, frame_height, drmFrame->layers[0].format, handles, pitches, offsets, (flags & DRM_MODE_FB_MODIFIERS) ? modifiers : NULL, new_fb_id, flags) < 0) {
     fprintf(stderr, "Could not success drmModeAddFB2WithModifiers(), may be drm format is not supported(only NV12)\n");
     return -1;
   }
@@ -273,47 +293,45 @@ static int add_fb_for_frame(AVFrame *frame, uint32_t *new_fb_id) {
   return 0;
 }
 
-static int choose_color_config (AVFrame *frame) {
+static int drm_choose_color_config (struct Render_Config *config) {
+  pix_fmt = config.pix_fmt;
   bool changed = false;
-  if (first_draw) {
-    int colorspace = ffmpeg_get_frame_colorspace(frame);
-    bool fullRange = ffmpeg_is_frame_full_range(frame) == 1 ? true : false;
-    const char *drmColorEncoding = colorspace == COLORSPACE_REC_2020 ? "ITU-R BT.2020 YCbCr" : (colorspace == COLORSPACE_REC_709 ? "ITU-R BT.709 YCbCr" : "ITU-R BT.601 YCbCr");
-    const char *drmColorRange = fullRange ? "YCbCr full range" : "YCbCr limited range";
-    drmModePropertyPtr prop = drmModeGetProperty(current_drm_info.fd, current_drm_info.plane_color_range_prop_id);
-    if (!prop) {
-      fprintf(stderr, "Could not get plane color range prop\n");
-    }
-    else {
-      for (int i = 0; i < prop->count_enums; i++) {
-        if (strcmp(drmColorRange, prop->enums[i].name) == 0) {
-          if (drmModeObjectSetProperty(current_drm_info.fd, current_drm_info.plane_id, DRM_MODE_OBJECT_PLANE, current_drm_info.plane_color_range_prop_id, prop->enums[i].value) == 0) {
-            changed = true;
-            break;
-          }
-        }
-      }
-      drmModeFreeProperty(prop);
-    }
-
-    prop = NULL;
-    prop = drmModeGetProperty(current_drm_info.fd, current_drm_info.plane_color_encoding_prop_id);
-    if (!prop) {
-      fprintf(stderr, "Could not get plane color range prop\n");
-    }
-    else {
-      for (int i = 0; i < prop->count_enums; i++) {
-        if (strcmp(drmColorEncoding, prop->enums[i].name) == 0) {
-          if (drmModeObjectSetProperty(current_drm_info.fd, current_drm_info.plane_id, DRM_MODE_OBJECT_PLANE, current_drm_info.plane_color_encoding_prop_id, prop->enums[i].value) == 0) {
-            changed = true;
-            break;
-          }
-        }
-      }
-      drmModeFreeProperty(prop);
-    }
+  int colorspace = config->color_space;
+  bool fullRange = config->full_color_range == 1 ? true : false;
+  const char *drmColorEncoding = colorspace == COLORSPACE_REC_2020 ? "ITU-R BT.2020 YCbCr" : (colorspace == COLORSPACE_REC_709 ? "ITU-R BT.709 YCbCr" : "ITU-R BT.601 YCbCr");
+  const char *drmColorRange = fullRange ? "YCbCr full range" : "YCbCr limited range";
+  drmModePropertyPtr prop = drmModeGetProperty(current_drm_info.fd, current_drm_info.plane_color_range_prop_id);
+  if (!prop) {
+    fprintf(stderr, "Could not get plane color range prop\n");
   }
-  first_draw = false;
+  else {
+    for (int i = 0; i < prop->count_enums; i++) {
+      if (strcmp(drmColorRange, prop->enums[i].name) == 0) {
+        if (drmModeObjectSetProperty(current_drm_info.fd, current_drm_info.plane_id, DRM_MODE_OBJECT_PLANE, current_drm_info.plane_color_range_prop_id, prop->enums[i].value) == 0) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    drmModeFreeProperty(prop);
+  }
+
+  prop = NULL;
+  prop = drmModeGetProperty(current_drm_info.fd, current_drm_info.plane_color_encoding_prop_id);
+  if (!prop) {
+    fprintf(stderr, "Could not get plane color range prop\n");
+  }
+  else {
+    for (int i = 0; i < prop->count_enums; i++) {
+      if (strcmp(drmColorEncoding, prop->enums[i].name) == 0) {
+        if (drmModeObjectSetProperty(current_drm_info.fd, current_drm_info.plane_id, DRM_MODE_OBJECT_PLANE, current_drm_info.plane_color_encoding_prop_id, prop->enums[i].value) == 0) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    drmModeFreeProperty(prop);
+  }
   if (changed) {
     return 0;
   }
@@ -323,85 +341,86 @@ static int choose_color_config (AVFrame *frame) {
   }
 }
 
-static int frame_handle (int pipefd, void *data) {
-  AVFrame* frame = NULL;
-  while (read(pipefd, &frame, sizeof(void*)) > 0);
-  if (frame) {
-    if (first_draw)
-      choose_color_config(frame);
 
-    uint32_t last_fb_id = fb_id;
-    if (add_fb_for_frame(frame, &fb_id) < 0) {
-      fprintf(stderr, "Could not success add_fb_for_frame()\n");
-      return LOOP_RETURN;
-    }
+static int drm_draw(union Render_Image image) { 
+  uint32_t last_fb_id = fb_id;
+  if (add_fb_for_frame(image.frame_data, &fb_id) < 0) {
+    fprintf(stderr, "Could not success add_fb_for_frame()\n");
+    return -1;
+  }
 
-    if (useHDR)
-      set_drm_hdr_metadata (current_drm_info.fd, true);
-    if (drmModeSetPlane(current_drm_info.fd, current_drm_info.plane_id, current_drm_info.crtc_id, fb_id, 0, x_offset, y_offset, display_width, display_height, 0, 0, frame->width << 16,frame->height << 16) < 0) {
-      fprintf(stderr, "Could not success drmModeSetPlane()\n");
-      drmModeRmFB(current_drm_info.fd, fb_id);
-      fb_id = 0;
-      if (last_fb_id != 0)
-	drmModeRmFB(current_drm_info.fd, last_fb_id);
-      return LOOP_RETURN;
-    }
+  if (useHdr) {
+    set_drm_hdr_metadata (current_drm_info.fd, true);
+  }
+  if (drmModeSetPlane(current_drm_info.fd, current_drm_info.plane_id, current_drm_info.crtc_id, fb_id, 0, x_offset, y_offset, display_width, display_height, 0, 0, frame_width << 16,frame_height << 16) < 0) {
+    fprintf(stderr, "Could not success drmModeSetPlane()\n");
+    drmModeRmFB(current_drm_info.fd, fb_id);
+    fb_id = 0;
+    return -1;
+  }
 
-    // Free the previous FB object which has now been superseded
+  // Free the previous FB object which has now been superseded
+  if (last_fb_id != 0) {
     drmModeRmFB(current_drm_info.fd, last_fb_id);
   }
 
-  return LOOP_OK;
+  return 0;
 }
 
-int drm_setup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
-  ensure_buf_size(&ffmpeg_buffer, &ffmpeg_buffer_size, INITIAL_DECODER_BUFFER_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
-
-  bool usehdr = false;
-  struct Drm_Info *drmInfoPtr = drm_init(drm_device, DRM_FORMAT_NV12, usehdr);
-  if (drmInfoPtr == NULL) {
-   fprintf(stderr, "Couldn't initialize drm\n");
-   return -1;
-  }
-  memcpy(&current_drm_info, drmInfoPtr, sizeof(struct Drm_Info));
-  drmInfoPtr = get_drm_info(false);
-  memcpy(&old_drm_info, drmInfoPtr, sizeof(struct Drm_Info));
+int drm_setup(int width, int height, int drFlags) {
 
   frame_width = width;
   frame_height = height;
   display_width = current_drm_info.width;
   display_height = current_drm_info.height;
-  //convert_display(&width, &height, &display_width, &display_height, &x_offset, &y_offset);
+  screen_width = current_drm_info.width;
+  screen_height = current_drm_info.height;
+//  convert_display(&width, &height, &display_width, &display_height, &x_offset, &y_offset);
+  x_offset = 0;
+  y_offset = 0;
 
-  if (!drm_is_support_yuv444(AV_PIX_FMT_YUV444P))
-    isYUV444 = false;
   // test not success 
   // only support nv12 and p010
+/*
   if (ffmpeg_init_drm_hw_ctx(drm_device, isYUV444 ? AV_PIX_FMT_YUV444P : AV_PIX_FMT_NV12) < 0)
     return -1;
+*/
 
-  int avc_flags;
-  avc_flags = SLICE_THREADING;
-  avc_flags |= DRM_RENDER;
-  if (ffmpeg_init(videoFormat, frame_width, frame_height, avc_flags, FRAME_BUFFER_COUNT, SLICES_PER_FRAME) < 0) {
-   fprintf(stderr, "Couldn't initialize video decoding\n");
-   return -1;
-  }
-  if (pipe(pipefd) == -1) {
-    fprintf(stderr, "Can't create communication channel between threads\n");
-    return -2;
-  }
-
-  loop_add_fd(pipefd[0], &frame_handle, EPOLLIN);
-  fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
   return 0;
 }
 
+static void* drm_get_display(const char* *device) {
+  uint32_t format = (wantYuv444 && wantHdr) ? DRM_FORMAT_Y410 : (wantYuv444 ? DRM_FORMAT_YUV444 : (wantHdr ? DRM_FORMAT_P010 : DRM_FORMAT_NV12));
+  display_callback_drm.hdr_support = wantHdr ? true : false;
+
+  struct Drm_Info *drmInfoPtr = drm_init(drm_device, format, wantHdr);
+  if (drmInfoPtr == NULL) {
+    if (drmInfoPtr == NULL && (wantHdr || wantYuv444)) {
+      format = DRM_FORMAT_NV12;
+      drmInfoPtr = drm_init(NULL, format, false);
+      if (drmInfoPtr) {
+        display_callback_drm.hdr_support = false;
+        supportedVideoFormat &= ~VIDEO_FORMAT_MASK_YUV444;
+      }
+    }
+    if (drmInfoPtr == NULL) {
+      fprintf(stderr, "Could not init drm device.");
+      return NULL;
+    }
+  }
+  plane_format = format;
+
+  memcpy(&current_drm_info, drmInfoPtr, sizeof(struct Drm_Info));
+
+  *device = "/dev/dri/renderD128";
+  return &current_drm_info;
+}
+
 void drm_cleanup() {
-  for (int i = 0; i < FRAME_BUFFER_COUNT; i++) {
+  for (int i = 0; i < MAX_FB_NUM; i++) {
     if (sw_mapping[i].handle != 0) {
       close(sw_mapping[i].primeFd);
-      munmap(sw_mapping[i].mapping, sw_mapping[i].size);
+      munmap(sw_mapping[i].buffer, sw_mapping[i].size);
       struct drm_mode_destroy_dumb destroyBuf = {0};
       destroyBuf.handle = sw_mapping[i].handle;
       drmIoctl(current_drm_info.fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroyBuf);
@@ -416,41 +435,63 @@ void drm_cleanup() {
     fb_id = 0;
   }
 
-  //need close pipefd
-  //close(pipefd);
-
   drm_close();
 }
 
-int drm_submit_decode_unit(PDECODE_UNIT decodeUnit) {
-  PLENTRY entry = decodeUnit->bufferList;
-  int length = 0;
+static void drm_setup_post(void *data) {};
+static void drm_change_cursor(const char *op) {};
 
-  ensure_buf_size(&ffmpeg_buffer, &ffmpeg_buffer_size, decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE);
-
-  while (entry != NULL) {
-    memcpy(ffmpeg_buffer+length, entry->data, entry->length);
-    length += entry->length;
-    entry = entry->next;
-  }
-
-  int err = ffmpeg_decode(ffmpeg_buffer, length);
-  if (err < 0) {
-    // exit
-  }
-
-  AVFrame* frame = ffmpeg_get_frame(true);
-
-  if (frame != NULL)
-    write(pipefd[1], &frame, sizeof(void*));
-
-  return DR_OK;
+static void* drm_get_window() {
+  return NULL;
 }
-  
 
-DECODER_RENDERER_CALLBACKS decoder_callbacks_drm = {
-  .setup = drm_setup,
-  .cleanup = drm_cleanup,
-  .submitDecodeUnit = drm_submit_decode_unit,
-  .capabilities = CAPABILITY_SLICES_PER_FRAME(SLICES_PER_FRAME) | CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC | CAPABILITY_DIRECT_SUBMIT,
+static void drm_get_resolution(int *width, int *height) {
+  *width = screen_width;
+  *height = screen_height;
+  return;
+}
+
+static int drm_display_done(int width, int height, int index) {
+  return drm_flip_buffer(drmInfoPtr->fd, crtcPtr->crtc_id, gbm_bo[index].fb_id);
+}
+
+static int drm_render_init(struct Render_Init_Info *paras) {
+  frame_width = paras->frame_width;
+  frame_height = paras->frame_height;
+
+  return 0;
+}
+static void drm_render_destroy() {};
+static int drm_render_create(struct Render_Init_Info *paras) { return 0; };
+
+struct DISPLAY_CALLBACK display_callback_drm = {
+  .name = "drm",
+  .egl_platform = NOT_CARE,
+  .format = NOT_CARE,
+  .hdr_support = false,
+  .display_get_display = drm_get_display,
+  .display_get_window = drm_get_window,
+  .display_close_display = drm_cleanup,
+  .display_setup = drm_setup,
+  .display_setup_post = drm_setup_post,
+  .display_put_to_screen = drm_display_done,
+  .display_get_resolution = drm_get_resolution,
+  .display_change_cursor = drm_change_cursor,
+  .display_vsync_loop = NULL,
+  .display_exported_buffer_info = NULL,
+  .renders = DRM_RENDER,
+};
+
+struct RENDER_CALLBACK drm_render = {
+  .name = "drm",
+  .display_name = "drm",
+  .is_hardaccel_support = false,
+  .render_type = DRM_RENDER,
+  .decoder_type = SOFTWARE,
+  .data = NULL,
+  .render_create = drm_render_create,
+  .render_init = drm_render_init,
+  .render_sync_config = drm_choose_color_config,
+  .render_draw = drm_draw,
+  .render_destroy = drm_render_destroy,
 };

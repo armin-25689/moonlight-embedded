@@ -227,8 +227,8 @@ static void help() {
   printf("\t-quitappafter\t\tSend quit app request to remote after quitting session\n");
   printf("\t-viewonly\t\tDisable all input processing (view-only mode)\n");
   printf("\t-nomouseemulation\tDisable gamepad mouse emulation support (long pressing Start button)\n");
-  #if defined(HAVE_SDL) || defined(HAVE_X11)
-  printf("\n WM options (SDL and X11 only)\n\n");
+  #if defined(HAVE_SDL) || defined(HAVE_X11) || defined(HAVE_WAYLAND)
+  printf("\n WM options (SDL and X11/Wayland/Vaapi only)\n\n");
   printf("\t-windowed\t\tDisplay screen in a window\n");
   #endif
   #ifdef HAVE_EMBEDDED
@@ -322,6 +322,9 @@ int main(int argc, char* argv[]) {
     applist(&server);
   } else if (strcmp("stream", config.action) == 0) {
     pair_check(&server);
+    // set want hdr before system init,system must report hdr support by display
+    wantYuv444 = config.yuv444 ? true : false;
+    wantHdr = config.hdr ? true : false;
     enum platform system = platform_check(config.platform);
     if (config.debug_level > 0)
       printf("Platform %s\n", platform_name(system));
@@ -363,19 +366,18 @@ int main(int argc, char* argv[]) {
           config.stream.supportedVideoFormats |= (supportedVideoFormat & VIDEO_FORMAT_MASK_H265);
         if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1)
           config.stream.supportedVideoFormats |= (supportedVideoFormat & VIDEO_FORMAT_MASK_AV1);
-        if (!config.hdr) {
-          config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_10BIT;
-        }
       }
       else {
         printf("YUV444 is not supported because of platform: %d .\n", (int)system);
         config.yuv444 = false;
       }
     }
-    if (config.yuv444) {
+    if (!supportedHDR && (system == X11_VAAPI || system == X11)) {
+      config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_10BIT;
+    }
+    if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444) {
       // pass var to ffmpeg
-      wantYuv444 = true;
-      if (!config.hdr) {
+      if (!supportedHDR) {
         config.stream.colorSpace = COLORSPACE_REC_709;
         config.stream.colorRange = COLOR_RANGE_FULL;
       }

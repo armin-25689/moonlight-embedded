@@ -21,6 +21,8 @@ int vaapi_init_lib(const char *device);
 int vaapi_init(AVCodecContext* decoder_ctx);
 bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDisplay, bool *directRenderSupport);
 int vaapi_supported_video_format(void);
-void vaapi_free_egl_images(void *eglDisplay, void *eglImages[4], void *descriptor);
-ssize_t vaapi_export_egl_images(AVFrame *frame, void *eglDisplay, bool eglIsSupportExtDmaBufMod,
-                        void *eglImages[4], void **descriptor);
+void vaapi_free_egl_images(void *eglImages[4], void *descriptor, void(*render_unmap_buffer)(void* image[4], int planes));
+ssize_t vaapi_export_egl_images(AVFrame *frame, void *eglImages[4], void **descriptor,
+                                int(*render_map_buffer)(struct Source_Buffer_Info *buffer,
+                                                        int planes, int composeOrSeperate,
+                                                        void* image[4]));

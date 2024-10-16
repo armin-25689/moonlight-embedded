@@ -27,7 +27,6 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-#include "egl.h"
 #include "ffmpeg.h"
 #ifdef HAVE_VAAPI
 #include "ffmpeg_vaapi.h"
@@ -115,12 +114,13 @@ static SetupArgs ffmpegArgs;
 
 static void clear_threads() {
   if (threads.created) {
-    pthread_cancel(threads.decoder_id);
-    pthread_cancel(threads.render_id);
+    pthread_mutex_lock(&threads.mutex);
     done = true;
     memset(frames, 0, sizeof(frames));
     LiWakeWaitForVideoFrame();
     pthread_cond_signal(&threads.cond);
+    sem_post(&threads.render_sem);
+    pthread_mutex_unlock(&threads.mutex);
     if (threads.render_id)
       pthread_join(threads.render_id, NULL);
     if (threads.decoder_id)
@@ -149,26 +149,29 @@ static int window_op_handle (int pipefd, void *data) {
   return LOOP_OK;
 }
 
-static inline void draw_frame (AVFrame* frame, int *res) {
+static inline void draw_frame (AVFrame* frame, int render_index, int *image_index, int *res) {
 
   int imageNum = 0;
   if (renderPtr->decoder_type == VAAPI && renderPtr->render_type == EGL_RENDER) {
-    imageNum = vaapi_export_egl_images(frame, renderPtr->data, renderPtr->extension_support, renderPtr->images[current_frame[1]].images.image_data, &renderPtr->images[current_frame[1]].images.descriptor);
+    imageNum = vaapi_export_egl_images(frame, renderPtr->images[render_index].images.image_data, &renderPtr->images[render_index].images.descriptor, renderPtr->render_map_buffer);
     if (imageNum < 1) {
       *res = LOOP_RETURN;
       return;
     }
   }
   else {
-    renderPtr->images[current_frame[1]].frame_data = frame->data;
+    renderPtr->images[render_index].frame_data = frame->data;
   }
 
   if (firstDraw) {
-     firstDraw = false;
-     if (isYUV444 && (!(frame->linesize[0] == frame->linesize[2] && frame->linesize[1] == frame->linesize[0]))) {
-       fprintf(stderr, "There is not yuv444 format. Please try remove -yuv444 option to draw video!\n");
-       *res = LOOP_RETURN;
-       return;
+    firstDraw = false;
+    if (isYUV444 && (!(frame->linesize[0] == frame->linesize[2] && frame->linesize[1] == frame->linesize[0]))) {
+      fprintf(stderr, "There is not yuv444 format. Please try remove -yuv444 option to draw video!\n");
+      if (renderPtr->decoder_type == VAAPI && renderPtr->render_type == EGL_RENDER) {
+        vaapi_free_egl_images(renderPtr->images[render_index].images.image_data, renderPtr->images[render_index].images.descriptor, renderPtr->render_unmap_buffer);
+      }
+      *res = LOOP_RETURN;
+      return;
     }
 
     struct Render_Config config = {0};
@@ -176,6 +179,9 @@ static inline void draw_frame (AVFrame* frame, int *res) {
     config.full_color_range = ffmpeg_is_frame_full_range(frame);
     ffmpeg_get_plane_info(frame, &config.pix_fmt, &config.plane_nums, &config.yuv_order);
     config.image_nums = imageNum;
+    for (int i = 0; i < config.plane_nums; i++) {
+      config.linesize[i] = frame->linesize[i];
+    }
     if (strcmp(disPtr->name, "gbm") ==0)
       config.vsync = true;
     if (renderPtr->render_sync_config != NULL) {
@@ -183,15 +189,14 @@ static inline void draw_frame (AVFrame* frame, int *res) {
     }
   }
 
-  current_frame[2] = renderPtr->render_draw(renderPtr->images[current_frame[1]]);
-  if (current_frame[2] < 0) {
+  *image_index = renderPtr->render_draw(renderPtr->images[render_index]);
+  if (*image_index < 0) {
     *res = LOOP_RETURN;
-    current_frame[2] = 0;
-    return;
+    *image_index = 0;
   }
 
   if (renderPtr->decoder_type == VAAPI && renderPtr->render_type == EGL_RENDER) {
-    vaapi_free_egl_images(renderPtr->data, renderPtr->images[current_frame[1]].images.image_data, renderPtr->images[current_frame[1]].images.descriptor);
+    vaapi_free_egl_images(renderPtr->images[render_index].images.image_data, renderPtr->images[render_index].images.descriptor, renderPtr->render_unmap_buffer);
   }
 
   *res = LOOP_OK;
@@ -202,17 +207,13 @@ static int frame_handle (int pipefd, void *data) {
   while (read(pipefd, &frame, sizeof(void*)) > 0);
   if (frame) {
     int res;
-    draw_frame(frame, &res);
+    current_frame[1] = next_frame[1];
+    next_frame[1] = (current_frame[1] + 1) % MAX_FB_NUM;
+    draw_frame(frame, current_frame[1], &current_frame[2], &res);
     if (res != LOOP_RETURN) {
-      disPtr->display_put_to_screen(display_width, display_height, 0);
+      disPtr->display_put_to_screen(display_width, display_height, current_frame[2]);
     }
     return res;
-  }
-
-  if (renderPtr->decoder_type == VAAPI && renderPtr->render_type == EGL_RENDER) {
-    for (int i = 0; i < MAX_FB_NUM; i++) {
-      vaapi_free_egl_images(renderPtr->data, renderPtr->images[i].images.image_data, renderPtr->images[i].images.descriptor);
-    }
   }
 
   return LOOP_OK;
@@ -237,12 +238,15 @@ static void* frame_handler (void *data) {
     }
     if (frames[current_frame[1]]) {
       int res;
-      draw_frame(frames[current_frame[1]], &res);
+      draw_frame(frames[current_frame[1]], current_frame[1], &current_frame[2], &res);
       if (res == LOOP_RETURN) {
         done = true;
         continue;
       }
-      disPtr->display_put_to_screen(display_width, display_height, current_frame[2]);
+      if (disPtr->display_put_to_screen(display_width, display_height, current_frame[2]) < 0) {
+        done = true;
+        continue;
+      }
       pthread_mutex_lock(&threads.mutex);
       frames[current_frame[1]] = NULL;
       pthread_cond_signal(&threads.cond);
@@ -253,7 +257,7 @@ static void* frame_handler (void *data) {
   write(windowpipefd[1], &quitRequest, sizeof(char *));
   if (renderPtr->decoder_type == VAAPI && renderPtr->render_type == EGL_RENDER) {
     for (int i = 0; i < MAX_FB_NUM; i++) {
-      vaapi_free_egl_images(renderPtr->data, renderPtr->images[i].images.image_data, renderPtr->images[i].images.descriptor);
+      vaapi_free_egl_images(renderPtr->images[i].images.image_data, renderPtr->images[i].images.descriptor, renderPtr->render_unmap_buffer);
     }
   }
   return NULL;
@@ -286,15 +290,23 @@ static void* decoder_thread(void *data) {
   return NULL;
 }
 
-int x11_init(bool vdpau, bool vaapi) {
+int x11_init(const char *displayName, bool vaapi) {
   int res = 0;
   const char *displayDevice;
+  // display and decoder may modify supportedVideoFormat
+  supportedVideoFormat = (VIDEO_FORMAT_MASK_10BIT | VIDEO_FORMAT_MASK_YUV444 | VIDEO_FORMAT_MASK_H264 | VIDEO_FORMAT_MASK_H265 | VIDEO_FORMAT_MASK_AV1);
 
   int disIndex = 0;
   struct DISPLAY_CALLBACK *bestDisplay[3] = {0};
   struct RENDER_CALLBACK *bestRender[3] = {0};
   for (int i = 0; i < (sizeof(displayCallbacksPtr) / sizeof(displayCallbacksPtr[0])); i++) {
     disPtr = displayCallbacksPtr[i];
+
+    if (displayName) {
+      if (strcmp(disPtr->name, displayName) != 0)
+        continue;
+    }
+
     display = disPtr->display_get_display(&displayDevice);
     if (!display)
       continue;
@@ -366,6 +378,10 @@ int x11_init(bool vdpau, bool vaapi) {
   }
 
   if (disPtr == NULL || renderPtr == NULL) {
+    if (!bestDisplay[0]) {
+      fprintf(stderr, "No display support! Please try another platform(-platform xxx).\n");
+      return 0;
+    }
     disPtr = bestDisplay[0];
     renderPtr = bestRender[0];
     display = disPtr->display_get_display(&displayDevice);
@@ -376,17 +392,24 @@ int x11_init(bool vdpau, bool vaapi) {
     renderPtr->render_create(&renderParas);
   }
 
+  // display must report useHdr to decide is support hdr display
+  supportedHDR = disPtr->hdr_support;
+
   #ifdef HAVE_VAAPI
   if (renderPtr->is_hardaccel_support && vaapi) {
     if (vaapi_init_lib(displayDevice) != -1) {
-      supportedVideoFormat = vaapi_supported_video_format();
+      supportedVideoFormat &= vaapi_supported_video_format();
       res = INIT_VAAPI;
     }
   }
   #endif
 
+  supportedVideoFormat &= software_supported_video_format();
+
   // yuv444 is always supported by software decoder
-  supportedVideoFormat = software_supported_video_format();
+  if (strcmp(disPtr->name, "drm") == 0) {
+    res = INIT_DRM;
+  }
 
   res = res != 0 ? res : INIT_EGL;
 
@@ -424,6 +447,7 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   else {
     avc_flags = SLICE_THREADING;
   }
+  avc_flags |= renderPtr->render_type;
 
   if (ffmpeg_init(videoFormat, frame_width, frame_height, avc_flags, MAX_FB_NUM, SLICES_PER_FRAME) < 0) {
     fprintf(stderr, "Couldn't initialize video decoding\n");
@@ -452,6 +476,7 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   }
   if (strcmp(disPtr->name, "gbm") ==0)
     renderParas.use_display_buffer = true;
+  renderParas.display_exported_buffer = disPtr->display_exported_buffer_info;
   if (renderPtr->render_init != NULL) {
     if (renderPtr->render_init(&renderParas) < 0) {
       return -1;
@@ -545,27 +570,30 @@ int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     return DR_NEED_IDR;
   }
 
-  AVFrame* frame = ffmpeg_get_frame(true);
+  if (threads.created) {
+    current_frame[0] = next_frame[0];
 
+    pthread_mutex_lock(&threads.mutex);
+    while (frames[current_frame[0]] != NULL) {
+      if (done) {
+        pthread_mutex_unlock(&threads.mutex);
+        return DR_OK;
+      }
+      pthread_cond_wait(&threads.cond, &threads.mutex);
+      pthread_mutex_lock(&threads.mutex);
+    }
+    pthread_mutex_unlock(&threads.mutex);
+  }
+
+  AVFrame* frame = ffmpeg_get_frame(true);
   if (frame != NULL) {
     if (threads.created) {
-      current_frame[0] = next_frame[0];
-      next_frame[0] = (current_frame[0] + 1) % MAX_FB_NUM;
-
-      pthread_mutex_lock(&threads.mutex);
-      while (frames[current_frame[0]] != NULL) {
-        if (done) {
-          return DR_OK;
-        }
-        pthread_cond_wait(&threads.cond, &threads.mutex);
-      }
       frames[current_frame[0]] = frame;
-      pthread_mutex_unlock(&threads.mutex);
+      next_frame[0] = (current_frame[0] + 1) % MAX_FB_NUM;
     }
     else {
       write(pipefd[1], &frame, sizeof(void*));
     }
-
     return DR_OK;
   }
 
