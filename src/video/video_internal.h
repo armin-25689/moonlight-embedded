@@ -29,7 +29,7 @@ enum decoders {SOFTWARE = 0, VDPAU, VAAPI};
 #define COMPOSE_PLANE 1
 #define SEPERATE_PLANE 0
 
-#define MAX_FB_NUM 3
+#define MAX_FB_NUM 2
 
 struct Source_Buffer_Info {
   uint32_t fd[4];

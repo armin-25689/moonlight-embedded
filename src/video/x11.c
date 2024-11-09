@@ -69,9 +69,10 @@ static void x_close_display() {
     XFreeThreads();
     startedMuiltiThreads = false;
   }
-  if (display != NULL)
+  if (display != NULL) {
     XCloseDisplay(display);
-  display = NULL;
+    display = NULL;
+  }
 }
 
 static void x_get_resolution (int *width, int *height) {

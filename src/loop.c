@@ -29,7 +29,9 @@
 #include <string.h>
 #include <errno.h>
 
-static struct FD_Function fd_functions[maxEpollFds] = {};
+LIST_HEAD(head_of_list, List_Node);
+static struct head_of_list first_node;
+static struct head_of_list *head_node = &first_node;
 static int epoll_fd = -1;
 static int sigFd;
 static bool done = false;
@@ -49,45 +51,70 @@ static int loop_sig_handler(int fd, void *data) {
 }
 
 static inline int create_epoll_data (struct epoll_event *eventsi, int fd, void *data, Fd_Handler handler, int events, int opt) {
+  struct FD_Function *epoll_event_info = NULL;
+  struct List_Node *nodePtr = NULL;
+
   if (!handler || fd < 0 || events <= 0) {
     fprintf(stderr, "Can not add fd to epoll because of null handler\n");
     return -1;
   }
 
-  int index = -1;
   if (opt == EPOLL_CTL_MOD) {
-    for (int i = 0; i < maxEpollFds; i++) {
-      if (fd_functions[i].fd == fd) {
-        index = i;
+    LIST_FOREACH(nodePtr, head_node, node) {
+      if(((struct FD_Function *)nodePtr->data)->fd == fd) {
+        epoll_event_info = nodePtr->data;
         break;
       }
     }
   }
   else {
-    for (int i = 0; i < maxEpollFds; i++) {
-      if (!fd_functions[i].func) {
-        index = i;
-        break;
-      }
+    nodePtr = malloc(sizeof(struct List_Node));
+    epoll_event_info = malloc(sizeof(struct FD_Function));
+    if (nodePtr && epoll_event_info) {
+      memset(nodePtr, 0, sizeof(struct List_Node));
+      memset(epoll_event_info, 0, sizeof(struct FD_Function));
+      nodePtr->data = (void *) epoll_event_info;
+      LIST_INSERT_HEAD(head_node, nodePtr, node);
+    }
+    else {
+      if (nodePtr)
+        free(nodePtr);
+      nodePtr = NULL;
     }
   }
-  if (index < 0) {
-    fprintf(stderr, "Can not add fd to epoll because of max fd numbers\n");
+  if (epoll_event_info == NULL || nodePtr == NULL) {
+    if (epoll_event_info)
+      free(epoll_event_info);
+    fprintf(stderr, "Can not modify epoll event info because of no address\n");
     return -1;
   }
-  fd_functions[index].fd = fd;
-  fd_functions[index].data = data;
-  fd_functions[index].func = handler;
-  fd_functions[index].events = events;
+  epoll_event_info->fd = fd;
+  epoll_event_info->data = data;
+  epoll_event_info->func = handler;
+  epoll_event_info->events = events;
   eventsi->events = events;
   // not set fd to data.fd,beacause use ptr instead. union type
   //eventsi->data.fd = fd;
-  eventsi->data.ptr = (void *)(&fd_functions[index]);
+  eventsi->data.ptr = (void *)(epoll_event_info);
   return 0;
 }
 
+static void clear_epoll_data(int fd) {
+  struct List_Node *nodePtr = NULL;
+
+  LIST_FOREACH(nodePtr, head_node, node) {
+    if(((struct FD_Function *)nodePtr->data)->fd == fd || fd == -2) {
+      LIST_REMOVE(nodePtr, node);
+      free(nodePtr->data);
+      free(nodePtr);
+      if (fd != -2)
+        break;
+    }
+  }
+}
+
 static inline void fd_ctl(int fd, void *data, Fd_Handler handler, int events, int opt) {
-  if (done)
+  if (done || fd < 0)
     return;
 
   struct epoll_event event_data = {0};
@@ -96,6 +123,8 @@ static inline void fd_ctl(int fd, void *data, Fd_Handler handler, int events, in
     return;
   int err = epoll_ctl(epoll_fd, opt, fd, &event_data);
   if (err < 0) {
+    if (opt == EPOLL_CTL_ADD)
+      clear_epoll_data(fd);
     fprintf(stderr, "Can not add fd to epoll:%d\n", errno);
     exit(EXIT_FAILURE);
   }
@@ -115,28 +144,25 @@ void loop_mod_fd(int fd, Fd_Handler handler, int events, void *data) {
 }
 
 void loop_remove_fd(int fd) {
-  if (done)
+  if (done || fd < 0)
     return;
   int err = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
   if (err < 0) {
     fprintf(stderr, "Can not delelte fd from epoll:%d\n", errno);
     return;
   }
-  for (int i = 0; i < maxEpollFds; i++) {
-    if (fd_functions[i].fd == fd) {
-      memset(&fd_functions[i], 0, sizeof(struct FD_Function));
-      break;
-    }
-  }
+  clear_epoll_data(fd);
   return;
 }
 
 void loop_create() {
-  epoll_fd = epoll_create(maxEpollFds);
+  epoll_fd = epoll_create1(0);
   if (epoll_fd < 0) {
     fprintf(stderr, "Can not create epoll fd: %d\n", errno);
     exit(EXIT_FAILURE);
   }
+
+  LIST_INIT(head_node);
 }
 
 void loop_init() {
@@ -153,9 +179,12 @@ void loop_init() {
 }
 
 void loop_main() {
+  done = false;
+  int maxEvents = 300;
+
   while (!done) {
-    struct epoll_event events[maxEpollFds] = {0};
-    int fd_events = epoll_wait(epoll_fd, events, maxEpollFds, -1);
+    struct epoll_event events[300] = {0};
+    int fd_events = epoll_wait(epoll_fd, events, maxEvents, -1);
     if (fd_events < 0) {
       done = true;
     }
@@ -171,7 +200,10 @@ void loop_main() {
 }
 
 void loop_destroy() {
+  done = true;
   if (epoll_fd >= 0)
     close(epoll_fd);
   epoll_fd = -1;
+  // -2 means clear list
+  clear_epoll_data(-2);
 }

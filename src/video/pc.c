@@ -361,28 +361,29 @@ int x11_init(const char *displayName, bool vaapi) {
     #endif
         }
 
-        if (!renderPtr->is_hardaccel_support) {
-          renderPtr->render_destroy();
-          renderPtr = NULL;
-          continue;
+        if (renderPtr->is_hardaccel_support) {
+          break;
         }
+
+        renderPtr->render_destroy();
+        renderPtr = NULL;
       }
-      break;
+
+      if (renderPtr != NULL)
+        break;
     }
 
-    if (renderPtr != NULL)
-      break;
-
-    disPtr->display_close_display();
-    disPtr = NULL;
+    // has disPtr already, just choose render
+    break;
   }
 
   if (disPtr == NULL || renderPtr == NULL) {
-    if (!bestDisplay[0]) {
+    if (!bestDisplay[0] || !bestRender[0]) {
       fprintf(stderr, "No display support! Please try another platform(-platform xxx).\n");
       return 0;
     }
-    disPtr = bestDisplay[0];
+    if (disPtr == NULL)
+      disPtr = bestDisplay[0];
     renderPtr = bestRender[0];
     display = disPtr->display_get_display(&displayDevice);
     struct Render_Init_Info renderParas = {0};
@@ -390,6 +391,7 @@ int x11_init(const char *displayName, bool vaapi) {
     renderParas.egl_platform = disPtr->egl_platform;
     renderParas.format = disPtr->format;
     renderPtr->render_create(&renderParas);
+    renderPtr->is_hardaccel_support = false;
   }
 
   // display must report useHdr to decide is support hdr display

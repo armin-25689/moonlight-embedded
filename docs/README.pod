@@ -152,9 +152,10 @@ By default the gamecontrollerdb.txt provided by Moonlight Embedded is used.
 =item B<-platform> [I<PLATFORM>]
 
 Select platform for audio and video output and input.
-<PLATFORM> can be vaapi, x11, x11_vaapi, wayland_vaapi, rk or fake etc.
+<PLATFORM> can be vaapi, X11, x11, x11_vaapi, wayland_vaapi, rk or fake etc.
 
 Platform 'x11/x11_vaapi/vaapi' will choose x11/wayland/gbm display automatically.
+Platform 'X11' will force to x11 server.
 
 =item B<-nounsupported>
 

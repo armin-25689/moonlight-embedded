@@ -91,7 +91,7 @@ static int egl_map_buffer_to_eglimage(struct Source_Buffer_Info *buffer, int buf
       attrs[attrsNum++] = buffer->stride[j + k];
       attrs[attrsNum++] = eglImageAttrsSlot.offset[k];
       attrs[attrsNum++] = buffer->offset[j + k];
-      if (buffer->modifiers[k] == 0) {
+      if (buffer->modifiers[k + j] == 0) {
         continue;
       }
       if (ExtState.eglIsSupportExtDmaBufMod) {
@@ -512,15 +512,15 @@ static int egl_init(struct Render_Init_Info *paras) {
 
   // for software render ,because we want cut the not needed view range
   egl_base.cutwidth = egl_render.decoder_type != SOFTWARE ? 1 : ((float)frame_width / egl_base.width - ((isYUV444 || frame_width == egl_base.width) ? 0 : 0.0002));
-  if (egl_base.display_buffer) {
-    glViewport(0, 0, egl_base.screen_width, egl_base.screen_height);
-  }
-  else if (egl_render.decoder_type == SOFTWARE && frame_width != egl_base.width) {
+  if (egl_render.decoder_type == SOFTWARE && frame_width != egl_base.width) {
     // cut display area,importent for software decoder
     if (is_full_screen)
       glViewport(0, 0, (int)((egl_base.screen_width / (float)frame_width) * egl_base.width), egl_base.screen_height);
     else
       glViewport(0, 0, egl_base.width, egl_base.height);
+  }
+  else if (egl_base.display_buffer) {
+    glViewport(0, 0, egl_base.screen_width, egl_base.screen_height);
   }
 
   eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);

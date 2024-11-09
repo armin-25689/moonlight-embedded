@@ -77,6 +77,8 @@ static bool isGrabed = false;
 static bool sdlgp = false;
 static bool swapXYAB = false;
 static bool gameMode = false;
+// for check gamepad num,evdev_check_input function
+static int gpNumForCheck = 0;
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 #define int16_to_le(val) val
@@ -102,6 +104,7 @@ struct input_device {
   int abs_map[ABS_CNT];
   int hats_state[3][2];
   int fd;
+  char *path;
   char modifiers;
   #ifdef __linux__
   __s32 mouseDeltaX, mouseDeltaY, mouseVScroll, mouseHScroll;
@@ -111,8 +114,8 @@ struct input_device {
   int32_t touchDownX, touchDownY, touchX, touchY;
   #endif
   struct {
-    int32_t touchDownX[MAX_MT_TOUCH_FINGER];
-    int32_t touchDownY[MAX_MT_TOUCH_FINGER];
+    int32_t distanceX[MAX_MT_TOUCH_FINGER];
+    int32_t distanceY[MAX_MT_TOUCH_FINGER];
     int32_t slotValueX[MAX_MT_TOUCH_FINGER];
     int32_t slotValueY[MAX_MT_TOUCH_FINGER];
     int32_t lastX[MAX_MT_TOUCH_FINGER];
@@ -125,6 +128,7 @@ struct input_device {
     uint32_t end_event;
     uint32_t mtSlot;
     uint32_t upEventSlot;
+    uint32_t downEventSlot;
     uint32_t specialEventSlot;
     uint32_t fingerMaxNum;
     uint32_t fingersNum;
@@ -181,7 +185,10 @@ static const int hat_constants[3][3] = {{HAT_UP | HAT_LEFT, HAT_UP, HAT_UP | HAT
 // Limited by number of bits in activeGamepadMask
 #define MAX_GAMEPADS 16
 
-static struct input_device* devices = NULL;
+LIST_HEAD(head_of_list, List_Node);
+static struct head_of_list first_node;
+static struct head_of_list *head_device = &first_node;
+static bool verboseMe = false;
 static int numDevices = 0;
 static int assignedControllerIds = 0;
 
@@ -207,7 +214,7 @@ int evdev_gamepads = 0;
 
 static bool (*handler) (struct input_event*, struct input_device*);
 static int evdev_handle(int fd, void *data);
-static int mt_evdev_handle(int fd, void *data, int interval, uint32_t event);
+static int mt_evdev_handle(int fd, void *data, int interval, uint32_t event, int slot);
 
 static int evdev_get_map(int* map, int length, int value) {
   for (int i = 0; i < length; i++) {
@@ -250,33 +257,60 @@ static bool evdev_init_parms(struct input_device *dev, struct input_abs_parms *p
   return true;
 }
 
-static void evdev_remove(struct input_device *device) {
-  numDevices--;
+static void evdev_remove_device(struct input_device *dis_device, const char *path, int opt) {
+  // opt is 1 means remove all device
+  struct List_Node *nodePtr = NULL;
+  LIST_FOREACH(nodePtr, head_device, node) {
+    struct input_device *device = (struct input_device*)nodePtr->data;
+    if(((device) == dis_device && dis_device != NULL) || opt == 1 || (path != NULL && strcmp(device->path, path) == 0)) {  
+      numDevices--;
+      if (verboseMe || opt != 1)
+        printf("Input device removed: %s (player %d)\n", libevdev_get_name(device->dev), device->controllerId + 1);
 
-  printf("Input device removed: %s (player %d)\n", libevdev_get_name(device->dev), device->controllerId + 1);
+      // remove from loop first
+      loop_remove_fd(device->fd);
 
-  if (device->controllerId >= 0) {
-    assignedControllerIds &= ~(1 << device->controllerId);
-    LiSendMultiControllerEvent(device->controllerId, assignedControllerIds, 0, 0, 0, 0, 0, 0, 0);
-  }
-  if (device->mouseEmulation) {
-    device->mouseEmulation = false;
-    pthread_join(device->meThread, NULL);
-  }
+      // drain all event
+      struct input_event ev;
+      while (libevdev_next_event(device->dev, LIBEVDEV_READ_FLAG_NORMAL, &ev) >= 0);
 
-  loop_remove_fd(device->fd);
-  libevdev_free(device->dev);
-  close(device->fd);
-
-  for (int i=0;i<numDevices;i++) {
-    if (device->fd == devices[i].fd) {
-      if (i != numDevices && numDevices > 0) {
-        memcpy(&devices[i], &devices[numDevices], sizeof(struct input_device));
-        loop_mod_fd(devices[i].fd, &evdev_handle, EPOLLIN, (void *)(&devices[i]));
-        memset(&devices[numDevices], 0, sizeof(struct input_device));
+      // clear device
+      if (device->controllerId >= 0) {
+        gpNumForCheck--;
+        evdev_gamepads--;
+        assignedControllerIds &= ~(1 << device->controllerId);
+        LiSendMultiControllerEvent(device->controllerId, assignedControllerIds, 0, 0, 0, 0, 0, 0, 0);
       }
+      if (device->mouseEmulation) {
+        device->mouseEmulation = false;
+        pthread_join(device->meThread, NULL);
+      }
+
+      free(device->path);
+      libevdev_free(device->dev);
+      close(device->fd);
+
+      // remove device
+      LIST_REMOVE(nodePtr, node);
+      free(nodePtr->data);
+      free(nodePtr);
+
+      if (opt != 1)
+        break;
     }
   }
+}
+
+static void evdev_remove_all(void) {
+  evdev_remove_device(NULL, NULL, 1);
+}
+
+static void evdev_remove(struct input_device *device) {
+  evdev_remove_device(device, NULL, 0);
+}
+
+void evdev_remove_from_path(const char* path) {
+  evdev_remove_device(NULL, path, 0);
 }
 
 static short evdev_convert_value(struct input_event *ev, struct input_device *dev, struct input_abs_parms *parms, bool reverse) {
@@ -364,6 +398,9 @@ static void send_controller_arrival(struct input_device *dev) {
   unsigned char type = LI_CTYPE_UNKNOWN;
   unsigned int supportedButtonFlags = 0;
   unsigned short capabilities = 0;
+  // for check gamepad num
+  gpNumForCheck++;
+  evdev_gamepads++;
 
   switch (libevdev_get_id_vendor(dev->dev)) {
   case 0x045e: // Microsoft
@@ -479,6 +516,10 @@ static bool evdev_mt_touchpad_handle_event(struct input_event *ev, struct input_
           }
           dev->mt_info.lastX[i] = dev->mt_info.slotValueX[i];
           dev->mt_info.lastY[i] = dev->mt_info.slotValueY[i];
+          if (dev->mt_info.distanceX[i] < dev->mtXMax)
+            dev->mt_info.distanceX[i] += abs(tempX);
+          if (dev->mt_info.distanceY[i] < dev->mtYMax)
+            dev->mt_info.distanceY[i] += abs(tempY);
         }
       }
       if ((dev->mt_info.mtEvent & THREE_FINGER_EVENT) ||
@@ -514,17 +555,19 @@ static bool evdev_mt_touchpad_handle_event(struct input_event *ev, struct input_
         if (dev->mt_info.slotValueX[i] != 0 && dev->mt_info.slotValueY[i] != 0) {
           int tempX = dev->mt_info.slotValueX[i] - dev->mt_info.lastX[i];
           int tempY = dev->mt_info.slotValueY[i] - dev->mt_info.lastY[i];
-          nowdeltax = (abs(tempX) > abs(nowdeltax)) ? tempX : nowdeltax;
-          nowdeltay = (abs(tempY) > abs(nowdeltay)) ? tempY : nowdeltay;
+          if ((abs(tempX) + abs(tempY)) > (abs(nowdeltax) + abs(nowdeltay))) {
+            nowdeltax = tempX;
+            nowdeltay = tempY;
+          }
+          dev->mt_info.lastX[i] = dev->mt_info.slotValueX[i];
+          dev->mt_info.lastY[i] = dev->mt_info.slotValueY[i];
+          dev->mt_info.distanceX[i] += abs(tempX);
+          dev->mt_info.distanceY[i] += abs(tempY);
+          if (dev->mt_info.distanceX[i] >= dev->mtPalm || dev->mt_info.distanceY[i] >= dev->mtPalm) {
+            dev->mt_info.isMoving = true;
+            dev->mt_info.needWait = false;
+          }
         }
-      }
-      if (nowdeltax * nowdeltax + nowdeltay * nowdeltay >= dev->mtPalm * (dev->mtPalm)) {
-        dev->mt_info.pre_down_event |= MOVING_MT_EVENT;
-        dev->mt_info.end_event = ZERO_FINGER_EVENT;
-        dev->mt_info.isMoving = true;
-        dev->mt_info.needWait = false;
-        memcpy(dev->mt_info.lastX, dev->mt_info.slotValueX, sizeof(int32_t) * MAX_MT_TOUCH_FINGER);
-        memcpy(dev->mt_info.lastY, dev->mt_info.slotValueY, sizeof(int32_t) * MAX_MT_TOUCH_FINGER);
       }
     }
 
@@ -532,14 +575,12 @@ static bool evdev_mt_touchpad_handle_event(struct input_event *ev, struct input_
     // no moving event
     if (dev->mt_info.down_event) {
       struct timeval elapsedTime;
-      timersub(&ev->time, &dev->mt_info.touchDownTime[dev->mt_info.mtSlot], &elapsedTime);
+      timersub(&ev->time, &dev->mt_info.touchDownTime[dev->mt_info.downEventSlot], &elapsedTime);
       int jtime = elapsedTime.tv_sec * 1000000 + elapsedTime.tv_usec;
 
       // restrict time and distance
-      if ((abs(dev->mt_info.lastX[dev->mt_info.mtSlot] -
-           dev->mt_info.touchDownX[dev->mt_info.mtSlot]) < (dev->mtPalm * 2)) &&
-          (abs(dev->mt_info.lastY[dev->mt_info.mtSlot] -
-           dev->mt_info.touchDownY[dev->mt_info.mtSlot]) < (dev->mtPalm * 2)) &&
+      if (dev->mt_info.distanceX[dev->mt_info.downEventSlot] < (dev->mtPalm * 2) &&
+          dev->mt_info.distanceY[dev->mt_info.downEventSlot] < (dev->mtPalm * 2) &&
           jtime <= (TOUCH_CLICK_DELAY * 4)) {
         // down.2 three
         switch (dev->mt_info.down_event & FINGER_EVENT_MASK) {
@@ -627,20 +668,19 @@ static bool evdev_mt_touchpad_handle_event(struct input_event *ev, struct input_
     if (needSpecialEvent) {
       needSpecialEvent = false;
       LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
-      usleep(TOUCH_CLICK_DELAY);
-      int res = mt_evdev_handle(dev->fd, dev, 6, NEED_SPECIAL_FINGER_EVENT);
+      int res = mt_evdev_handle(dev->fd, dev, 6, NEED_SPECIAL_FINGER_EVENT, dev->mt_info.upEventSlot);
       // res < 0 means exit loop;res = 0 means special event has handled,return function directly
       if (res == 0) {
         return true;
       }
       LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+      if (res == -1) {
+        return true;
+      }
       dev->mt_info.leftIndex = -1;
       dev->mtLastEvent &= ~LEFT_MT_EVENT;
       if (res < 0) {
-        if (res == -1)
-          return true;
-        else
-          return false;
+        return false;
       }
     }
 
@@ -706,7 +746,6 @@ static bool evdev_mt_touchpad_handle_event(struct input_event *ev, struct input_
       break;
     // mouse action
     case BTN_LEFT:
-      dev->mt_info.end_event = ZERO_FINGER_EVENT;
       // return if value == 0,may be means error occur
       if (dev->mt_info.slotValueX[dev->mt_info.mtSlot] == 0 || dev->mt_info.slotValueY[dev->mt_info.mtSlot] == 0) {
         break;
@@ -721,10 +760,12 @@ static bool evdev_mt_touchpad_handle_event(struct input_event *ev, struct input_
         dev->mtLastEvent &= ~RIGHT_MT_EVENT;
       }
       else if (!(dev->mtLastEvent & RIGHT_MT_EVENT) && ev->value && dev->mt_info.slotValueX[dev->mt_info.upEventSlot] > (dev->mtXMax * 0.5) && dev->mt_info.slotValueY[dev->mt_info.upEventSlot] > (dev->mtYMax * 0.8)) {
+        dev->mt_info.end_event = ZERO_FINGER_EVENT;
         LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_RIGHT);
         dev->mtLastEvent |= (ev->value ? RIGHT_MT_EVENT : 0);
       }
       else if (!(dev->mtLastEvent & LEFT_MT_EVENT) && ev->value) {
+        dev->mt_info.end_event = ZERO_FINGER_EVENT;
         LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
         dev->mtLastEvent |= (ev->value ? LEFT_MT_EVENT : 0);
       }
@@ -746,6 +787,7 @@ static bool evdev_mt_touchpad_handle_event(struct input_event *ev, struct input_
     case ABS_MT_TRACKING_ID:
       if (ev->value == -1) {
         // clean var
+        dev->mt_info.downEventSlot = dev->mt_info.mtSlot;
         dev->mt_info.slotValueX[dev->mt_info.mtSlot] = 0;
         dev->mt_info.slotValueY[dev->mt_info.mtSlot] = 0;
         dev->mt_info.fingersNum--;
@@ -792,7 +834,9 @@ static bool evdev_mt_touchpad_handle_event(struct input_event *ev, struct input_
           struct timeval elapsedTime;
           timersub(&ev->time, &dev->mt_info.touchDownTime[dev->mt_info.specialEventSlot], &elapsedTime);
           int jtime = elapsedTime.tv_sec * 1000000 + elapsedTime.tv_usec;
-          if (jtime <= (TOUCH_CLICK_DELAY * 2)) {
+          if (dev->mt_info.distanceX[dev->mt_info.specialEventSlot] < (dev->mtPalm * 2) &&
+              dev->mt_info.distanceY[dev->mt_info.specialEventSlot] < (dev->mtPalm * 2) &&
+              jtime <= (TOUCH_CLICK_DELAY * 2)) {
             usleep(TOUCH_CLICK_DELAY / 10);
             LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
             usleep(TOUCH_CLICK_DELAY / 10);
@@ -802,10 +846,10 @@ static bool evdev_mt_touchpad_handle_event(struct input_event *ev, struct input_
       }
       else {
         // record touch time
+        dev->mt_info.distanceX[dev->mt_info.mtSlot] = 0;
+        dev->mt_info.distanceY[dev->mt_info.mtSlot] = 0;
         dev->mt_info.lastX[dev->mt_info.mtSlot] = dev->mt_info.slotValueX[dev->mt_info.mtSlot];
         dev->mt_info.lastY[dev->mt_info.mtSlot] = dev->mt_info.slotValueY[dev->mt_info.mtSlot];
-        dev->mt_info.touchDownX[dev->mt_info.mtSlot] = dev->mt_info.slotValueX[dev->mt_info.mtSlot];
-        dev->mt_info.touchDownY[dev->mt_info.mtSlot] = dev->mt_info.slotValueY[dev->mt_info.mtSlot];
         dev->mt_info.touchDownTime[dev->mt_info.mtSlot] = ev->time;
         // recording touch event every time when event started
         dev->mt_info.upEventSlot = dev->mt_info.mtSlot;
@@ -877,6 +921,21 @@ static bool evdev_mt_touchpad_handle_event(struct input_event *ev, struct input_
     break;
   }
   return true;
+}
+
+static int evdev_check_input() {
+  int res = 0;
+  struct List_Node *nodePtr = NULL;
+
+  LIST_FOREACH(nodePtr, head_device, node) {
+    struct input_device *device = (struct input_device*)nodePtr->data;
+    if (device->is_mouse || device->is_keyboard)
+      res++;
+  }
+  if (gpNumForCheck > 0)
+    res++;
+
+  return res;
 }
 
 static bool evdev_handle_event(struct input_event *ev, struct input_device *dev) {
@@ -1378,18 +1437,21 @@ static bool evdev_handle_mapping_event(struct input_event *ev, struct input_devi
 }
 
 static void evdev_drain(void) {
-  for (int i = 0; i < numDevices; i++) {
+  // opt 0 is not remove deivce, -1 is remove all device
+  struct List_Node *nodePtr = NULL;
+  LIST_FOREACH(nodePtr, head_device, node) {
     struct input_event ev;
-    while (libevdev_next_event(devices[i].dev, LIBEVDEV_READ_FLAG_NORMAL, &ev) >= 0);
+    while (libevdev_next_event(((struct input_device *)nodePtr->data)->dev, LIBEVDEV_READ_FLAG_NORMAL, &ev) >= 0);
   }
 }
 
-static int mt_evdev_handle(int fd, void *data, int interval, uint32_t event) {
+static int mt_evdev_handle(int fd, void *data, int interval, uint32_t event, int slot) {
 #define EXIT_RES -2
 #define REMOVE_RES -1
 #define SUCCESS_RES 0
 #define FAILED_RES 1
   static int failed_times = 0;
+  int res;
 
   struct input_device *device = (struct input_device *)data;
   int rc;
@@ -1401,7 +1463,8 @@ static int mt_evdev_handle(int fd, void *data, int interval, uint32_t event) {
     switch (rc) {
     case LIBEVDEV_READ_STATUS_SUCCESS:
       if (!handler(&ev, device)) {
-        return EXIT_RES;
+        res = EXIT_RES;
+        goto direct_exit;
       }
       switch (ev.type) {
       case EV_SYN:
@@ -1409,8 +1472,8 @@ static int mt_evdev_handle(int fd, void *data, int interval, uint32_t event) {
         break;
       case EV_ABS:
         if (ev.code == ABS_MT_TRACKING_ID) {
-          device->mtLastEvent &= ~event;
-          return SUCCESS_RES;
+          res = SUCCESS_RES;
+          goto exit;
         }
         break;
       default:
@@ -1418,33 +1481,46 @@ static int mt_evdev_handle(int fd, void *data, int interval, uint32_t event) {
       }
       break;
     case -EAGAIN:
-      device->mtLastEvent &= ~event;
-      if (failed_times > 0) {
-        failed_times = 0;
-        return FAILED_RES;
+      if (failed_times > 12) {
+        res = FAILED_RES;
+        goto exit;
       }
       failed_times++;
       usleep(TOUCH_CLICK_DELAY / 10);
-      return mt_evdev_handle(fd, data, 3, event);
+      return mt_evdev_handle(fd, data, 6, event, slot);
     case LIBEVDEV_READ_STATUS_SYNC:
       fprintf(stderr, "Error:%s cannot keep up\n", libevdev_get_name(device->dev));
-      device->mtLastEvent &= ~event;
-      return FAILED_RES;
+      res = FAILED_RES;
+      goto exit;
     case -ENODEV:
-      device->mtLastEvent &= ~event;
       evdev_remove(device);
       // return success for not excute continue code
-      return REMOVE_RES;
+      res = REMOVE_RES;
+      goto direct_exit;
     default:
       if (rc < 0) {
-        fprintf(stderr, "Error occur from evdev device: %s\n", strerror(-rc));
-        return EXIT_RES;
+        fprintf(stderr, "Error occur from evdev device: %s, remove %s\n", strerror(-rc), device->path);
+        evdev_remove(device);
+        // return success for not excute continue code
+        res = REMOVE_RES;
+        if (evdev_check_input() <= 0) {
+          fprintf(stderr, "There is no avaliable input device! Exit now.\n");
+          res = EXIT_RES;
+        }
+        goto direct_exit;
       }
       break;
     }
   }
+
+  res = FAILED_RES;
+
+exit:
   device->mtLastEvent &= ~event;
-  return FAILED_RES;
+  failed_times = 0;
+
+direct_exit:
+  return res;
 #undef EXIT_RES
 #undef REMOVE_RES
 #undef SUCCESS_RES
@@ -1469,8 +1545,12 @@ static int evdev_handle(int fd, void *data) {
   if (rc == -ENODEV) {
     evdev_remove(device);
   } else if (rc != -EAGAIN && rc < 0) {
-    fprintf(stderr, "Error occur from evdev device: %s\n", strerror(-rc));
-    exit(EXIT_FAILURE);
+    fprintf(stderr, "Error occur from evdev device: %s, remove %s\n", strerror(-rc), device->path);
+    evdev_remove(device);
+    if (evdev_check_input() <= 0) {
+      fprintf(stderr, "There is no avaliable input device! Exit now.\n");
+      return LOOP_RETURN;
+    }
   }
   return LOOP_OK;
 }
@@ -1644,43 +1724,51 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
       fprintf(stderr, "Please use 'moonlight map -input %s >> ~/.config/moonlight/gamecontrollerdb.txt' for %s to create mapping\n", device, name);
       mappings = default_mapping;
     }
-
-    evdev_gamepads++;
   } else {
     if (verbose)
       printf("Not mapping %s as a gamepad\n", name);
     mappings = NULL;
   }
 
-  int dev = numDevices;
-  if (dev > maxEpollFds) {
-    fprintf(stderr, "lager than epoll max fd number\n");
-    exit(EXIT_FAILURE);
-  }
-  numDevices++;
+  struct input_device *dev = malloc(sizeof(struct input_device));
+  struct List_Node *nodePtr = malloc(sizeof(struct List_Node));
 
-  if (devices == NULL) {
-    devices = malloc(sizeof(struct input_device) * maxEpollFds);
-  }
-
-  if (devices == NULL) {
+  if (dev == NULL || nodePtr == NULL) {
+    if (dev)
+      free(dev);
+    if (nodePtr)
+      free(nodePtr);
     fprintf(stderr, "Not enough memory\n");
     exit(EXIT_FAILURE);
   }
 
-  memset(&devices[dev], 0, sizeof(devices[0]));
-  devices[dev].fd = fd;
-  devices[dev].dev = evdev;
-  devices[dev].map = mappings;
+  if (numDevices == 0) {
+    verboseMe = verbose;
+    // generate device list
+    LIST_INIT(head_device);
+  }
+
+  numDevices++;
+
+  memset(nodePtr, 0, sizeof(struct List_Node));
+  nodePtr->data = (void *) dev;
+  LIST_INSERT_HEAD(head_device, nodePtr, node);
+
+  memset(dev, 0, sizeof(struct input_device));
+  dev->fd = fd;
+  dev->path = malloc(1 + strlen(device) * sizeof(char));
+  memcpy(dev->path, device, 1 + strlen(device) * sizeof(char));
+  dev->dev = evdev;
+  dev->map = mappings;
   /* Set unused evdev indices to -2 to avoid aliasing with the default -1 in our mappings */
-  memset(&devices[dev].key_map, -2, sizeof(devices[dev].key_map));
-  memset(&devices[dev].abs_map, -2, sizeof(devices[dev].abs_map));
-  devices[dev].is_keyboard = is_keyboard;
-  devices[dev].is_mouse = is_mouse;
-  devices[dev].is_touchscreen = is_touchscreen;
-  devices[dev].rotate = rotate;
-  devices[dev].touchDownX = TOUCH_UP;
-  devices[dev].touchDownY = TOUCH_UP;
+  memset(&dev->key_map, -2, sizeof(dev->key_map));
+  memset(&dev->abs_map, -2, sizeof(dev->abs_map));
+  dev->is_keyboard = is_keyboard;
+  dev->is_mouse = is_mouse;
+  dev->is_touchscreen = is_touchscreen;
+  dev->rotate = rotate;
+  dev->touchDownX = TOUCH_UP;
+  dev->touchDownY = TOUCH_UP;
   if (!is_gamepad && is_mouse &&
       (libevdev_has_event_code(evdev, EV_ABS, ABS_MT_SLOT) && 
        libevdev_has_event_code(evdev, EV_KEY, BTN_TOOL_DOUBLETAP) && 
@@ -1688,13 +1776,13 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
        libevdev_has_event_code(evdev, EV_ABS, ABS_X))) {
     const struct input_absinfo *info = libevdev_get_abs_info(evdev, ABS_MT_SLOT);
     if (info && info->maximum < 10 && info->maximum > 0) {
-      devices[dev].mtPalm = (int)libevdev_get_abs_resolution(evdev, ABS_X) * 0.8;
-      devices[dev].mtXMax = libevdev_get_abs_maximum(evdev, ABS_X);
-      devices[dev].mtYMax = libevdev_get_abs_maximum(evdev, ABS_Y);
-      if (devices[dev].mtPalm <= 0 || devices[dev].mtXMax <= 0 || devices[dev].mtYMax <= 0) {
-        devices[dev].mtPalm = 0;
-        devices[dev].mtXMax = 0;
-        devices[dev].mtYMax = 0;
+      dev->mtPalm = (int)libevdev_get_abs_resolution(evdev, ABS_X) * 0.8;
+      dev->mtXMax = libevdev_get_abs_maximum(evdev, ABS_X);
+      dev->mtYMax = libevdev_get_abs_maximum(evdev, ABS_Y);
+      if (dev->mtPalm <= 0 || dev->mtXMax <= 0 || dev->mtYMax <= 0) {
+        dev->mtPalm = 0;
+        dev->mtXMax = 0;
+        dev->mtYMax = 0;
       }
     }
   }
@@ -1703,12 +1791,12 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
   int nbuttons = 0;
   /* Count joystick buttons first like SDL does */
   for (int i = BTN_JOYSTICK; i < KEY_MAX; ++i) {
-    if (libevdev_has_event_code(devices[dev].dev, EV_KEY, i))
-      devices[dev].key_map[i] = nbuttons++;
+    if (libevdev_has_event_code(dev->dev, EV_KEY, i))
+      dev->key_map[i] = nbuttons++;
   }
   for (int i = 0; i < BTN_JOYSTICK; ++i) {
-    if (libevdev_has_event_code(devices[dev].dev, EV_KEY, i))
-      devices[dev].key_map[i] = nbuttons++;
+    if (libevdev_has_event_code(dev->dev, EV_KEY, i))
+      dev->key_map[i] = nbuttons++;
   }
 
   int naxes = 0;
@@ -1716,36 +1804,36 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
     /* Skip hats */
     if (i == ABS_HAT0X)
       i = ABS_HAT3Y;
-    else if (libevdev_has_event_code(devices[dev].dev, EV_ABS, i)) {
-      devices[dev].abs_map[i] = naxes++;
+    else if (libevdev_has_event_code(dev->dev, EV_ABS, i)) {
+      dev->abs_map[i] = naxes++;
     }
   }
 
-  devices[dev].controllerId = -1;
-  devices[dev].haptic_effect_id = -1;
+  dev->controllerId = -1;
+  dev->haptic_effect_id = -1;
 
-  if (devices[dev].map != NULL) {
-    bool valid = evdev_init_parms(&devices[dev], &(devices[dev].xParms), devices[dev].map->abs_leftx);
-    valid &= evdev_init_parms(&devices[dev], &(devices[dev].yParms), devices[dev].map->abs_lefty);
-    valid &= evdev_init_parms(&devices[dev], &(devices[dev].zParms), devices[dev].map->abs_lefttrigger);
-    valid &= evdev_init_parms(&devices[dev], &(devices[dev].rxParms), devices[dev].map->abs_rightx);
-    valid &= evdev_init_parms(&devices[dev], &(devices[dev].ryParms), devices[dev].map->abs_righty);
-    valid &= evdev_init_parms(&devices[dev], &(devices[dev].rzParms), devices[dev].map->abs_righttrigger);
-    valid &= evdev_init_parms(&devices[dev], &(devices[dev].leftParms), devices[dev].map->abs_dpleft);
-    valid &= evdev_init_parms(&devices[dev], &(devices[dev].rightParms), devices[dev].map->abs_dpright);
-    valid &= evdev_init_parms(&devices[dev], &(devices[dev].upParms), devices[dev].map->abs_dpup);
-    valid &= evdev_init_parms(&devices[dev], &(devices[dev].downParms), devices[dev].map->abs_dpdown);
+  if (dev->map != NULL) {
+    bool valid = evdev_init_parms(dev, &(dev->xParms), dev->map->abs_leftx);
+    valid &= evdev_init_parms(dev, &(dev->yParms), dev->map->abs_lefty);
+    valid &= evdev_init_parms(dev, &(dev->zParms), dev->map->abs_lefttrigger);
+    valid &= evdev_init_parms(dev, &(dev->rxParms), dev->map->abs_rightx);
+    valid &= evdev_init_parms(dev, &(dev->ryParms), dev->map->abs_righty);
+    valid &= evdev_init_parms(dev, &(dev->rzParms), dev->map->abs_righttrigger);
+    valid &= evdev_init_parms(dev, &(dev->leftParms), dev->map->abs_dpleft);
+    valid &= evdev_init_parms(dev, &(dev->rightParms), dev->map->abs_dpright);
+    valid &= evdev_init_parms(dev, &(dev->upParms), dev->map->abs_dpup);
+    valid &= evdev_init_parms(dev, &(dev->downParms), dev->map->abs_dpdown);
     if (!valid)
       fprintf(stderr, "Mapping for %s (%s) on %s is incorrect\n", name, str_guid, device);
   }
 
   if (grabbingDevices && !fakeGrab && (is_keyboard || is_mouse || is_touchscreen)) {
-    if (libevdev_grab(devices[dev].dev, LIBEVDEV_GRAB) < 0) {
+    if (libevdev_grab(dev->dev, LIBEVDEV_GRAB) < 0) {
       fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
     }
   }
 
-  loop_add_fd1(devices[dev].fd, &evdev_handle, EPOLLIN, (void *)(&devices[dev]));
+  loop_add_fd1(dev->fd, &evdev_handle, EPOLLIN, (void *)(dev));
 }
 
 static void evdev_map_key(char* keyName, short* key) {
@@ -1828,7 +1916,7 @@ void evdev_map(char* device) {
   libevdev_free(evdev);
   close(fd);
 
-  if (ioctl(devices[0].fd, EVIOCGRAB, 1) < 0)
+  if (ioctl(((struct input_device *)(LIST_FIRST(head_device)->data))->fd, EVIOCGRAB, 1) < 0)
     fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
 
   handler = evdev_handle_mapping_event;
@@ -1854,14 +1942,14 @@ void evdev_map(char* device) {
   evdev_map_key("Start Button", &(map.btn_start));
   evdev_map_key("Special(Home) Button", &(map.btn_guide));
 
+  evdev_map_key("Left Bumper(Shoulder)", &(map.btn_leftshoulder));
+  evdev_map_key("Right Bumper(Shoulder)", &(map.btn_rightshoulder));
+
   bool ignored;
   evdev_map_abskey("Left Trigger", &(map.abs_lefttrigger), &(map.btn_lefttrigger), &ignored);
   evdev_map_abskey("Right Trigger", &(map.abs_righttrigger), &(map.btn_righttrigger), &ignored);
 
-  evdev_map_key("Left Bumper(Shoulder)", &(map.btn_leftshoulder));
-  evdev_map_key("Right Bumper(Shoulder)", &(map.btn_rightshoulder));
-
-  if (ioctl(devices[0].fd, EVIOCGRAB, 0) < 0)
+  if (ioctl(((struct input_device *)(LIST_FIRST(head_device)->data))->fd, EVIOCGRAB, 0) < 0)
     fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
 
   loop_destroy();
@@ -1884,7 +1972,7 @@ void evdev_start() {
 }
 
 void evdev_stop() {
-  evdev_drain();
+  evdev_remove_all();
 }
 
 void evdev_init(bool mouse_emulation_enabled) {
@@ -1893,9 +1981,12 @@ void evdev_init(bool mouse_emulation_enabled) {
 }
 
 static struct input_device* evdev_get_input_device(unsigned short controller_id) {
-  for (int i=0; i<numDevices; i++)
-    if (devices[i].controllerId == controller_id)
-      return &devices[i];
+  struct List_Node *nodePtr = NULL;
+  LIST_FOREACH(nodePtr, head_device, node) {
+    if(((struct input_device*)nodePtr->data)->controllerId == controller_id) {
+      return nodePtr->data;
+    }
+  }
 
   return NULL;
 }
@@ -1962,9 +2053,11 @@ void grab_window(bool grabstat) {
 #endif
     }
 
-    for (int i = 0; i < numDevices; i++) {
-      if (devices[i].is_keyboard || devices[i].is_mouse || devices[i].is_touchscreen) {
-        if (libevdev_grab(devices[i].dev, grabmode) < 0)
+    struct List_Node *nodePtr = NULL;
+    LIST_FOREACH(nodePtr, head_device, node) {
+      struct input_device *device = (struct input_device *)nodePtr->data;
+      if (device->is_keyboard || device->is_mouse || device->is_touchscreen) {
+        if (libevdev_grab(device->dev, grabmode) < 0)
           fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
       }
     }
@@ -2023,6 +2116,8 @@ static void send_controller_arrival_sdl(PGAMEPAD_STATE state) {
   unsigned int supportedButtonFlags = 0;
   unsigned short capabilities = 0;
   unsigned char type = LI_CTYPE_UNKNOWN;
+  // for check gamepad num
+  gpNumForCheck++;
 
   for (int i = 0; i < SDL_arraysize(SDL_TO_LI_BUTTON_MAP); i++) {
     if (SDL_GameControllerHasButton(state->controller, (SDL_GameControllerButton)i)) {
@@ -2158,6 +2253,8 @@ static void remove_gamepad(SDL_JoystickID sdl_id) {
 
       memset(&gamepads[i], 0, sizeof(*gamepads));
       sdl_gamepads--;
+      // for check gamepad num
+      gpNumForCheck--;
       break;
     }
   }

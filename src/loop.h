@@ -18,8 +18,8 @@
  */
 
 #include <sys/epoll.h>
+#include <sys/queue.h>
 
-#define maxEpollFds 150
 #define LOOP_RETURN 1
 #define LOOP_OK 0
 
@@ -30,6 +30,11 @@ struct FD_Function {
   void*   data;
   int     fd;
   int     events;
+};
+
+struct List_Node {
+  LIST_ENTRY(List_Node) node;
+  void *data;
 };
 
 void loop_add_fd(int fd, Fd_Handler handler, int events);

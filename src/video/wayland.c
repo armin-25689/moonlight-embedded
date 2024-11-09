@@ -331,6 +331,7 @@ static void wl_close_display() {
       wl_seat_release(wl_seat);
       wl_seat = NULL;
     }
+/*
     xdg_toplevel_destroy(xdg_toplevel);
     xdg_surface_destroy(xdg_surface);
     xdg_wm_base_destroy(xdg_wm_base);
@@ -341,6 +342,7 @@ static void wl_close_display() {
     wl_compositor_destroy(compositor);
     wl_registry_destroy(registry);
     wl_egl_window_destroy(wl_window);
+*/
     wl_display_disconnect(wl_display);
     wl_display = NULL;
     wl_window = NULL;
