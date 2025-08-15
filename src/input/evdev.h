@@ -21,6 +21,10 @@
 
 #define GRABCODE "grab"
 #define UNGRABCODE "ungrab"
+#define FAKEGRABCODE "fakegrab"
+#define UNFAKEGRABCODE "unfakegrab"
+#define EVDEV_HANDLE_BY_WINDOW 1
+#define EVDEV_HANDLE_BY_EVDEV 0
 
 extern int evdev_gamepads;
 
@@ -38,3 +42,5 @@ void evdev_init_vars(bool isfakegrab, bool issdlgp, bool isswapxyab, bool isinpu
 int x11_sdl_init(char* mappings);
 void grab_window(bool grabstate);
 void fake_grab_window(bool grabstate);
+void evdev_pass_mouse_mode(bool handled_by_window);
+void evdev_switch_mouse_mode(bool handled_by_window);

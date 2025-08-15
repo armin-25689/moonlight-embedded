@@ -52,11 +52,14 @@ typedef struct _CONFIGURATION {
   bool swapxyab;
   bool yuv444;
   bool fakegrab;
+  bool fixed_resolution;
+  bool fill_resolution;
   bool less_threads;
 } CONFIGURATION, *PCONFIGURATION;
 
 extern bool inputAdded;
+extern long long int window_configure;
 
 bool config_file_parse(char* filename, PCONFIGURATION config);
 void config_parse(int argc, char* argv[], PCONFIGURATION config);
-void config_clear();
+void config_clear(PCONFIGURATION config);

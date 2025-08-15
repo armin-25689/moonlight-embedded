@@ -40,6 +40,8 @@ struct Render_Init_Info {
   bool is_full_screen;
   bool is_yuv444;
   bool use_display_buffer;
+  bool fixed_resolution;
+  bool fill_resolution;
   int egl_platform;
   void *display;
   void *window;
@@ -67,6 +69,7 @@ struct RENDER_CALLBACK {
   void (*render_destroy) ();
   int (*render_map_buffer) (struct Source_Buffer_Info *buffer, int planes, int composeOrSeperate, void* image[4]);
   void (*render_unmap_buffer) (void* image[4], int planes);
+  void (*render_sync_window_size) (int width, int height, bool isFullScreen);
 };
 
 extern struct RENDER_CALLBACK egl_render;

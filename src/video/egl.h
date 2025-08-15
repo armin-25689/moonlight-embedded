@@ -70,6 +70,8 @@ struct EGL_Base {
   GLuint packed_fragment_shader;
   bool eglVSync;
   bool display_buffer;
+  bool fixed_resolution;
+  bool fill_resolution;
   struct Import_Buffer_Info *back_out_fb;
 };
 

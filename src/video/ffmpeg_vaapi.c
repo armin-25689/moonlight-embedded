@@ -376,7 +376,7 @@ int vaapi_export_egl_images(AVFrame *frame, void *eglImages[4], void **descripto
     return -1;
   }
 
-  st = vaSyncSurface2(va_ctx->display, surface_id, 10000000000);
+  st = vaSyncSurface2(va_ctx->display, surface_id, 5000000000);
   if (st != VA_STATUS_SUCCESS) {
     fprintf(stderr, "Ffmpeg_vaapi: vaSyncSurface2() Failed: %d\n", st);
     goto sync_fail;

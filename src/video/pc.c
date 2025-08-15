@@ -35,11 +35,9 @@
 #include "video.h"
 #include "render.h"
 
-#ifdef HAVE_X11
-#include "../input/x11.h"
-#endif
-
 #include "../input/evdev.h"
+#include "../platform.h"
+#include "../config.h"
 #include "../loop.h"
 #include "../util.h"
 
@@ -134,17 +132,26 @@ static void clear_threads() {
 
 static int window_op_handle (int pipefd, void *data) {
   char *opCode = NULL;
+  struct WINDOW_OP op = {0};
+  int flags = 0;
 
   while (read(pipefd, &opCode, sizeof(char *)) > 0);
   if (strcmp(opCode, QUITCODE) == 0) {
     return LOOP_RETURN;
-#ifdef HAVE_WAYLAND
-  } else if (strcmp(opCode, GRABCODE) == 0) {
-    disPtr->display_change_cursor("hide");
-  } else if (strcmp(opCode, UNGRABCODE) == 0) {
-    disPtr->display_change_cursor("display");
+#if defined(HAVE_WAYLAND) || defined(HAVE_X11)
+  } else if (strcmp(opCode, GRABCODE) == 0 || strcmp(opCode, FAKEGRABCODE) == 0) {
+    flags |= (INPUTING | HIDE_CURSOR);
+    op.hide_cursor = true;
+    if (strcmp(opCode, FAKEGRABCODE) == 0)
+      op.inputing = true;
+  } else if (strcmp(opCode, UNGRABCODE) == 0 || strcmp(opCode, UNFAKEGRABCODE) == 0) {
+    flags |= ((strcmp(opCode, UNGRABCODE) == 0 ? INPUTING : 0) | HIDE_CURSOR);
+    if (strcmp(opCode, UNFAKEGRABCODE) == 0)
+      op.inputing = true;
 #endif
   }
+
+  disPtr->display_modify_window(&op, flags);
 
   return LOOP_OK;
 }
@@ -210,9 +217,17 @@ static int frame_handle (int pipefd, void *data) {
     current_frame[1] = next_frame[1];
     next_frame[1] = (current_frame[1] + 1) % MAX_FB_NUM;
     draw_frame(frame, current_frame[1], &current_frame[2], &res);
+    int dis_res = -1;
     if (res != LOOP_RETURN) {
-      disPtr->display_put_to_screen(display_width, display_height, current_frame[2]);
+      dis_res = disPtr->display_put_to_screen(display_width, display_height, current_frame[2]);
     }
+    if (dis_res == NEED_CHANGE_WINDOW_SIZE) {
+      if (renderPtr->render_sync_window_size) {
+        disPtr->display_get_resolution(&display_width, &display_height, false);
+        renderPtr->render_sync_window_size(display_width, display_height, false);
+      }
+    }
+
     return res;
   }
 
@@ -220,6 +235,8 @@ static int frame_handle (int pipefd, void *data) {
 }
 
 static void* frame_handler (void *data) {
+
+  pthread_setname_np(threads.render_id, "m_render_t");
 
   while (!done) {
     current_frame[1] = next_frame[1];
@@ -241,11 +258,18 @@ static void* frame_handler (void *data) {
       draw_frame(frames[current_frame[1]], current_frame[1], &current_frame[2], &res);
       if (res == LOOP_RETURN) {
         done = true;
-        continue;
       }
-      if (disPtr->display_put_to_screen(display_width, display_height, current_frame[2]) < 0) {
-        done = true;
-        continue;
+      else {
+        int dis_res = disPtr->display_put_to_screen(display_width, display_height, current_frame[2]);
+        if (dis_res < 0) {
+          done = true;
+        }
+        else if (dis_res == NEED_CHANGE_WINDOW_SIZE) {
+          if (renderPtr->render_sync_window_size) {
+            disPtr->display_get_resolution(&display_width, &display_height, false);
+            renderPtr->render_sync_window_size(display_width, display_height, false);
+          }
+        }
       }
       pthread_mutex_lock(&threads.mutex);
       frames[current_frame[1]] = NULL;
@@ -266,6 +290,7 @@ static void* frame_handler (void *data) {
 // declare funtion here
 int x11_submit_decode_unit(PDECODE_UNIT decodeUnit);
 static void* decoder_thread(void *data) {
+  pthread_setname_np(threads.decoder_id, "m_decoder_t");
 
   while (!done) {
     VIDEO_FRAME_HANDLE handle;
@@ -279,10 +304,6 @@ static void* decoder_thread(void *data) {
     LiCompleteVideoFrame(handle, status);
     if (status == DR_OK) {
       sem_post(&threads.render_sem);
-    }
-
-    if (LiGetPendingVideoFrames() > 13) {
-      fprintf(stderr, "WARNING: Use -bitrate N options to reduce bitrate for avoding lag!\n");
     }
   }
 
@@ -425,7 +446,7 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
 
   if (disPtr->display_setup(width, height, drFlags) == -1)
     return -1;
-  disPtr->display_get_resolution(&screen_width, &screen_height);
+  disPtr->display_get_resolution(&screen_width, &screen_height, true);
   window = disPtr->display_get_window();
   printf("Based %s window\n", disPtr->name);
 
@@ -473,10 +494,12 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   renderParas.is_full_screen = drFlags & DISPLAY_FULLSCREEN;
   renderParas.is_yuv444 = isYUV444;
   renderPtr->decoder_type = ffmpeg_decoder;
+  renderParas.fixed_resolution = drFlags & FIXED_RESOLUTION;
+  renderParas.fill_resolution = drFlags & FILL_RESOLUTION;
   if (renderPtr->display_name != NULL) {
     renderPtr->display_name = disPtr->name;
   }
-  if (strcmp(disPtr->name, "gbm") ==0)
+  if (strcmp(disPtr->name, "gbm") == 0)
     renderParas.use_display_buffer = true;
   renderParas.display_exported_buffer = disPtr->display_exported_buffer_info;
   if (renderPtr->render_init != NULL) {
@@ -497,8 +520,12 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
     threads.created = true;
     threads.frame_handler = frame_handler;
     threads.decoder_handler = decoder_thread;
-    pthread_mutex_init(&threads.mutex, NULL);
+    pthread_mutexattr_t mattr;
+    pthread_mutexattr_init(&mattr);
+    pthread_mutexattr_setprotocol(&mattr, PTHREAD_PRIO_INHERIT);
+    pthread_mutex_init(&threads.mutex, &mattr);
     pthread_cond_init(&threads.cond, NULL);
+    pthread_mutexattr_destroy(&mattr);
     sem_init(&threads.render_sem, 0, 0);
     if (pthread_create(&threads.render_id, NULL, threads.frame_handler, &pipefd[0]) != 0 ||
         pthread_create(&threads.decoder_id, NULL, threads.decoder_handler, &pipefd[0]) != 0) {
@@ -506,6 +533,8 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
       fprintf(stderr, "Error: Cannot create decoder/render/dislpay thread! Please try again or try direct submit mode.\n");
       return -1;
     }
+    pthread_setprio(threads.render_id, 96);
+    pthread_setprio(threads.decoder_id, 96);
   }
 
   if (!threads.created) {
@@ -518,8 +547,14 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   }
 
   evdev_trans_op_fd(windowpipefd[1]);
+  if (strcmp(disPtr->name, "x11") == 0 || strcmp(disPtr->name, "wayland") == 0)
+    evdev_pass_mouse_mode(true);
 
-  disPtr->display_setup_post((void *)&windowpipefd[1]);
+  struct _WINDOW_PROPERTIES window_properties = {0};
+  window_properties.fd = windowpipefd[1];
+  window_properties.configure = &window_configure;
+ 
+  disPtr->display_setup_post((void *)&window_properties);
 
   firstDraw = true;
 
@@ -548,7 +583,11 @@ void x11_cleanup() {
   }
   renderPtr->render_destroy();
   ffmpeg_destroy();
-  disPtr->display_close_display();
+
+  struct _WINDOW_PROPERTIES window_properties = {0};
+  window_properties.configure = &window_configure;
+  disPtr->display_close_display((void *)&window_properties);
+
   disPtr = NULL;
   renderPtr = NULL;
 }

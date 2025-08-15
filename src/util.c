@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libgen.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -94,4 +95,48 @@ int get_drm_render_fd(char exportedPath[64]) {
   }
 
   return fd;
+}
+
+static int mkdir_p_for_file(char *path) {
+  char inpath[255] = {0};
+
+  if (path == NULL)
+    return -1;
+
+  strcpy(inpath, path);
+  dirname(inpath);
+  if (access(inpath, W_OK) == 0) {
+    return 0;
+  }
+  else if (strcmp(path, inpath) == 0) {
+    perror("Cannot create the directory");
+    return -1;
+  }
+  else {
+    if (mkdir_p_for_file(inpath) == 0) {
+      if (mkdir(inpath, 0755) < 0)
+        perror("Cannot create directory");
+      return 0;
+     }
+     else
+      return -1;
+  }
+  
+  return -1;
+}
+
+int create_file(char *filename) {
+  if (mkdir_p_for_file(filename) != 0)
+    return -1;
+  int fd = open(filename,  O_WRONLY | O_CREAT, 0644);
+  if (fd < 0) {
+    perror("Cannot create the file");
+    return -1;
+  }
+  else {
+    close(fd);
+    return 0;
+  }
+
+  return -1;
 }

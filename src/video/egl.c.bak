@@ -403,7 +403,8 @@ static void egl_sync_window_size(int width, int height, bool isfullscreen) {
   if (egl_base.screen_height == height && egl_base.screen_width == width)
     isFullScreen = true;
 
-  int screen_w, screen_h, offset_x = 0, offset_y = 0;
+  int screen_w;
+  int screen_h;
   float multi_w = (window_info.frame_width / (float)egl_base.screen_width);
   float multi_h = (window_info.frame_height / (float)egl_base.screen_height);
   float multi = multi_w > multi_h ? multi_w : multi_h;
@@ -416,41 +417,23 @@ static void egl_sync_window_size(int width, int height, bool isfullscreen) {
     screen_w = width;
     screen_h = height;
   }
+  screen_w = (int)(screen_w * (egl_base.screen_height / (float)window_info.frame_height)) * multi;
+  screen_h = (int)(screen_h * (egl_base.screen_width / (float)window_info.frame_width)) * multi;
 
-  // for fixed resolution ratio
-  if (egl_base.fixed_resolution) {
-    if ((width / (float)height) < (window_info.frame_width / (float)window_info.frame_height)) {
-      screen_w = width;
-      screen_h = (int)width * window_info.frame_height / (float)window_info.frame_width;
-    }
-    else {
-      screen_w = (int)height * window_info.frame_width / (float)window_info.frame_height;
-      screen_h = height;
-    }
-  }
-
-  if (egl_base.fill_resolution) {
-    screen_w = (int)(screen_w * (egl_base.screen_height / (float)window_info.frame_height)) * multi;
-    screen_h = (int)(screen_h * (egl_base.screen_width / (float)window_info.frame_width)) * multi;
-  }
-
-  offset_x = (int)((isFullScreen ? egl_base.screen_width : width) - screen_w) / 2;
-  offset_y = (int)((isFullScreen ? egl_base.screen_height : height) - screen_h) / 2 ;
-
-  if (egl_render.decoder_type == SOFTWARE && window_info.frame_width != egl_base.width) {
-    // cut display area,importent for software decoder
-    screen_w = (int)screen_w * (multi_w > multi_h ? (egl_base.fill_resolution ? (1 / multi) : (egl_base.width / (float)window_info.frame_width)) : (egl_base.width / (float)window_info.frame_width));
-  }
-/*
-  else if (egl_base.display_buffer) {
-    window_info.view_width = width;
-    window_info.view_height = height;
-  }
-*/
+  int offset_x = (int)((isFullScreen ? egl_base.screen_width : width) - screen_w) / 2;
+  int offset_y = (int)((isFullScreen ? egl_base.screen_height : height) - screen_h) / 2 ;
 
   window_info.view_width = screen_w;
   window_info.view_height = screen_h;
 
+  if (egl_render.decoder_type == SOFTWARE && window_info.frame_width != egl_base.width) {
+    // cut display area,importent for software decoder
+    window_info.view_width = (int)screen_w * (multi_w > multi_h ? (1 / multi) : (egl_base.width / (float)window_info.frame_width));
+  }
+  else if (egl_base.display_buffer) {
+    window_info.view_width = egl_base.screen_width;
+    window_info.view_height = egl_base.screen_height;
+  }
   glViewport(offset_x, offset_y, window_info.view_width, window_info.view_height);
 
   return;
@@ -470,8 +453,6 @@ static int egl_init(struct Render_Init_Info *paras) {
   egl_base.screen_height = paras->screen_height;
   bool is_full_screen = paras->is_full_screen;
   egl_base.display_buffer = paras->use_display_buffer;
-  egl_base.fixed_resolution = paras->fixed_resolution;
-  egl_base.fill_resolution = paras->fill_resolution;
 
   // glteximage2d needs the width that must to be a multiple of 64 because it has a 
   // minimum width of 64
@@ -609,6 +590,7 @@ static inline void draw_texture() {
   }
 
   glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+  glBindVertexArray(0);
 }
 
 static inline void egl_draw_soft(uint8_t* image[3]) {
@@ -682,6 +664,8 @@ static void egl_choose_config_from_frame(struct Render_Config *config) {
 }
 
 static int egl_draw(union Render_Image images) {
+  eglMakeCurrent(display, surface, surface, context);
+
   if (eglsync != EGL_NO_SYNC)
     eglDestroySync(display, eglsync);
 
@@ -704,8 +688,6 @@ static int egl_draw(union Render_Image images) {
     egl_draw_soft(images.frame_data);
   }
 
-  glBindVertexArray(0);
-
   eglsync = eglCreateSync(display, EGL_SYNC_FENCE, NULL);
 
   if (!egl_base.display_buffer) {
@@ -717,10 +699,7 @@ static int egl_draw(union Render_Image images) {
 
   if (egl_base.eglVSync) {
     if (eglsync != EGL_NO_SYNC) {
-      // wait 5 second,will exit when expired
-      if (eglClientWaitSync(display, eglsync, EGL_SYNC_FLUSH_COMMANDS_BIT, 5000000000) == EGL_TIMEOUT_EXPIRED) {
-        return -1;
-      }
+      eglClientWaitSync(display, eglsync, EGL_SYNC_FLUSH_COMMANDS_BIT, EGL_FOREVER);
     }
   }
 

@@ -179,7 +179,7 @@ static void* gbm_get_window() {
   return gbm_window;
 }
 
-static void gbm_get_resolution(int *width, int *height) {
+static void gbm_get_resolution(int *width, int *height, bool isfullscreen) {
   *width = drmInfoPtr->width;
   *height = drmInfoPtr->height;
   return;
@@ -215,7 +215,7 @@ static void gbm_clear_image_cache () {
   }
 }
 
-static void gbm_close_display () {
+static void gbm_close_display (void *data) {
   drm_restore_display();
   gbm_clear_image_cache();
   if (gbm_window)
@@ -233,7 +233,7 @@ static void gbm_close_display () {
 }
 
 static void gbm_setup_post(void *data) {};
-static void gbm_change_cursor(const char *op) {};
+static void gbm_change_cursor(struct WINDOW_OP *op, int flags) {}
 static void gbm_export_bo(struct Source_Buffer_Info buffers[MAX_FB_NUM], int *buffer_num, int *plane_num) {
   *buffer_num = MAX_FB_NUM;
   *plane_num = 1;
@@ -254,7 +254,7 @@ struct DISPLAY_CALLBACK display_callback_gbm = {
   .display_setup_post = gbm_setup_post,
   .display_put_to_screen = gbm_display_done,
   .display_get_resolution = gbm_get_resolution,
-  .display_change_cursor = gbm_change_cursor,
+  .display_modify_window = gbm_change_cursor,
   .display_vsync_loop = gbm_vsync_loop,
   .display_exported_buffer_info = gbm_export_bo,
   .renders = EGL_RENDER,

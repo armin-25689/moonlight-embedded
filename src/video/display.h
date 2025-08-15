@@ -22,6 +22,19 @@
 #define QUITCODE "quit"
 // compitible for some uint32_t format 
 #define NOT_CARE 0
+#define NEED_CHANGE_WINDOW_SIZE 1
+#define INPUTING 0x01
+#define HIDE_CURSOR 0x02
+
+struct WINDOW_OP {
+  bool hide_cursor;
+  bool inputing;
+};
+
+struct _WINDOW_PROPERTIES {
+  int fd;
+  long long int *configure;
+};
 
 struct DISPLAY_CALLBACK {
   char *name;
@@ -31,12 +44,12 @@ struct DISPLAY_CALLBACK {
   bool hdr_support;
   void* (*display_get_display) (const char* *device);
   void* (*display_get_window) ();
-  void (*display_close_display) ();
+  void (*display_close_display) (void *data);
   int (*display_setup) (int width, int height, int drFlags);
   void (*display_setup_post) (void *data);
   int (*display_put_to_screen) (int width, int height, int index);
-  void (*display_get_resolution) (int* width, int* height);
-  void (*display_change_cursor) (const char *oprate);
+  void (*display_get_resolution) (int* width, int* height, bool isfullscreen);
+  void (*display_modify_window) (struct WINDOW_OP *oprate, int flags);
   int (*display_vsync_loop) (bool *exit, int *index, void(*loop_pre)(void), void(*loop_post)(void));
   void (*display_exported_buffer_info) (struct Source_Buffer_Info *buffer, int *buffersNum, int *planesNum);
   int renders;

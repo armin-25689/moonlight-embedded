@@ -66,7 +66,11 @@ static int keyboardpipefd = -1;
 static const char *quitstate = QUITCODE;
 static const char *grabcode = GRABCODE;
 static const char *ungrabcode = UNGRABCODE;
+static const char *fakegrabcode = FAKEGRABCODE;
+static const char *unfakegrabcode = UNFAKEGRABCODE;
 
+static bool not_handle_mouse_motion = false;
+static bool not_handle_mouse_motion_var = false;
 static bool waitingToSwitchGrabOnModifierUp = false;
 static bool isGrabKeyRelease = false;
 static bool isUseKbdmux = false;
@@ -198,7 +202,7 @@ static short* currentHatDir;
 static short* currentAbs;
 static bool* currentReverse;
 
-static bool grabbingDevices;
+static bool grabbingDevices = false;
 static bool mouseEmulationEnabled;
 
 static bool waitingToExitOnModifiersUp = false;
@@ -642,6 +646,10 @@ static bool evdev_mt_touchpad_handle_event(struct input_event *ev, struct input_
       break;
     }
 
+    if (not_handle_mouse_motion_var && fakeGrab) {
+      dev->mouseDeltaX = 0;
+      dev->mouseDeltaY = 0;
+    }
     if (dev->mouseDeltaX != 0 || dev->mouseDeltaY != 0) {
       switch (dev->rotate) {
       case 90:
@@ -947,6 +955,10 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
 
   switch (ev->type) {
   case EV_SYN:
+    if (not_handle_mouse_motion_var && fakeGrab) {
+      dev->mouseDeltaX = 0;
+      dev->mouseDeltaY = 0;
+    }
     if (dev->mouseDeltaX != 0 || dev->mouseDeltaY != 0) {
       switch (dev->rotate) {
       case 90:
@@ -1062,6 +1074,7 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
             grab_window(false);
             isInputing = true;
             fakeGrab = true;
+            fake_grab_window(true);
           }
           else {
             grab_window(!isGrabed);
@@ -1965,9 +1978,6 @@ void evdev_start() {
   if (!fakeGrab)
     grab_window(true);
 
-  // Any new input devices detected after this point will be grabbed immediately
-  grabbingDevices = true;
-
   // Handle input events until the quit combo is pressed
 }
 
@@ -2026,10 +2036,16 @@ void fake_grab_window(bool grabstat) {
     return;
   freeallkey();
   evdev_drain();
+
+  if (not_handle_mouse_motion)
+    not_handle_mouse_motion_var = true;
+
 #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM)
-  write(keyboardpipefd, !grabstat ? &ungrabcode : &grabcode, sizeof(char *));
+  if (keyboardpipefd > -1)
+    write(keyboardpipefd, !grabstat ? &unfakegrabcode : &fakegrabcode, sizeof(char *));
 #endif
   isInputing = grabstat;
+  grabbingDevices = false;
 }
 
 void grab_window(bool grabstat) {
@@ -2040,16 +2056,23 @@ void grab_window(bool grabstat) {
   if (grabstat != isGrabed) {
     if (!grabstat) {
       grabmode = LIBEVDEV_UNGRAB;
+      grabbingDevices = false;
+      if (not_handle_mouse_motion)
+        not_handle_mouse_motion_var = true;
     } else {
+      // Any new input devices detected after this point will be grabbed immediately
+      grabbingDevices = true;
       grabmode = LIBEVDEV_GRAB;
       fakeGrab = false;
+      not_handle_mouse_motion_var = false;
     }
     isInputing = grabstat;
     isGrabed = grabstat;
 
     if (!(!fakeGrab && fakeGrabKey)) {
 #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM)
-      write(keyboardpipefd, !grabstat ? &ungrabcode : &grabcode, sizeof(char *));
+      if (keyboardpipefd > -1)
+        write(keyboardpipefd, !grabstat ? &ungrabcode : &grabcode, sizeof(char *));
 #endif
     }
 
@@ -2066,6 +2089,15 @@ void grab_window(bool grabstat) {
 
 void evdev_trans_op_fd(int pipefd) {
   keyboardpipefd = pipefd;
+}
+
+void evdev_pass_mouse_mode(bool handled_by_window) {
+  not_handle_mouse_motion = handled_by_window;
+  not_handle_mouse_motion_var = handled_by_window;
+}
+
+void evdev_switch_mouse_mode(bool handled_by_window) {
+  not_handle_mouse_motion_var = handled_by_window;
 }
 
 #ifdef HAVE_SDL
@@ -2407,7 +2439,9 @@ static int x11_sdl_event_handle(void *pointer) {
     switch (x11_sdlinput_handle_event(&event)) {
     case SDL_QUIT_APPLICATION:
 #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM)
-      write(keyboardpipefd, &quitstate, sizeof(char *));
+      if (keyboardpipefd > -1) {
+        write(keyboardpipefd, &quitstate, sizeof(char *));
+      }
 #endif
       done = true;
       break;

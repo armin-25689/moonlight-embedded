@@ -36,24 +36,20 @@
 static Display *display = NULL;
 static Window window;
 
-static int display_width, display_height, screen_width, screen_height;
+static int screen_width, screen_height;
 static int frame_width, frame_height;
 
 static bool startedMuiltiThreads = false;
 
-/*
 static void x_multi_threads() {
   if (!startedMuiltiThreads) {
     XInitThreads();
     startedMuiltiThreads = true;
   }
 }
-*/
 
 static void* x_get_display(const char* *device) {
-/*
   x_multi_threads();
-*/
   if (display == NULL) {
     display = XOpenDisplay(*device);
   }
@@ -64,20 +60,27 @@ static void* x_get_display(const char* *device) {
   return display;
 }
 
-static void x_close_display() {
-  if (startedMuiltiThreads) {
-    XFreeThreads();
-    startedMuiltiThreads = false;
-  }
+static void x_close_display(void *data) {
+  struct _WINDOW_PROPERTIES *wp = data;
+  XWindowAttributes wattr = {0};
+  XGetWindowAttributes(display, window, &wattr);
+  *(wp->configure) = (((int64_t)wattr.x) << 48) | (((int64_t)wattr.y) << 32) | (((int64_t)wattr.width) << 16) | (int64_t)wattr.height;
   if (display != NULL) {
     XCloseDisplay(display);
     display = NULL;
   }
 }
 
-static void x_get_resolution (int *width, int *height) {
-  *width = screen_width;
-  *height = screen_height;
+static void x_get_resolution (int *width, int *height, bool isfullscreen) {
+  if (isfullscreen) {
+    *width = screen_width;
+    *height = screen_height;
+  }
+  else {
+    *width = x_display_width;
+    *height = x_display_height;
+  }
+  return;
 }
 
 static int x_setup(int width, int height, int drFlags) {
@@ -91,17 +94,25 @@ static int x_setup(int width, int height, int drFlags) {
   screen_width = WidthOfScreen(screen);
   screen_height = HeightOfScreen(screen);
   if (drFlags & DISPLAY_FULLSCREEN) {
-    display_width = screen_width;
-    display_height = screen_height;
+    x_display_width = screen_width;
+    x_display_height = screen_height;
   } else {
-    display_width = width;
-    display_height = height;
+    x_display_width = width;
+    x_display_height = height;
   }
 
   Window root = DefaultRootWindow(display);
-  XSetWindowAttributes winattr = { .event_mask = FocusChangeMask | EnterWindowMask | LeaveWindowMask};
-  window = XCreateWindow(display, root, 0, 0, display_width, display_height, 0, CopyFromParent, InputOutput, CopyFromParent, CWEventMask, &winattr);
-  XSelectInput(display, window, StructureNotifyMask);
+  XSetWindowAttributes winattr = { .event_mask = StructureNotifyMask | FocusChangeMask | EnterWindowMask | LeaveWindowMask | PointerMotionMask | ButtonPressMask | ButtonReleaseMask | KeyPressMask | KeyReleaseMask };
+  window = XCreateWindow(display, root, 0, 0, x_display_width, x_display_height, 0, CopyFromParent, InputOutput, CopyFromParent, CWEventMask, &winattr);
+
+  XWMHints *hint = XAllocWMHints();
+  if (hint) {
+    hint->flags = InputHint;
+    hint->input = true;
+    XSetWMHints(display, window, hint);
+    XFree(hint);
+  }
+
   XMapWindow(display, window);
   XStoreName(display, window, "Moonlight");
 
@@ -131,9 +142,38 @@ static void* x_get_window() {
   return &window;
 }
 
-static void x_setup_post(void *data) {};
-static int x_put_to_screen(int w, int h, int i) { return 0; };
-static void x_change_cursor(const char *op) {};
+static void x_setup_post(void *data) {
+  struct _WINDOW_PROPERTIES *wp = data;
+  int32_t size = *wp->configure & 0x00000000FFFFFFFF;
+  int32_t offset = (*wp->configure & 0xFFFFFFFF00000000) >> 32;
+  if (size != 0) {
+    XResizeWindow(display, window, size >> 16, size & 0x0000FFFF);
+  }
+  if (offset != 0) {
+    XMoveWindow(display, window, offset >> 16, offset & 0x0000FFFF);
+  }
+
+  return;
+}
+static void x_change_cursor(struct WINDOW_OP *op, int flags) {
+  if (flags & INPUTING) {
+    x11_change_input_stat(op->inputing);
+    if ((flags & HIDE_CURSOR) && !op->hide_cursor && !op->inputing)
+      x11_keep_display_cursor(true);
+    else if ((flags & HIDE_CURSOR) && op->hide_cursor)
+      x11_keep_display_cursor(false);
+  }
+
+  return;
+}
+
+static int x_put_to_screen(int width, int height, int i) {
+// return 1 means need change window size
+  if (x_display_width != width || x_display_height != height) {
+    return NEED_CHANGE_WINDOW_SIZE;
+  }
+  return 0;
+}
 
 static int x_render_init(struct Render_Init_Info *paras) {
   frame_width = paras->frame_width;
@@ -146,7 +186,7 @@ static int x_render_init(struct Render_Init_Info *paras) {
 static void x_render_destroy() {};
 static int x_render_create(struct Render_Init_Info *paras) { return 0; };
 static int x_draw(union Render_Image image) { 
-  vaapi_queue(image.frame_data, window, display_width, display_height, frame_width, frame_height);
+  vaapi_queue(image.frame_data, window, x_display_width, x_display_height, frame_width, frame_height);
   return 0;
 }
 
@@ -162,7 +202,7 @@ struct DISPLAY_CALLBACK display_callback_x11 = {
   .display_setup_post = x_setup_post,
   .display_put_to_screen = x_put_to_screen,
   .display_get_resolution = x_get_resolution,
-  .display_change_cursor = x_change_cursor,
+  .display_modify_window = x_change_cursor,
   .display_vsync_loop = NULL,
   .display_exported_buffer_info = NULL,
   .renders = (EGL_RENDER | X11_RENDER),
@@ -180,4 +220,5 @@ struct RENDER_CALLBACK x11_render = {
   .render_sync_config = NULL,
   .render_draw = x_draw,
   .render_destroy = x_render_destroy,
+  .render_sync_window_size = NULL,
 };

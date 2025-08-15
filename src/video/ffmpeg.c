@@ -73,10 +73,10 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
   ffmpeg_decoder = perf_lvl & VAAPI_ACCELERATION ? VAAPI : SOFTWARE;
   if (wantYuv444 && !(videoFormat & VIDEO_FORMAT_MASK_YUV444)) {
     if (supportedVideoFormat) {
-      printf("Could not start yuv444 stream because of server support, fallback to yuv420 format\n");
+      printf("WARENING: Could not start yuv444 stream because of server support, fallback to yuv420 format,please try '-codec hevc -yuv444' option\n");
     }
     else {
-      printf("Could not start yuv444 stream because of client support, fallback to yuv420 format\n");
+      printf("WARNING: Could not start yuv444 stream because of client support, fallback to yuv420 format\n");
     }
   }
   if (wantHdr && !(videoFormat & VIDEO_FORMAT_MASK_10BIT)) {
@@ -91,12 +91,7 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
   }
 
   for (int try = 0; try < 6; try++) {
-    if (videoFormat & VIDEO_FORMAT_MASK_AV1) {
-      if (ffmpeg_decoder == SOFTWARE) {
-        if (try == 0) decoder = avcodec_find_decoder_by_name("libdav1d");
-      }
-      if (try == 1) decoder = avcodec_find_decoder_by_name("av1"); // Hwaccel
-    } else if (videoFormat & VIDEO_FORMAT_MASK_H265) {
+    if (videoFormat & VIDEO_FORMAT_MASK_H265) {
       if (ffmpeg_decoder == SOFTWARE) {
         if (try == 0) decoder = avcodec_find_decoder_by_name("hevc_nvv4l2"); // Tegra
         if (try == 1) decoder = avcodec_find_decoder_by_name("hevc_nvmpi"); // Tegra
@@ -104,7 +99,14 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
         if (try == 3) decoder = avcodec_find_decoder_by_name("hevc_v4l2m2m"); // Stateful V4L2
       }
       if (try == 4) decoder = avcodec_find_decoder_by_name("hevc"); // Software and hwaccel
-    } else if (videoFormat & VIDEO_FORMAT_MASK_H264) {
+    }
+    else if (videoFormat & VIDEO_FORMAT_MASK_AV1) {
+      if (ffmpeg_decoder == SOFTWARE) {
+        if (try == 0) decoder = avcodec_find_decoder_by_name("libdav1d");
+      }
+      if (try == 1) decoder = avcodec_find_decoder_by_name("av1"); // Hwaccel
+    }
+    else if (videoFormat & VIDEO_FORMAT_MASK_H264) {
       if (ffmpeg_decoder == SOFTWARE) {
         if (try == 0) decoder = avcodec_find_decoder_by_name("h264_nvv4l2"); // Tegra
         if (try == 1) decoder = avcodec_find_decoder_by_name("h264_nvmpi"); // Tegra
@@ -186,6 +188,9 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
   }
 
   printf("Using FFmpeg decoder: %s\n", decoder->name);
+  if (ffmpeg_decoder == SOFTWARE && ((videoFormat & VIDEO_FORMAT_MASK_H264) == 0 || (videoFormat & VIDEO_FORMAT_MASK_YUV444)))
+      
+    printf("WARNING: Try use -bitrate N options to reduce bitrate for avoding lag!\n");
 
   dec_frames_cnt = buffer_count;
   dec_frames = malloc(buffer_count * sizeof(AVFrame*));

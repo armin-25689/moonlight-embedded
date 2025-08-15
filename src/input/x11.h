@@ -19,5 +19,10 @@
 
 #include <X11/Xlib.h>
 
+extern int x_display_width;
+extern int x_display_height;
+
 void x11_input_init(Display* display, Window window);
 void x11_input_remove();
+void x11_change_input_stat(bool inputing);
+void x11_keep_display_cursor(bool display);

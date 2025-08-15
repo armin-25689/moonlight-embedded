@@ -27,39 +27,88 @@
 #include "xdg-shell-client-protocol.h"
 #include "wp-viewporter.h"
 #include "wlr-output-management.h"
+#include "zwp-pointer-constraints.h"
+#include "zwp-relative-pointer.h"
 #include "../input/evdev.h"
+
+#include <Limelight.h>
 
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#define ACTION_MODIFIERS (MODIFIER_ALT|MODIFIER_CTRL)
+#define UNGRAB_WINDOW do { \
+    last_x = -1; \
+    last_y = -1; \
+    if (zwp_pointer_constraints && isGrabing) { \
+      zwp_locked_pointer_v1_destroy(zwp_locked_pointer); \
+      zwp_locked_pointer = NULL; \
+      isGrabing = false; \
+    } \
+} while(0)
+#define RESET_KEY_MONITOR do { \
+    wait_key_release = false; \
+    keyboard_modifiers = 0; \
+} while(0)
+#define WHEN_WINDOW_ENTER do { \
+    fake_grab_window(true); \
+} while(0)
+// LiSendMousePositionEvent(display_width, display_height, display_width, display_height);
+#define WHEN_WINDOW_LEAVE do { \
+    UNGRAB_WINDOW; \
+    fake_grab_window(false); \
+} while(0)
+#define MV_CURSOR(nowx, nowy, lastx, lasty, wlpointer, serial) do { \
+    wl_pointer_set_cursor(wlpointer, serial, NULL, nowx, nowy); \
+    LiSendMousePositionEvent(nowx, nowy, display_width, display_height); \
+    lastx = nowx; \
+    lasty = nowy; \
+} while(0)
+
 static struct wl_display *wl_display = NULL;
 static struct wl_surface *wlsurface;
-static struct wl_egl_window *wl_window;
+static struct wl_egl_window *wl_window = NULL;
 static struct wl_compositor *compositor;
 static struct wl_registry *registry;
 static struct wl_output *wl_output = NULL;
 static struct wl_seat *wl_seat = NULL;
 static struct wl_pointer *wl_pointer = NULL;
+static struct wl_keyboard *wl_keyboard = NULL;
 static struct xdg_wm_base *xdg_wm_base;
 static struct xdg_toplevel *xdg_toplevel;
 static struct xdg_surface *xdg_surface;
 static struct wp_viewporter *wp_viewporter = NULL;
 static struct wp_viewport *wp_viewport = NULL;
 static struct zwlr_output_manager_v1 *wlr_output_manager = NULL;
+static struct zwp_pointer_constraints_v1 *zwp_pointer_constraints = NULL;
+static struct zwp_locked_pointer_v1 *zwp_locked_pointer = NULL;
+static struct zwp_relative_pointer_manager_v1 *zwp_relative_pointer_manager = NULL;
+static struct zwp_relative_pointer_v1 *zwp_relative_pointer = NULL;
 
 static const char *quitCode = QUITCODE;
 
+static int offset_x = 0, offset_y = 0;
 static int display_width = 0, display_height = 0;
 static int output_width = 0, output_height = 0;
 static int window_op_fd = -1;
 static int32_t outputScaleFactor = 0;
 static uint32_t pointerSerial = 0;
+static double scale_factor = 1.0;
 static double fractionalScale = 0;
 static bool isFullscreen = false;
-static bool isGrabing = true;
+static bool inWindowP = false;
+static bool inWindowK = true;
+
+static bool firstHide = true;
+static bool isGrabing = false;
+static bool inputing = true;
+static bool wait_key_release = false;
+static int last_x = -1, last_y = -1;
+static int keyboard_modifiers = 0;
 
 static void noop() {};
 
@@ -116,22 +165,126 @@ static const struct wl_output_listener wl_output_listener = {
 */
 };
 
+static void keyboard_key(void *data, struct wl_keyboard *wl_keyboard, uint32_t serial, uint32_t time, uint32_t key, uint32_t state) {
+  int modifier = 0;
+
+  switch (key) {
+  case 0x38:
+  case 0x64:
+    modifier = MODIFIER_ALT;
+    break;
+  case 0x1d:
+  case 0x61:
+    modifier = MODIFIER_CTRL;
+    break;
+  }
+  if (modifier != 0) {
+    if (state == WL_KEYBOARD_KEY_STATE_PRESSED)
+      keyboard_modifiers |= modifier;
+    else if (state == WL_KEYBOARD_KEY_STATE_RELEASED)
+      keyboard_modifiers &= ~modifier;
+  }
+
+  if ((keyboard_modifiers & ACTION_MODIFIERS) == ACTION_MODIFIERS && state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+    if (modifier != 0) {
+      wait_key_release = true;
+    }
+    else {
+      RESET_KEY_MONITOR;
+    }
+  }
+  else if (wait_key_release && keyboard_modifiers == 0 && state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+    wait_key_release = false;
+    if (inWindowP && inWindowK && inputing) {
+      if (zwp_pointer_constraints && isGrabing) {
+        UNGRAB_WINDOW;
+      }
+      else if (zwp_pointer_constraints && zwp_relative_pointer) {
+        zwp_locked_pointer = zwp_pointer_constraints_v1_lock_pointer(zwp_pointer_constraints, wlsurface, wl_pointer, NULL, ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT);
+        if (zwp_locked_pointer) {
+          isGrabing = true;
+        }
+      }
+      else {
+        printf("WARNING: wayland server not support the zwp_pointer_constraints_v1 interface\n");
+      }
+    }
+  }
+}
+
+static void keyboard_enter(void *data, struct wl_keyboard *wl_keyboard, uint32_t serial, struct wl_surface *surface, struct wl_array *keys) {
+  //same as pointer_enter
+  WHEN_WINDOW_ENTER;
+  inWindowK = true;
+}
+
+static void keyboard_leave(void *data, struct wl_keyboard *wl_keyboard, uint32_t serial, struct wl_surface *surface) {
+  //same as pointer_leave
+  WHEN_WINDOW_LEAVE;
+  RESET_KEY_MONITOR;
+  inWindowK = false;
+}
+
+static const struct wl_keyboard_listener wl_keyboard_listener = {
+  .keymap = noop,
+  .enter = keyboard_enter,
+  .leave = keyboard_leave,
+  .key = keyboard_key,
+  .modifiers = noop,
+  // version 4
+  .repeat_info = noop,
+};
+
 static void pointer_enter(void *data, struct wl_pointer *wl_pointer, uint32_t serial, struct wl_surface *pointer_surface, wl_fixed_t pointer_x, wl_fixed_t pointer_y) {
   // NULL is hidden cursor
-  if (isGrabing)
-    wl_pointer_set_cursor(wl_pointer, serial, NULL, 0, 0);
   pointerSerial = serial;
-  fake_grab_window(true);
+  inWindowP = true;
+  WHEN_WINDOW_ENTER;
+  int sx = wl_fixed_to_int(pointer_x);
+  int sy = wl_fixed_to_int(pointer_y);
+
+  if (sx > display_width || sy > display_height)
+    return;
+
+  if (firstHide) {
+    MV_CURSOR(sx, sy, last_x, last_y, wl_pointer, serial);
+    firstHide = false;
+  }
+  else {
+    if (inputing) {
+      MV_CURSOR(sx, sy, last_x, last_y, wl_pointer, serial);
+    }
+  }
 }
 
 static void pointer_leave(void *data, struct wl_pointer *wl_pointer, uint32_t serial, struct wl_surface *wl_surface) {
-  fake_grab_window(false);
+  WHEN_WINDOW_LEAVE;
+  RESET_KEY_MONITOR;
+  inWindowP = false; 
+}
+
+static void pointer_motion(void *data, struct wl_pointer *wl_pointer, uint32_t time, wl_fixed_t surface_x, wl_fixed_t surface_y) {
+  int motion_x, motion_y, sx, sy;
+  if (!isGrabing) {
+    sx = wl_fixed_to_int(surface_x);
+    sy = wl_fixed_to_int(surface_y);
+    motion_x = sx - last_x;
+    motion_y = sy - last_y;
+    if (abs(motion_x) > 0 || abs(motion_y) > 0) {
+      if (last_x >= 0 && last_y >= 0 && inputing) {
+        LiSendMouseMoveAsMousePositionEvent(motion_x, motion_y, display_width, display_height);
+      }
+    }
+  
+    last_x = sx;
+    last_y = sy;
+  }
 }
 
 static const struct wl_pointer_listener wl_pointer_listener = {
   .enter = pointer_enter,
   .leave = pointer_leave,
-  .motion = noop,
+  .motion = pointer_motion,
   .button = noop,
   .axis = noop,
   // version 5
@@ -147,10 +300,35 @@ static const struct wl_pointer_listener wl_pointer_listener = {
 */
 };
 
+static void zwp_relative_motion(void *data, struct zwp_relative_pointer_v1 *zwp_relative_pointer,
+                                uint32_t utime_hi, uint32_t utime_lo,
+                                wl_fixed_t dx, wl_fixed_t dy,
+                                wl_fixed_t dx_unaccel, wl_fixed_t dy_unaccel) {
+  if (isGrabing && inputing) {
+    LiSendMouseMoveEvent(wl_fixed_to_int(dx_unaccel), wl_fixed_to_int(dy_unaccel));
+  }
+}
+
+static const struct zwp_relative_pointer_v1_listener zwp_relative_pointer_listener = {
+  .relative_motion = zwp_relative_motion,
+};
+
 static void input_configure(void *data, struct wl_seat *seat, uint32_t capability){
   if (capability & WL_SEAT_CAPABILITY_POINTER) {
     wl_pointer = wl_seat_get_pointer(seat);
-    wl_pointer_add_listener(wl_pointer, &wl_pointer_listener, NULL);
+    if (wl_pointer) {
+      wl_pointer_add_listener(wl_pointer, &wl_pointer_listener, NULL);
+      if (zwp_relative_pointer_manager) {
+        zwp_relative_pointer = zwp_relative_pointer_manager_v1_get_relative_pointer(zwp_relative_pointer_manager, wl_pointer);
+        if (zwp_relative_pointer)
+          zwp_relative_pointer_v1_add_listener(zwp_relative_pointer, &zwp_relative_pointer_listener, NULL);
+      }
+    }
+  }
+  if (capability & WL_SEAT_CAPABILITY_KEYBOARD) {
+    wl_keyboard = wl_seat_get_keyboard(seat);
+    if (wl_keyboard)
+      wl_keyboard_add_listener(wl_keyboard, &wl_keyboard_listener, NULL);
   }
 }
 
@@ -185,6 +363,10 @@ static void registry_handler(void *data,struct wl_registry *registry, uint32_t i
   } else if (strcmp(interface, zwlr_output_manager_v1_interface.name) == 0) {
     wlr_output_manager = wl_registry_bind(registry, id, &zwlr_output_manager_v1_interface, 1);
     zwlr_output_manager_v1_add_listener(wlr_output_manager, &wlr_output_manager_listener, NULL);
+  } else if (strcmp(interface, zwp_pointer_constraints_v1_interface.name) == 0) {
+    zwp_pointer_constraints = wl_registry_bind(registry, id, &zwp_pointer_constraints_v1_interface, 1);
+  } else if (strcmp(interface, zwp_relative_pointer_manager_v1_interface.name) == 0) {
+    zwp_relative_pointer_manager = wl_registry_bind(registry, id, &zwp_relative_pointer_manager_v1_interface, 1);
   }
 }
 
@@ -214,8 +396,11 @@ static void window_configure(void *data,
   wl_array_for_each(pos, states) {
   }
 */
-  if (width != 0 && height != 0)
+  if (width != 0 && height != 0) {
     wp_viewport_set_destination(wp_viewport, width, height);
+    display_width = width;
+    display_height = height;
+  }
 }
 
 static const struct xdg_toplevel_listener xdg_toplevel_listener = {
@@ -268,10 +453,16 @@ static int wayland_setup(int width, int height, int drFlags) {
   }
 
   if (fractionalScale > 0 ) {
-    wp_viewport_set_destination(wp_viewport, (int)(display_width / fractionalScale), (int)(display_height / fractionalScale));
+    scale_factor = fractionalScale;
   } else if (outputScaleFactor > 0) {
-    wp_viewport_set_destination(wp_viewport, (int)(display_width / outputScaleFactor), (int)(display_height / outputScaleFactor));
+    scale_factor = outputScaleFactor;
+  } else {
+    fprintf(stderr, "Can't get scale from wayland server\n");
+    return -1;
   }
+  display_width = (int)display_width / scale_factor;
+  display_height = (int)display_height / scale_factor;
+  wp_viewport_set_destination(wp_viewport, display_width, display_height);
   wl_surface_commit(wlsurface);
 
   xdg_surface = xdg_wm_base_get_xdg_surface(xdg_wm_base, wlsurface);
@@ -289,17 +480,28 @@ static int wayland_setup(int width, int height, int drFlags) {
   if (isFullscreen)
     xdg_toplevel_set_fullscreen(xdg_toplevel, NULL);
 
-  wl_window = wl_egl_window_create(wlsurface, display_width, display_height);
+  wl_window = wl_egl_window_create(wlsurface, (int)(display_width * scale_factor), (int)(display_height * scale_factor));
   if (wl_window == NULL) {
     fprintf(stderr, "Can't create wayland window");
     return -1;
   }
 
- return 0;
+  return 0;
 }
 
 static void wl_setup_post(void *data) {
-  window_op_fd = *((int *)data);
+  struct _WINDOW_PROPERTIES *wp = data;
+
+  int32_t size = *wp->configure & 0x00000000FFFFFFFF;
+  int32_t offset = (*wp->configure & 0xFFFFFFFF00000000) >> 32;
+  if (size != 0) {
+    //XResizeWindow(display, window, size >> 16, size & 0x0000FFFF);
+  }
+  if (offset != 0) {
+    //XMoveWindow(display, window, offset >> 16, offset & 0x0000FFFF);
+  }
+
+  window_op_fd = wp->fd;
   wl_surface_commit(wlsurface);
   wl_display_roundtrip(wl_display);
 }
@@ -313,7 +515,10 @@ static void* wl_get_display(const char* *device) {
   return wl_display;
 }
 
-static void wl_close_display() {
+static void wl_close_display(void *data) {
+  struct _WINDOW_PROPERTIES *wp = data;
+  *(wp->configure) = (((int64_t)offset_x) << 48) | (((int64_t)offset_y) << 32) | (((int64_t)display_width) << 16) | (int64_t)display_height;
+
   if (wl_display != NULL) {
     if (wl_output != NULL) {
       wl_output_release(wl_output);
@@ -323,26 +528,46 @@ static void wl_close_display() {
       zwlr_output_manager_v1_destroy(wlr_output_manager);
       wlr_output_manager = NULL;
     }
+    if (zwp_relative_pointer_manager != NULL) {
+      zwp_relative_pointer_manager_v1_destroy(zwp_relative_pointer_manager);
+      zwp_relative_pointer_manager = NULL;
+      if (zwp_relative_pointer != NULL) {
+        zwp_relative_pointer_v1_destroy(zwp_relative_pointer);
+        zwp_relative_pointer = NULL;
+      }
+    }
+    if (zwp_pointer_constraints != NULL) {
+      if (zwp_locked_pointer) {
+        zwp_locked_pointer_v1_destroy(zwp_locked_pointer);
+        zwp_locked_pointer = NULL;
+      }
+      zwp_pointer_constraints_v1_destroy(zwp_pointer_constraints);
+      zwp_pointer_constraints = NULL;
+    }
     if (wl_pointer != NULL) {
       wl_pointer_release(wl_pointer);
       wl_pointer = NULL;
+    }
+    if (wl_keyboard != NULL) {
+      wl_keyboard_release(wl_keyboard);
+      wl_keyboard = NULL;
     }
     if (wl_seat != NULL) {
       wl_seat_release(wl_seat);
       wl_seat = NULL;
     }
-/*
-    xdg_toplevel_destroy(xdg_toplevel);
-    xdg_surface_destroy(xdg_surface);
-    xdg_wm_base_destroy(xdg_wm_base);
-    wp_viewport_destroy(wp_viewport);
-    wp_viewporter_destroy(wp_viewporter);
-    wl_surface_commit(wlsurface);
-    wl_surface_destroy(wlsurface);
-    wl_compositor_destroy(compositor);
-    wl_registry_destroy(registry);
-    wl_egl_window_destroy(wl_window);
-*/
+    if (wl_window != NULL) {
+      xdg_toplevel_destroy(xdg_toplevel);
+      xdg_surface_destroy(xdg_surface);
+      xdg_wm_base_destroy(xdg_wm_base);
+      wp_viewport_destroy(wp_viewport);
+      wp_viewporter_destroy(wp_viewporter);
+      wl_surface_commit(wlsurface);
+      wl_surface_destroy(wlsurface);
+      wl_compositor_destroy(compositor);
+      wl_registry_destroy(registry);
+      wl_egl_window_destroy(wl_window);
+    }
     wl_display_disconnect(wl_display);
     wl_display = NULL;
     wl_window = NULL;
@@ -359,18 +584,34 @@ static int wl_dispatch_event(int width, int height, int index) {
   return 0;
 }
 
-static void wl_get_resolution(int *width, int *height) {
-  *width = output_width;
-  *height = output_height;
+static void wl_get_resolution(int *width, int *height, bool isfullscreen) {
+  if (isfullscreen) {
+    *width = output_width;
+    *height = output_height;
+  }
+  else {
+    *width = (int)(display_width * scale_factor);
+    *height = (int)(display_height * scale_factor);
+  }
+
+  return;
 }
 
-static void wl_change_cursor(const char *op) {
-  if (strcmp(op, "hide") == 0) {
-    isGrabing  = true;
-    wl_pointer_set_cursor(wl_pointer, pointerSerial, NULL, 0, 0);
-  } else {
-    isGrabing  = false;
+static void wl_change_cursor(struct WINDOW_OP *op, int flags) {
+  if (flags & HIDE_CURSOR) {
+    if (op->hide_cursor) {
+    } else {
+      // noting
+    }
   }
+  if (flags & INPUTING) {
+    inputing = op->inputing;
+    if (!inputing) {
+      UNGRAB_WINDOW;
+    }
+  }
+
+  return;
 }
 
 static void* wl_get_window() {
@@ -389,7 +630,7 @@ struct DISPLAY_CALLBACK display_callback_wayland = {
   .display_setup_post = wl_setup_post,
   .display_put_to_screen = wl_dispatch_event,
   .display_get_resolution = wl_get_resolution,
-  .display_change_cursor = wl_change_cursor,
+  .display_modify_window = wl_change_cursor,
   .display_vsync_loop = NULL,
   .display_exported_buffer_info = NULL,
   .renders = EGL_RENDER,

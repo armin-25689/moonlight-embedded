@@ -42,9 +42,11 @@
 #define write_config_string(fd, key, value) fprintf(fd, "%s = %s\n", key, value)
 #define write_config_int(fd, key, value) fprintf(fd, "%s = %d\n", key, value)
 #define write_config_bool(fd, key, value) fprintf(fd, "%s = %s\n", key, value ? "true":"false")
+#define write_config_llong(fd, key, value) fprintf(fd, "%s = %lld\n", key, value)
 
 bool inputAdded = false;
 char *fileConfigs[MAX_FILE_LINES] = {0};
+long long int window_configure = 0;
 
 static struct option long_options[] = {
   {"720", no_argument, NULL, 'a'},
@@ -67,6 +69,7 @@ static struct option long_options[] = {
   {"platform", required_argument, NULL, 'p'},
   {"save", required_argument, NULL, 'q'},
   {"keydir", required_argument, NULL, 'r'},
+  {"render_style", required_argument, NULL, 'R'},
   {"remote", required_argument, NULL, 's'},
   {"sdlgp", no_argument, NULL, 'S'},
   {"windowed", no_argument, NULL, 't'},
@@ -85,6 +88,7 @@ static struct option long_options[] = {
   {"pin", required_argument, NULL, '5'},
   {"port", required_argument, NULL, '6'},
   {"hdr", no_argument, NULL, '7'},
+  {"window_configure", required_argument, NULL, '9'},
   {0, 0, 0, 0},
 };
 
@@ -203,9 +207,7 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
     config->localaudio = true;
     break;
   case 'o':
-    if (!config_file_parse(value, config))
-      exit(EXIT_FAILURE);
-
+    // have checked 
     break;
   case 'p':
     config->platform = value;
@@ -215,6 +217,16 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
     break;
   case 'r':
     strcpy(config->key_dir, value);
+    break;
+  case 'R':
+    if (strcasecmp(value, "fixed") == 0)
+      config->fixed_resolution = true;
+    else if (strcasecmp(value, "fill") == 0)
+      config->fill_resolution = true;
+    else if (strcasecmp(value, "fill_fixed") == 0 || strcasecmp(value, "fixed_fill") == 0) {
+      config->fill_resolution = true;
+      config->fixed_resolution = true;
+    }
     break;
   case 's':
     if (strcasecmp(value, "auto") == 0)
@@ -283,6 +295,9 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
   case '7':
     config->hdr = true;
     break;
+  case '9':
+    window_configure = atoll(value);
+    break;
   case 1:
     if (config->action == NULL)
       config->action = value;
@@ -345,8 +360,11 @@ bool config_file_parse(char* filename, PCONFIGURATION config) {
 void config_save(char* filename, PCONFIGURATION config) {
   FILE* fd = fopen(filename, "w");
   if (fd == NULL) {
-    fprintf(stderr, "Can't open configuration file: %s\n", filename);
-    exit(EXIT_FAILURE);
+    create_file(filename);
+    fd = fopen(filename, "w");
+    if (fd == NULL) {
+      fprintf(stderr, "Can't save configuration file: %s\n", filename);
+    }
   }
 
   if (config->stream.width != 1280)
@@ -372,6 +390,10 @@ void config_save(char* filename, PCONFIGURATION config) {
 
   if (strcmp(config->app, "Steam") != 0)
     write_config_string(fd, "app", config->app);
+
+  if (window_configure != 0) {
+    write_config_llong(fd, "window_configure", window_configure);
+  }
 
   fclose(fd);
 }
@@ -427,6 +449,8 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->less_threads = false;
   config->sdlgp = false;
   config->swapxyab = false;
+  config->fixed_resolution = false;
+  config->fill_resolution = false;
   config->mapping = get_path("gamecontrollerdb.txt", getenv("XDG_DATA_DIRS"));
   config->key_dir[0] = 0;
 
@@ -440,15 +464,19 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
       exit(EXIT_FAILURE);
 
   } else {
+    for (int i = 1; i < argc; i++) {
+      if (strcmp(argv[i], "-config") == 0) {
+        char *path = argv[i + 1];
+        config_file_parse(path, config);
+      }
+    }
+
     int option_index = 0;
     int c;
     while ((c = getopt_long_only(argc, argv, "-abc:d:efg:h:i:j:k:lm:no:p:q:r:s:tu:v:w:xy45:6:7", long_options, &option_index)) != -1) {
       parse_argument(c, optarg, config);
     }
   }
-
-  if (config->config_file != NULL)
-    config_save(config->config_file, config);
 
   if (config->key_dir[0] == 0x0) {
     struct passwd *pw = getpwuid(getuid());
@@ -486,7 +514,10 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   }
 }
 
-void config_clear() {
+void config_clear(PCONFIGURATION config) {
+  if (config->config_file != NULL)
+    config_save(config->config_file, config);
+
   for (int i = 0; i < MAX_FILE_LINES; i++) {
     if (fileConfigs[i] != 0)
       free(fileConfigs[i]);

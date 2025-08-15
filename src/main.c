@@ -117,6 +117,10 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
   int drFlags = 0;
   if (config->fullscreen)
     drFlags |= DISPLAY_FULLSCREEN;
+  if (config->fixed_resolution)
+    drFlags |= FIXED_RESOLUTION;
+  if (config->fill_resolution)
+    drFlags |= FILL_RESOLUTION;
 
   switch (config->rotate) {
   case 0:
@@ -174,7 +178,7 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
   }
 
   platform_stop(system);
-  config_clear();
+  config_clear(config);
 }
 
 static void help() {
@@ -215,7 +219,7 @@ static void help() {
   printf("\t-remote <yes/no/auto>\tEnable optimizations for WAN streaming (default auto)\n");
   printf("\t-sdlgp\t\t\tForce to use sdl to drive gamepad\n");
   printf("\t-swapxyab\t\tSwap X/Y and A/B for gamepad for embedded(not sdl) platform\n");
-  printf("\t-fakegrab\t\tDo not grab keyboard and mouse for embedded(not sdl) platform\n");
+  printf("\t-nograb\t\tDo not grab keyboard and mouse for embedded(not sdl) platform\n");
   printf("\t-app <app>\t\tName of app to stream\n");
   printf("\t-nosops\t\t\tDon't allow GFE to modify game settings\n");
   printf("\t-localaudio\t\tPlay audio locally on the host computer\n");
@@ -372,6 +376,12 @@ int main(int argc, char* argv[]) {
         config.yuv444 = false;
       }
     }
+
+    // for not specify codec,but use software decoder platform,use h264 default
+    if (config.codec == CODEC_UNSPECIFIED && system == X11 && !config.yuv444) {
+      config.stream.supportedVideoFormats = (supportedVideoFormat & VIDEO_FORMAT_MASK_H264);
+    }
+
     if (!supportedHDR && (system == X11_VAAPI || system == X11)) {
       config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_10BIT;
     }
