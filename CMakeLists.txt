@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.6)
-project(moonlight-embedded VERSION 2.7.4 LANGUAGES C)
+cmake_minimum_required(VERSION 3.10)
+project(moonlight-embedded VERSION 2.7.5 LANGUAGES C)
 SET(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 SET(CMAKE_C_STANDARD 99)
 include(${CMAKE_ROOT}/Modules/GNUInstallDirs.cmake)
@@ -204,13 +204,19 @@ if (SOFTWARE_FOUND)
     find_path(WAYLAND_SCANNER_PATH wayland-scanner PATHS ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR} REQUIRED)
     find_path(XDG_SHELL_PATH xdg-shell.xml PATHS ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/wayland-protocols/stable/xdg-shell REQUIRED)
     find_path(VIEWPORTER_PATH viewporter.xml PATHS ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/wayland-protocols/stable/viewporter REQUIRED)
+    find_path(POINTER_PATH pointer-constraints-unstable-v1.xml PATHS ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/wayland-protocols/unstable/pointer-constraints REQUIRED)
+    find_path(RELATIVE_PATH relative-pointer-unstable-v1.xml PATHS ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/wayland-protocols/unstable/relative-pointer REQUIRED)
     execute_process(COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner client-header ${XDG_SHELL_PATH}/xdg-shell.xml ./src/video/xdg-shell-client-protocol.h
                    COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner private-code ${XDG_SHELL_PATH}/xdg-shell.xml ./src/video/xdg-shell-client-protocol.c
                    COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner client-header ${VIEWPORTER_PATH}/viewporter.xml ./src/video/wp-viewporter.h
                    COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner private-code ${VIEWPORTER_PATH}/viewporter.xml ./src/video/wp-viewporter.c
+                   COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner client-header ${POINTER_PATH}/pointer-constraints-unstable-v1.xml ./src/video/zwp-pointer-constraints.h
+                   COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner private-code ${POINTER_PATH}/pointer-constraints-unstable-v1.xml ./src/video/zwp-pointer-constraints.c
+                   COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner client-header ${RELATIVE_PATH}/relative-pointer-unstable-v1.xml ./src/video/zwp-relative-pointer.h
+                   COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner private-code ${RELATIVE_PATH}/relative-pointer-unstable-v1.xml ./src/video/zwp-relative-pointer.c
                    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
                    TIMEOUT 9)
-    target_sources(moonlight PRIVATE ./src/video/wlr-output-management.c ./src/video/wp-viewporter.c ./src/video/xdg-shell-client-protocol.c ./src/video/wayland.c)
+    target_sources(moonlight PRIVATE ./src/video/zwp-relative-pointer.c ./src/video/zwp-pointer-constraints.c ./src/video/wlr-output-management.c ./src/video/wp-viewporter.c ./src/video/xdg-shell-client-protocol.c ./src/video/wayland.c)
     target_include_directories(moonlight PRIVATE ${WAYLAND_CLIENT_INCLUDE_DIRS} ${WAYLAND_EGL_INCLUDE_DIRS})
     target_link_libraries(moonlight ${WAYLAND_CLIENT_LIBRARIES} ${WAYLAND_EGL_LIBRARIES})
   endif()
