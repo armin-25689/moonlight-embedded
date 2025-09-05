@@ -26,6 +26,8 @@
 #define EVDEV_HANDLE_BY_WINDOW 1
 #define EVDEV_HANDLE_BY_EVDEV 0
 
+enum grabWindowRequest {E_STOP_INPUT = -1, E_UNGRAB_WINDOW, E_GRAB_WINDOW};
+
 extern int evdev_gamepads;
 
 void evdev_create(const char* device, struct mapping* mappings, bool verbose, int rotate);
@@ -40,7 +42,7 @@ void evdev_rumble(unsigned short controller_id, unsigned short low_freq_motor, u
 void evdev_trans_op_fd(int fd);
 void evdev_init_vars(bool isfakegrab, bool issdlgp, bool isswapxyab, bool isinputadded);
 int x11_sdl_init(char* mappings);
-void grab_window(bool grabstate);
-void fake_grab_window(bool grabstate);
+void grab_window(enum grabWindowRequest request);
+void sync_input_state(bool isinputing);
 void evdev_pass_mouse_mode(bool handled_by_window);
 void evdev_switch_mouse_mode(bool handled_by_window);

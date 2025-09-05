@@ -551,7 +551,7 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
     evdev_pass_mouse_mode(true);
 
   struct _WINDOW_PROPERTIES window_properties = {0};
-  window_properties.fd = windowpipefd[1];
+  window_properties.fd_p = &windowpipefd[1];
   window_properties.configure = &window_configure;
  
   disPtr->display_setup_post((void *)&window_properties);
@@ -572,14 +572,19 @@ int x11_setup_vaapi(int videoFormat, int width, int height, int redrawRate, void
 void x11_cleanup() {
   clear_threads();
   if (windowpipefd[1] > 0) {
+    evdev_trans_op_fd(-1);
     loop_remove_fd(windowpipefd[0]);
     close(windowpipefd[1]);
     close(windowpipefd[0]);
+    windowpipefd[1] = -1;
+    windowpipefd[0] = -1;
   }
   if (pipefd[1] > 0) {
     loop_remove_fd(pipefd[0]);
     close(pipefd[1]);
     close(pipefd[0]);
+    pipefd[1] = -1;
+    pipefd[0] = -1;
   }
   renderPtr->render_destroy();
   ffmpeg_destroy();

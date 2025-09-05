@@ -33,6 +33,7 @@ struct WINDOW_OP {
 
 struct _WINDOW_PROPERTIES {
   int fd;
+  int *fd_p;
   long long int *configure;
 };
 

@@ -55,15 +55,15 @@
     keyboard_modifiers = 0; \
 } while(0)
 #define WHEN_WINDOW_ENTER do { \
-    fake_grab_window(true); \
+    sync_input_state(true && inputing); \
 } while(0)
 // LiSendMousePositionEvent(display_width, display_height, display_width, display_height);
 #define WHEN_WINDOW_LEAVE do { \
     UNGRAB_WINDOW; \
-    fake_grab_window(false); \
+    sync_input_state(false); \
 } while(0)
-#define MV_CURSOR(nowx, nowy, lastx, lasty, wlpointer, serial) do { \
-    wl_pointer_set_cursor(wlpointer, serial, NULL, nowx, nowy); \
+#define MV_CURSOR(nowx, nowy, lastx, lasty, wlpointer, pointersurface, serial) do { \
+    wl_pointer_set_cursor(wlpointer, serial, pointersurface, nowx, nowy); \
     LiSendMousePositionEvent(nowx, nowy, display_width, display_height); \
     lastx = nowx; \
     lasty = nowy; \
@@ -94,7 +94,7 @@ static const char *quitCode = QUITCODE;
 static int offset_x = 0, offset_y = 0;
 static int display_width = 0, display_height = 0;
 static int output_width = 0, output_height = 0;
-static int window_op_fd = -1;
+static int *window_op_fd_p = NULL;
 static int32_t outputScaleFactor = 0;
 static uint32_t pointerSerial = 0;
 static double scale_factor = 1.0;
@@ -247,12 +247,12 @@ static void pointer_enter(void *data, struct wl_pointer *wl_pointer, uint32_t se
     return;
 
   if (firstHide) {
-    MV_CURSOR(sx, sy, last_x, last_y, wl_pointer, serial);
+    MV_CURSOR(sx, sy, last_x, last_y, wl_pointer, NULL, serial);
     firstHide = false;
   }
   else {
     if (inputing) {
-      MV_CURSOR(sx, sy, last_x, last_y, wl_pointer, serial);
+      MV_CURSOR(sx, sy, last_x, last_y, wl_pointer, NULL, serial);
     }
   }
 }
@@ -367,6 +367,8 @@ static void registry_handler(void *data,struct wl_registry *registry, uint32_t i
     zwp_pointer_constraints = wl_registry_bind(registry, id, &zwp_pointer_constraints_v1_interface, 1);
   } else if (strcmp(interface, zwp_relative_pointer_manager_v1_interface.name) == 0) {
     zwp_relative_pointer_manager = wl_registry_bind(registry, id, &zwp_relative_pointer_manager_v1_interface, 1);
+  //} else if (strcmp(interface, wl_shm_interface.name) == 0) {
+  //  wl_shm_p = wl_registry_bind(registry, id, &wl_shm_interface, 2);
   }
 }
 
@@ -384,7 +386,7 @@ static const struct wl_registry_listener registry_listener= {
 };
 
 static void window_close(void *data, struct xdg_toplevel *xdg_toplevel) {
-  write(window_op_fd, &quitCode, sizeof(char *));
+  write(*window_op_fd_p, &quitCode, sizeof(char *));
 }
 
 static void window_configure(void *data,
@@ -501,7 +503,7 @@ static void wl_setup_post(void *data) {
     //XMoveWindow(display, window, offset >> 16, offset & 0x0000FFFF);
   }
 
-  window_op_fd = wp->fd;
+  window_op_fd_p = wp->fd_p;
   wl_surface_commit(wlsurface);
   wl_display_roundtrip(wl_display);
 }
@@ -600,6 +602,9 @@ static void wl_get_resolution(int *width, int *height, bool isfullscreen) {
 static void wl_change_cursor(struct WINDOW_OP *op, int flags) {
   if (flags & HIDE_CURSOR) {
     if (op->hide_cursor) {
+      if (wl_pointer != NULL && pointerSerial != 0) {
+        MV_CURSOR(last_x < 0 ? 0 : last_x, last_y < 0 ? 0 : last_y, last_x, last_y, wl_pointer, NULL, pointerSerial);
+      }
     } else {
       // noting
     }

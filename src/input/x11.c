@@ -36,6 +36,12 @@
     wait_key_release = false; \
     keyboard_modifiers = 0; \
 } while(0)
+#define RESET_INPUT do { \
+    grabbed = false; \
+    XUngrabPointer(display, CurrentTime); \
+    XUngrabKeyboard(display, CurrentTime); \
+    evdev_switch_mouse_mode(EVDEV_HANDLE_BY_WINDOW); \
+} while(0)
 
 static Display *display;
 static Window window;
@@ -70,7 +76,7 @@ static int x11_handler(int fd, void *data) {
       semi_height = (int)x_display_height / 2;
       break;
     case DestroyNotify:
-      grab_window(false);
+      grab_window(E_UNGRAB_WINDOW);
       break;
     case EnterNotify:
     case LeaveNotify:
@@ -78,14 +84,14 @@ static int x11_handler(int fd, void *data) {
     case FocusOut:
       if (event.type == FocusIn || event.type == EnterNotify) {
         in_window = true;
-        fake_grab_window(true);
+        sync_input_state(true);
         if (inputing)
           LiSendMousePositionEvent(last_x < 0 ? 0 : last_x, last_y < 0 ? 0 : last_y, x_display_width, x_display_height);
         if (grabbed)
           evdev_switch_mouse_mode(EVDEV_HANDLE_BY_EVDEV);
       } else {
         in_window = false;
-        fake_grab_window(false);
+        sync_input_state(false);
         RESET_KEY_MONITOR;
       }
       XDefineCursor(display, window, (!keep_display_cursor && in_window) ? cursor : 0);
@@ -131,10 +137,7 @@ static int x11_handler(int fd, void *data) {
         else if (wait_key_release && keyboard_modifiers == 0 && event.type == KeyRelease) {
           wait_key_release = false;
           if (grabbed) {
-            evdev_switch_mouse_mode(EVDEV_HANDLE_BY_WINDOW);
-            grabbed = false;
-            XUngrabPointer(display, CurrentTime);
-            XUngrabKeyboard(display, CurrentTime);
+            RESET_INPUT;
           }
           else {
             if (XGrabPointer(display, window, true, 0, GrabModeAsync, GrabModeAsync, window, None, CurrentTime) == GrabSuccess) {
@@ -201,14 +204,12 @@ void x11_input_remove () {
   }
 }
 
+
 void x11_change_input_stat (bool isinput) {
   inputing = isinput;
   if (!inputing) {
     if (grabbed) {
-      grabbed = false;
-      XUngrabPointer(display, CurrentTime);
-      XUngrabKeyboard(display, CurrentTime);
-      evdev_switch_mouse_mode(EVDEV_HANDLE_BY_WINDOW);
+      RESET_INPUT;
     }
     RESET_KEY_MONITOR;
   }

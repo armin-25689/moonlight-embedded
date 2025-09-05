@@ -363,7 +363,8 @@ void config_save(char* filename, PCONFIGURATION config) {
     create_file(filename);
     fd = fopen(filename, "w");
     if (fd == NULL) {
-      fprintf(stderr, "Can't save configuration file: %s\n", filename);
+      fprintf(stderr, "ERROR: Can't save configuration file: %s\n", filename);
+      return;
     }
   }
 

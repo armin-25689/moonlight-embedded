@@ -67,7 +67,6 @@ static const char *quitstate = QUITCODE;
 static const char *grabcode = GRABCODE;
 static const char *ungrabcode = UNGRABCODE;
 static const char *fakegrabcode = FAKEGRABCODE;
-static const char *unfakegrabcode = UNFAKEGRABCODE;
 
 static bool not_handle_mouse_motion = false;
 static bool not_handle_mouse_motion_var = false;
@@ -77,12 +76,12 @@ static bool isUseKbdmux = false;
 static bool fakeGrab = false;
 static bool fakeGrabKey = false;
 static bool isInputing = true;
-static bool isGrabed = false;
 static bool sdlgp = false;
 static bool swapXYAB = false;
 static bool gameMode = false;
 // for check gamepad num,evdev_check_input function
 static int gpNumForCheck = 0;
+static enum grabWindowRequest isGrabed = E_UNGRAB_WINDOW;
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 #define int16_to_le(val) val
@@ -226,6 +225,16 @@ static int evdev_get_map(int* map, int length, int value) {
       return i;
   }
   return -1;
+}
+
+static void fake_grab_window() {
+  fakeGrab = true;
+  sync_input_state(true);
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM)
+  if (keyboardpipefd > -1) {
+    write(keyboardpipefd, &fakegrabcode, sizeof(char *));
+  }
+#endif
 }
 
 static short keystatlist[0xFF];
@@ -1065,19 +1074,14 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
           waitingToSwitchGrabOnModifierUp = false;
           isGrabKeyRelease = false;
           freeallkey();
-          if (fakeGrabKey && fakeGrab) {
-            grab_window(true);
-            isInputing = true;
-            fakeGrab = false;
+          if (fakeGrabKey && fakeGrab && isInputing) {
+            grab_window(E_GRAB_WINDOW);
           }
           else if (fakeGrabKey && !fakeGrab) {
-            grab_window(false);
-            isInputing = true;
-            fakeGrab = true;
-            fake_grab_window(true);
+            fake_grab_window();
           }
           else {
-            grab_window(!isGrabed);
+            grab_window(isInputing ? E_UNGRAB_WINDOW : E_GRAB_WINDOW);
           }
           fakeGrabKey = false;
           return true;
@@ -1085,7 +1089,7 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
         return true;
       } else if (waitingToExitOnModifiersUp && dev->modifiers == 0) {
         freeallkey();
-        grab_window(false);
+        grab_window(E_UNGRAB_WINDOW);
         return false;
       }
 
@@ -1976,7 +1980,7 @@ void evdev_start() {
   // we're ready to take input events. Ctrl+C works up until
   // this point.
   if (!fakeGrab)
-    grab_window(true);
+    grab_window(E_GRAB_WINDOW);
 
   // Handle input events until the quit combo is pressed
 }
@@ -2031,7 +2035,7 @@ void evdev_rumble(unsigned short controller_id, unsigned short low_freq_motor, u
   device->haptic_effect_id = effect.id;
 }
 
-void fake_grab_window(bool grabstat) {
+void sync_input_state(bool isinputing) {
   if (!fakeGrab)
     return;
   freeallkey();
@@ -2040,42 +2044,37 @@ void fake_grab_window(bool grabstat) {
   if (not_handle_mouse_motion)
     not_handle_mouse_motion_var = true;
 
-#if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM)
-  if (keyboardpipefd > -1)
-    write(keyboardpipefd, !grabstat ? &unfakegrabcode : &fakegrabcode, sizeof(char *));
-#endif
-  isInputing = grabstat;
+  if (isGrabed == E_GRAB_WINDOW) {
+    struct List_Node *nodePtr = NULL;
+    LIST_FOREACH(nodePtr, head_device, node) {
+      struct input_device *device = (struct input_device *)nodePtr->data;
+      if (device->is_keyboard || device->is_mouse || device->is_touchscreen) {
+        if (libevdev_grab(device->dev, LIBEVDEV_UNGRAB) < 0)
+          fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
+      }
+    }
+  }
   grabbingDevices = false;
+  isGrabed = E_UNGRAB_WINDOW;
+
+  isInputing = isinputing;
 }
 
-void grab_window(bool grabstat) {
+void grab_window(enum grabWindowRequest grabstat) {
   enum libevdev_grab_mode grabmode;
 
   evdev_drain();
 
+  if (grabstat != E_GRAB_WINDOW) {
+    grabmode = LIBEVDEV_UNGRAB;
+    grabbingDevices = false;
+  } else {
+    // Any new input devices detected after this point will be grabbed immediately
+    grabbingDevices = true;
+    grabmode = LIBEVDEV_GRAB;
+  }
+
   if (grabstat != isGrabed) {
-    if (!grabstat) {
-      grabmode = LIBEVDEV_UNGRAB;
-      grabbingDevices = false;
-      if (not_handle_mouse_motion)
-        not_handle_mouse_motion_var = true;
-    } else {
-      // Any new input devices detected after this point will be grabbed immediately
-      grabbingDevices = true;
-      grabmode = LIBEVDEV_GRAB;
-      fakeGrab = false;
-      not_handle_mouse_motion_var = false;
-    }
-    isInputing = grabstat;
-    isGrabed = grabstat;
-
-    if (!(!fakeGrab && fakeGrabKey)) {
-#if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM)
-      if (keyboardpipefd > -1)
-        write(keyboardpipefd, !grabstat ? &ungrabcode : &grabcode, sizeof(char *));
-#endif
-    }
-
     struct List_Node *nodePtr = NULL;
     LIST_FOREACH(nodePtr, head_device, node) {
       struct input_device *device = (struct input_device *)nodePtr->data;
@@ -2085,19 +2084,33 @@ void grab_window(bool grabstat) {
       }
     }
   }
+
+  bool lastInputStat = isInputing;
+  fakeGrab = false;
+  not_handle_mouse_motion_var = false;
+  isInputing = grabstat == E_GRAB_WINDOW ? true : false;
+  isGrabed =  grabstat == E_GRAB_WINDOW ? E_GRAB_WINDOW : E_UNGRAB_WINDOW;
+
+  if (lastInputStat != isInputing) {
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM)
+    if (keyboardpipefd > -1) {
+      write(keyboardpipefd, grabstat != E_GRAB_WINDOW ? &ungrabcode : &grabcode, sizeof(char *));
+    }
+#endif
+  }
 }
 
 void evdev_trans_op_fd(int pipefd) {
   keyboardpipefd = pipefd;
 }
 
-void evdev_pass_mouse_mode(bool handled_by_window) {
-  not_handle_mouse_motion = handled_by_window;
+void evdev_switch_mouse_mode(bool handled_by_window) {
   not_handle_mouse_motion_var = handled_by_window;
 }
 
-void evdev_switch_mouse_mode(bool handled_by_window) {
-  not_handle_mouse_motion_var = handled_by_window;
+void evdev_pass_mouse_mode(bool handled_by_window) {
+  not_handle_mouse_motion = handled_by_window;
+  evdev_switch_mouse_mode(handled_by_window);
 }
 
 #ifdef HAVE_SDL
