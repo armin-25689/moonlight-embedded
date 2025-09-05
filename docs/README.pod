@@ -111,11 +111,19 @@ Need sunshine host support(version >=24.0) and just support vaapi or
 x11 platform.
 If meet h264+YUV444P, 'x11' platform is recommended.
 
-=item B<-fakegrab>
+=item B<-render_style> [I<fixed/fill/fixed_fill>]
+
+Change video render style to selected option.
+
+=item B<-nograb>
 
 Fake grab keyboard and mouse on embedded(not SDL) platform.
 Not grab window anymore.
 Use Ctrl+Alt+Shift+M to switch.
+Use Ctrl+Alt to switch grab state by display server when enable fakegrab/nograb.
+Note: Default nograb mode may lead pointer jump when gameing,try use ctrl+alt to
+switch grab mode for normal usual.
+Note2: Only x11 and wayland server worked normaly now.
 
 =item B<-remote> [I<yes/no/auto>]
 
@@ -270,6 +278,10 @@ Connect:
                      -platform 'vaapi' -fakegrab 192.168.0.1
  Try yuv444 video mode for better video quality:
   # moonlight stream -app Desktop -width 1920 -height 1080 -fps 120 \
+                     -platform 'vaapi' -yuv444 -codec hevc 192.168.0.1
+ Use '-config file -save file' to record lastest window size and site:
+  # moonlight stream -app Desktop -width 1920 -height 1080 -fps 120 \
+                     -config ~/moonlight/conf -save ~/moonlight/conf \
                      -platform 'vaapi' -yuv444 -codec hevc 192.168.0.1
 
 =head1 COMMENTS
