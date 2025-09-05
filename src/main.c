@@ -219,7 +219,8 @@ static void help() {
   printf("\t-remote <yes/no/auto>\tEnable optimizations for WAN streaming (default auto)\n");
   printf("\t-sdlgp\t\t\tForce to use sdl to drive gamepad\n");
   printf("\t-swapxyab\t\tSwap X/Y and A/B for gamepad for embedded(not sdl) platform\n");
-  printf("\t-nograb\t\tDo not grab keyboard and mouse for embedded(not sdl) platform\n");
+  printf("\t-nograb\t\t\tDo not grab keyboard and mouse for embedded(not sdl) platform\n");
+  printf("\t-render_style <fixed/fill/fixed_fill>\tSwitch render style\n");
   printf("\t-app <app>\t\tName of app to stream\n");
   printf("\t-nosops\t\t\tDon't allow GFE to modify game settings\n");
   printf("\t-localaudio\t\tPlay audio locally on the host computer\n");
