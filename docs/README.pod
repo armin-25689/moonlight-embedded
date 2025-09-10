@@ -297,6 +297,9 @@ Connect:
  Multi keyboard may meet bugs.Please man kbdmux or kbdcontrol.
  And try to disable kbdmux or use -input to specify wanted keyboards or mouses.
 
+ Note: If meet crash frequently, try adjust Integrated Graphics Device(IDG)
+       Aperture size from BIOS.
+
 =head1 AUTHOR
 
 Iwan Timmer E<lt>irtimmer@gmail.comE<gt>
