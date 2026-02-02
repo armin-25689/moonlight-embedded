@@ -457,7 +457,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   else if ((ret = http_request(url, data)) != GS_OK)
     goto cleanup;
 
-  if ((ret = xml_status(data->memory, data->size) != GS_OK))
+  if ((ret = xml_status(data->memory, data->size)) != GS_OK)
     goto cleanup;
   else if ((ret = xml_search(data->memory, data->size, "paired", &result)) != GS_OK)
     goto cleanup;
@@ -505,7 +505,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   free(result);
   result = NULL;
-  if ((ret = xml_status(data->memory, data->size) != GS_OK))
+  if ((ret = xml_status(data->memory, data->size)) != GS_OK)
     goto cleanup;
   else if ((ret = xml_search(data->memory, data->size, "paired", &result)) != GS_OK)
     goto cleanup;
@@ -572,7 +572,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   free(result);
   result = NULL;
-  if ((ret = xml_status(data->memory, data->size) != GS_OK))
+  if ((ret = xml_status(data->memory, data->size)) != GS_OK)
     goto cleanup;
   else if ((ret = xml_search(data->memory, data->size, "paired", &result)) != GS_OK)
     goto cleanup;
@@ -626,7 +626,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   free(result);
   result = NULL;
-  if ((ret = xml_status(data->memory, data->size) != GS_OK))
+  if ((ret = xml_status(data->memory, data->size)) != GS_OK)
     goto cleanup;
   else if ((ret = xml_search(data->memory, data->size, "paired", &result)) != GS_OK)
     goto cleanup;
@@ -645,7 +645,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   free(result);
   result = NULL;
-  if ((ret = xml_status(data->memory, data->size) != GS_OK))
+  if ((ret = xml_status(data->memory, data->size)) != GS_OK)
     goto cleanup;
   else if ((ret = xml_search(data->memory, data->size, "paired", &result)) != GS_OK)
     goto cleanup;
@@ -758,7 +758,7 @@ int gs_start_app(PSERVER_DATA server, STREAM_CONFIGURATION *config, int appId, b
   else
     goto cleanup;
 
-  if ((ret = xml_status(data->memory, data->size) != GS_OK))
+  if ((ret = xml_status(data->memory, data->size)) != GS_OK)
     goto cleanup;
   else if ((ret = xml_search(data->memory, data->size, "gamesession", &result)) != GS_OK &&
            (ret = xml_search(data->memory, data->size, "resume", &result)) != GS_OK)
@@ -801,7 +801,7 @@ int gs_quit_app(PSERVER_DATA server) {
   if ((ret = http_request(url, data)) != GS_OK)
     goto cleanup;
 
-  if ((ret = xml_status(data->memory, data->size) != GS_OK))
+  if ((ret = xml_status(data->memory, data->size)) != GS_OK)
     goto cleanup;
   else if ((ret = xml_search(data->memory, data->size, "cancel", &result)) != GS_OK)
     goto cleanup;

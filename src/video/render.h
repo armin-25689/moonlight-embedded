@@ -19,6 +19,8 @@
 
 #include "video_internal.h"
 
+#pragma once
+
 struct Render_Config {
   int color_space;
   int color_range;
@@ -29,7 +31,7 @@ struct Render_Config {
   bool full_color_range;
   bool use_hdr;
   bool vsync;
-  int linesize[4];
+  int linesize[MAX_PLANE_NUM];
 };
 struct Render_Init_Info {
   int frame_width;
@@ -47,12 +49,19 @@ struct Render_Init_Info {
   void *window;
   void(*display_exported_buffer)(struct Source_Buffer_Info *buffer, int *buffersNum, int *planesNum);
 };
-union Render_Image {
+struct Render_Image {
   struct {
-    void *image_data[4];
+    void *image_data[MAX_PLANE_NUM];
     void *descriptor;
   } images;
-  uint8_t **frame_data;
+  struct {
+    uint8_t **frame_data;
+    void *frame;
+  } sframe;
+  int index;
+  void(*mv_vlist_del)(void **frame, void **data);
+  void(*mv_vlist_add)(void *frame, void *data);
+  int (*vlist_num)(void);
 };
 struct RENDER_CALLBACK {
   char *name;
@@ -61,18 +70,19 @@ struct RENDER_CALLBACK {
   int decoder_type;
   bool is_hardaccel_support;
   void *data;
-  union Render_Image images[MAX_FB_NUM];
+  struct Render_Image images[MAX_FB_NUM];
   int (*render_create) (struct Render_Init_Info *paras);
   int (*render_init) (struct Render_Init_Info *paras);
-  void (*render_sync_config) (struct Render_Config *config);
-  int (*render_draw) (union Render_Image image);
+  int (*render_sync_config) (struct Render_Config *config);
+  int (*render_draw) (struct Render_Image *image);
   void (*render_destroy) ();
-  int (*render_map_buffer) (struct Source_Buffer_Info *buffer, int planes, int composeOrSeperate, void* image[4]);
-  void (*render_unmap_buffer) (void* image[4], int planes);
+  int (*render_map_buffer) (struct Source_Buffer_Info *buffer, int planes, int composeOrSeperate, void* image[MAX_PLANE_NUM], int index);
+  void (*render_unmap_buffer) (void* image[MAX_PLANE_NUM], int planes);
   void (*render_sync_window_size) (int width, int height, bool isFullScreen);
 };
 
 extern struct RENDER_CALLBACK egl_render;
-#ifdef HAVE_X11
-extern struct RENDER_CALLBACK x11_render;
+#ifdef HAVE_WAYLAND
+extern struct RENDER_CALLBACK wayland_render;
 #endif
+extern struct RENDER_CALLBACK drm_render;

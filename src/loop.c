@@ -34,7 +34,7 @@ static struct head_of_list first_node;
 static struct head_of_list *head_node = &first_node;
 static int epoll_fd = -1;
 static int sigFd;
-static bool done = false;
+bool done = false;
 
 static int loop_sig_handler(int fd, void *data) {
   struct signalfd_siginfo info;
@@ -163,9 +163,7 @@ void loop_create() {
   }
 
   LIST_INIT(head_node);
-}
 
-void loop_init() {
   main_thread_id = pthread_self();
   sigset_t sigset;
   sigemptyset(&sigset);
@@ -175,11 +173,13 @@ void loop_init() {
   sigaddset(&sigset, SIGQUIT);
   sigprocmask(SIG_BLOCK, &sigset, NULL);
   sigFd = signalfd(-1, &sigset, 0);
+}
+
+void loop_init() {
   loop_add_fd(sigFd, &loop_sig_handler, EPOLLIN | EPOLLERR | EPOLLHUP);
 }
 
 void loop_main() {
-  done = false;
   int maxEvents = 300;
 
   while (!done) {
@@ -197,6 +197,8 @@ void loop_main() {
       }
     }
   }
+
+  done = true;
 }
 
 void loop_destroy() {

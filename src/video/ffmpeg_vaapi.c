@@ -36,6 +36,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "render.h"
 #include "video_internal.h"
 
 #define MAX_SURFACES 16
@@ -46,8 +47,8 @@
 #endif
 
 static AVBufferRef* device_ref;
-static VADRMPRIMESurfaceDescriptor primeDescriptors[MAX_FB_NUM] = {0};
-static int current_index = 0, next_index = 0;
+static VADRMPRIMESurfaceDescriptor prime_descriptors[MAX_FB_NUM] = {0};
+static VADRMPRIMESurfaceDescriptor *primeDescriptors[MAX_FB_NUM] = {0};
 
 #define sw_format_slot 9
 struct {
@@ -204,6 +205,10 @@ int vaapi_init_lib(const char *device) {
 }
 
 int vaapi_init(AVCodecContext* decoder_ctx) {
+  for (int i = 0; i < MAX_FB_NUM; i++) {
+    primeDescriptors[i] = &prime_descriptors[i];
+  }
+
   decoder_ctx->get_format = va_get_format;
   decoder_ctx->get_buffer2 = va_get_buffer;
   return 0;
@@ -223,14 +228,7 @@ bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDispla
   *directRenderSupport = false;
   VADisplay dpy;
 
-  if (strcmp(renderName, "x11") == 0){
-#ifdef HAVE_X11
-    dpy = vaGetDisplay((Display *)nativeDisplay);
-#endif
-  }
-  else {
-    dpy = vaGetDisplayDRM(*((int *)nativeDisplay));
-  }
+  dpy = vaGetDisplayDRM(*((int *)nativeDisplay));
 
   if (!dpy)
     return false;
@@ -280,6 +278,7 @@ bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDispla
   }
 
   // test can direct render
+/*
 #ifdef HAVE_X11
   if (strcmp(renderName,"x11") == 0) {
     VAEntrypoint entrypoints[vaMaxNumEntrypoints(dpy)];
@@ -298,11 +297,13 @@ bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDispla
             *directRenderSupport = true;
           }
           XDestroyWindow(display, win);
+          break;
         }
       }
     }
   }
 #endif
+*/
 
   VADRMPRIMESurfaceDescriptor descriptor;
 
@@ -324,59 +325,68 @@ bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDispla
   }
 
   vaTerminate(dpy);
+/*
 #ifdef HAVE_X11
   if (strcmp(renderName,"x11") == 0 && !(*directRenderSupport)) {
     return false;
   }
 #endif
+*/
   return true;
 }
 
-void vaapi_free_egl_images(void *eglImages[4], void *descriptor, void(*render_unmap_buffer) (void* image[4], int planes)) {
-  int startNum = 0,closeNum = 0;
-  for (size_t i = 0; i < MAX_FB_NUM; ++i) {
-    if ((VADRMPRIMESurfaceDescriptor *)descriptor == &primeDescriptors[i]) {
-      startNum = i;
-      closeNum = i + 1;
-    }
+void vaapi_free_render_images(void **renderImages, void *descriptor, void(*render_unmap_buffer) (void** image, int planes)) {
+  if (!descriptor)
+    return;
+
+  VADRMPRIMESurfaceDescriptor *pdescriptor = (VADRMPRIMESurfaceDescriptor *)descriptor;
+
+  if (render_unmap_buffer != NULL) {
+    render_unmap_buffer(renderImages, pdescriptor->num_layers);
   }
-  for (size_t h = startNum; h < closeNum; h++) {
-    if (render_unmap_buffer != NULL) {
-      render_unmap_buffer(eglImages, primeDescriptors[h].num_layers);
+  if (pdescriptor->num_objects != 0) {
+    for (size_t i = 0; i < pdescriptor->num_objects; ++i) {
+      if (pdescriptor->objects[i].fd > -1)
+        close(pdescriptor->objects[i].fd);
+      pdescriptor->objects[i].fd = -1;
     }
-    for (size_t i = 0; i < primeDescriptors[h].num_objects; ++i) {
-      close(primeDescriptors[h].objects[i].fd);
-    }
-    primeDescriptors[h].num_layers = 0;
-    primeDescriptors[h].num_objects = 0;
+    pdescriptor->num_layers = 0;
+    pdescriptor->num_objects = 0;
   }
 }
 
-int vaapi_export_egl_images(AVFrame *frame, void *eglImages[4], void **descriptor,
+int vaapi_export_render_images(AVFrame *frame, struct Render_Image *image, void *descriptor, int render_type,
       int(*render_map_buffer) (struct Source_Buffer_Info *buffer, int planes,
-                               int composeOrSeperate, void* image[4])) {
+                               int composeOrSeperate, void** image, int index),
+      void(*render_unmap_buffer) (void** image, int planes)) {
   ssize_t count = 0;
   AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
   AVVAAPIDeviceContext *va_ctx = device->hwctx;
-  VADRMPRIMESurfaceDescriptor *primeDescriptor = &primeDescriptors[current_index];
+  void **renderImages = image->images.image_data;
+  VASurfaceID surface_id = (VASurfaceID)(uintptr_t)frame->data[3];
+
+  VADRMPRIMESurfaceDescriptor *primeDescriptor = descriptor;
+  if (!primeDescriptor) {
+    fprintf(stderr, "Ffmpeg_vaapi: cannot get clear descriptor.\n");
+    return -1;
+  }
 
   if (render_map_buffer == NULL) {
     fprintf(stderr, "Ffmpeg_vaapi: Has no export images function implement.\n");
     return -1;
   }
 
-  VASurfaceID surface_id = (VASurfaceID)(uintptr_t)frame->data[3];
   VAStatus st = vaExportSurfaceHandle(va_ctx->display,
                     surface_id,
                     VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-                    VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+                    VA_EXPORT_SURFACE_READ_ONLY | (render_type == EGL_RENDER ? VA_EXPORT_SURFACE_SEPARATE_LAYERS : VA_EXPORT_SURFACE_COMPOSED_LAYERS),
                     primeDescriptor);
   if (st != VA_STATUS_SUCCESS) {
     fprintf(stderr, "Ffmpeg_vaapi: vaExportSurfaceHandle() Failed: %d\n", st);
     return -1;
   }
 
-  st = vaSyncSurface2(va_ctx->display, surface_id, 5000000000);
+  st = vaSyncSurface2(va_ctx->display, surface_id, 6000000000);
   if (st != VA_STATUS_SUCCESS) {
     fprintf(stderr, "Ffmpeg_vaapi: vaSyncSurface2() Failed: %d\n", st);
     goto sync_fail;
@@ -384,6 +394,7 @@ int vaapi_export_egl_images(AVFrame *frame, void *eglImages[4], void **descripto
 
   int planes = 0;
   struct Source_Buffer_Info buffer_info = {0};
+  memset(buffer_info.fd, -1, sizeof(buffer_info.fd));
   for (size_t i = 0; i < primeDescriptor->num_layers; ++i) {
     for (size_t j = 0; j < primeDescriptor->layers[i].num_planes; j++) {
       if (planes > 3) {
@@ -402,22 +413,33 @@ int vaapi_export_egl_images(AVFrame *frame, void *eglImages[4], void **descripto
     ++count;
   }
 
-  if (render_map_buffer(&buffer_info, planes, (count != planes) ? COMPOSE_PLANE : SEPERATE_PLANE, eglImages) < 0) {
+  if (render_map_buffer(&buffer_info, planes, (count != planes) ? COMPOSE_PLANE : SEPERATE_PLANE, renderImages, image->index) < 0) {
     goto create_image_fail;
   }
 
-  current_index = next_index;
-  next_index = (current_index + 1) % MAX_FB_NUM;
-  *descriptor = &primeDescriptors[current_index];
-  return (int)count;
+  return (int)planes;
 
 create_image_fail:
-  primeDescriptor->num_layers = count;
+  primeDescriptor->num_layers = planes;
 sync_fail:
-  vaapi_free_egl_images(eglImages, primeDescriptor, NULL);
+  vaapi_free_render_images(renderImages, primeDescriptor, NULL);
   return -1;
+}
+
+void *vaapi_get_descriptors_ptr() {
+  return primeDescriptors;
 }
 
 int vaapi_supported_video_format() {
   return vaapiSupportedFormat;
+}
+
+ssize_t software_store_frame (AVFrame *frame, struct Render_Image *image, void *descriptor, int render_type,
+                              int(*render_map_buffer)(struct Source_Buffer_Info *buffer,
+                                                      int planes, int composeOrSeperate,
+                                                      void* *image)) {
+  image->sframe.frame_data = frame->data;
+
+  // always return 1 planes
+  return 1;
 }

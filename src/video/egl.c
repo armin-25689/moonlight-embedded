@@ -68,13 +68,16 @@ static PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC glEGLImageTargetTexStorageEXT;
 static GLuint *shaders[5] = { &egl_base.shader_program_nv12, &egl_base.shader_program_packed, &egl_base.shader_program_nv12, &egl_base.shader_program_yuv, &egl_base.shader_program_nv12 };
 static const EGLint context_attributes[] = { EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 0,  EGL_NONE };
 
-static void egl_unmap_eglimage(EGLImage eglImage[4], int bufferPlaneNum) {
+static void egl_unmap_eglimage(EGLImage *eglImage, int bufferPlaneNum) {
   for (int i = 0; i < bufferPlaneNum; i++) {
-    eglDestroyImage(display, eglImage[i]);
+    if (eglImage[i]) {
+      eglDestroyImage(display, eglImage[i]);
+    }
   }
+  memset(eglImage, 0, sizeof(EGLImage) * bufferPlaneNum);
 }
 
-static int egl_map_buffer_to_eglimage(struct Source_Buffer_Info *buffer, int bufferPlaneNum, int composeOrSeperate, EGLImage eglImage[4]) {
+static int egl_map_buffer_to_eglimage(struct Source_Buffer_Info *buffer, int bufferPlaneNum, int composeOrSeperate, EGLImage *eglImage, int index) {
   // layers
   int planes = composeOrSeperate == COMPOSE_PLANE ? 1 : bufferPlaneNum;
   // planes in layers
@@ -97,9 +100,6 @@ static int egl_map_buffer_to_eglimage(struct Source_Buffer_Info *buffer, int buf
       attrs[attrsNum++] = buffer->stride[j + k];
       attrs[attrsNum++] = eglImageAttrsSlot.offset[k];
       attrs[attrsNum++] = buffer->offset[j + k];
-      if (buffer->modifiers[k + j] == 0) {
-        continue;
-      }
       if (ExtState.eglIsSupportExtDmaBufMod) {
         attrs[attrsNum++] = eglImageAttrsSlot.lo_modi[k];
         attrs[attrsNum++] = (EGLint)(buffer->modifiers[j + k] & 0xFFFFFFFF);
@@ -139,7 +139,7 @@ static int map_display_buffer_framebuffer(struct Import_Buffer_Info out_fb[MAX_F
   for (int i = 0; i < egl_base.displayBufferNum; i++) {
     glGenFramebuffers(1, &out_fb[i].framebuffer);
 
-    if (egl_map_buffer_to_eglimage(&buffers[i], egl_base.displayBufferPlaneNum, SEPERATE_PLANE, out_fb[i].image) < 0) {
+    if (egl_map_buffer_to_eglimage(&buffers[i], egl_base.displayBufferPlaneNum, SEPERATE_PLANE, out_fb[i].image, i) < 0) {
       // may be not needed
       glDeleteFramebuffers(1, &out_fb[i].framebuffer);
       return -1;
@@ -639,7 +639,7 @@ static inline void egl_draw_vaapi(EGLImage image[4]) {
 #endif
 }
 
-static void egl_choose_config_from_frame(struct Render_Config *config) {
+static int egl_choose_config_from_frame(struct Render_Config *config) {
   eglMakeCurrent(display, surface, surface, context);
 
   egl_base.eglVSync = config->vsync;
@@ -678,17 +678,15 @@ static void egl_choose_config_from_frame(struct Render_Config *config) {
     planeNum = 3;
   }
 
-  return;
+  return 0;
 }
 
-static int egl_draw(union Render_Image images) {
+static int egl_draw(struct Render_Image *images) {
   if (eglsync != EGL_NO_SYNC)
     eglDestroySync(display, eglsync);
 
   if (egl_base.display_buffer) {
-    egl_base.current = egl_base.next;
-    egl_base.next = (egl_base.current + 1) % egl_base.displayBufferNum;
-    egl_base.back_out_fb = &out_fb[egl_base.current];
+    egl_base.back_out_fb = &out_fb[images->index];
     glBindFramebuffer(GL_FRAMEBUFFER, egl_base.back_out_fb->framebuffer);
   }
 
@@ -698,10 +696,10 @@ static int egl_draw(union Render_Image images) {
   glBindVertexArray(egl_base.VAO);
 
   if (egl_render.decoder_type != SOFTWARE) {
-    egl_draw_vaapi(images.images.image_data);
+    egl_draw_vaapi(images->images.image_data);
   }
   else {
-    egl_draw_soft(images.frame_data);
+    egl_draw_soft(images->sframe.frame_data);
   }
 
   glBindVertexArray(0);
@@ -724,7 +722,7 @@ static int egl_draw(union Render_Image images) {
     }
   }
 
-  return egl_base.current;
+  return images->index;
 }
 
 static void egl_destroy() {

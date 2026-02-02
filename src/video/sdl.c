@@ -33,6 +33,8 @@
 
 static void* ffmpeg_buffer;
 static size_t ffmpeg_buffer_size;
+static AVFrame **dec_frames;
+static int frame_index = 0;
 
 static int sdl_setup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
   if (ffmpeg_init(videoFormat, width, height, SLICE_THREADING, SDL_BUFFER_FRAMES, SLICES_PER_FRAME) < 0) {
@@ -41,6 +43,8 @@ static int sdl_setup(int videoFormat, int width, int height, int redrawRate, voi
   }
 
   ensure_buf_size(&ffmpeg_buffer, &ffmpeg_buffer_size, INITIAL_DECODER_BUFFER_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
+
+  dec_frames = ffmpeg_get_frames();
 
   return 0;
 }
@@ -63,7 +67,9 @@ static int sdl_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   ffmpeg_decode(ffmpeg_buffer, length);
 
   SDL_LockMutex(mutex);
-  AVFrame* frame = ffmpeg_get_frame(false);
+  
+  frame_index = GET_FB_NEXT(frame_index, MAX_FB_NUM);
+  AVFrame *frame = ffmpeg_get_frame(dec_frames[frame_index], false);
   if (frame != NULL) {
     sdlNextFrame++;
 

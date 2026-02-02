@@ -74,13 +74,18 @@ enum platform platform_check(char* name) {
   }
   #endif
 
-  #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM) || defined(HAVE_DRM)
+  #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_DRM)
   const char *displayName = NULL;
-  bool x11 = strcmp(name, "x11") == 0 || strcmp(name, "wayland") == 0 || strcmp(name, "gbm") == 0 || strcmp(name, "drm") == 0 || strcmp(name, "software") == 0 || strcmp(name, "X11") == 0;
-  bool vaapi = strcmp(name, "x11_vaapi") == 0 || strcmp(name, "vaapi") == 0 || strcmp(name, "wayland_vaapi") == 0 || strcmp(name, "x11_vdpau") == 0 || strcmp(name, "gbm_vaapi") == 0;
+  bool x11 = strcmp(name, "x11") == 0 || strcmp(name, "wayland") == 0 || strcmp(name, "gbm") == 0 || strcmp(name, "drm") == 0 || strcmp(name, "software") == 0 || strcmp(name, "X11") == 0 || strcmp(name, "wayland") == 0;
+  bool vaapi = strcmp(name, "x11_vaapi") == 0 || strcmp(name, "vaapi") == 0 || strcmp(name, "wayland_vaapi") == 0 || strcmp(name, "x11_vdpau") == 0 || strcmp(name, "drm_vaapi") == 0 || strcmp(name, "wayland_vaapi") == 0;
   if (name != NULL) {
     switch (*name) {
+    case 'w':
+    case 'W':
+      displayName = "wayland";
+      break;
     case 'X':
+    case 'x':
       displayName = "x11";
       break;
     case 'd':
@@ -101,12 +106,9 @@ enum platform platform_check(char* name) {
     if (init == INIT_VDPAU)
       return X11_VDPAU;
     #endif
-    return X11;
+    if (init > 0)
+      return X11;
   }
-  #endif
-  #ifdef HAVE_SDL
-  if (std || strcmp(name, "sdl") == 0)
-    return SDL;
   #endif
 
   if (strcmp(name, "fake") == 0)
@@ -150,7 +152,7 @@ void platform_stop(enum platform system) {
 
 DECODER_RENDERER_CALLBACKS* platform_get_video(enum platform system) {
   switch (system) {
-  #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_GBM) || defined(HAVE_DRM)
+  #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_DRM)
   case X11:
     return &decoder_callbacks_x11;
   #ifdef HAVE_VAAPI
@@ -161,10 +163,6 @@ DECODER_RENDERER_CALLBACKS* platform_get_video(enum platform system) {
   case X11_VDPAU:
     return &decoder_callbacks_x11_vdpau;
   #endif
-  #endif
-  #ifdef HAVE_SDL
-  case SDL:
-    return &decoder_callbacks_sdl;
   #endif
   #ifdef HAVE_IMX
   case IMX:
@@ -194,10 +192,6 @@ AUDIO_RENDERER_CALLBACKS* platform_get_audio(enum platform system, char* audio_d
   switch (system) {
   case FAKE:
       return NULL;
-  #ifdef HAVE_SDL
-  case SDL:
-    return &audio_callbacks_sdl;
-  #endif
   #ifdef HAVE_PI
   case PI:
     if (audio_device == NULL || strcmp(audio_device, "local") == 0 || strcmp(audio_device, "hdmi") == 0)
@@ -262,8 +256,6 @@ char* platform_name(enum platform system) {
     return "X Window System (VAAPI)";
   case X11_VDPAU:
     return "X Window System (VDPAU)";
-  case SDL:
-    return "SDL2 (software decoding)";
   case FAKE:
     return "Fake (no a/v output)";
   default:

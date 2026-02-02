@@ -22,7 +22,6 @@
 #include "configuration.h"
 #include "platform.h"
 #include "config.h"
-#include "sdl.h"
 
 #include "audio/audio.h"
 #include "video/video.h"
@@ -32,9 +31,6 @@
 #include "input/udev.h"
 #ifdef HAVE_LIBCEC
 #include "input/cec.h"
-#endif
-#ifdef HAVE_SDL
-#include "input/sdl.h"
 #endif
 
 #include <Limelight.h>
@@ -121,6 +117,8 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
     drFlags |= FIXED_RESOLUTION;
   if (config->fill_resolution)
     drFlags |= FILL_RESOLUTION;
+  if (config->modeset)
+    drFlags |= MODESET;
 
   switch (config->rotate) {
   case 0:
@@ -163,11 +161,10 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
     loop_destroy();
     if (!config->viewonly)
       evdev_stop();
+    #ifdef HAVE_SDL
+    x11_sdl_clear();
+    #endif
   }
-  #ifdef HAVE_SDL
-  else if (system == SDL)
-    sdl_loop();
-  #endif
 
   LiStopConnection();
 
@@ -187,7 +184,7 @@ static void help() {
   #else
   printf("Moonlight Embedded %d.%d.%d\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
   #endif
-  printf("Usage: moonlight [action] (options) [host]\n");
+  printf("Usage: moonlight [action] (options) [host] [-port <number>]\n");
   printf("       moonlight [configfile]\n");
   printf("\n Actions\n\n");
   printf("\tpair\t\t\tPair device with computer\n");
@@ -215,6 +212,7 @@ static void help() {
   printf("\t-bitrate <bitrate>\tSpecify the bitrate in Kbps\n");
   printf("\t-packetsize <size>\tSpecify the maximum packetsize in bytes\n");
   printf("\t-codec <codec>\t\tSelect used codec: auto/h264/h265/av1 (default auto)\n");
+  printf("\t-hdr \t\t\tEnable hdr support for wayland_vaapi/drm_vaapi/drm/wayland platform\n");
   printf("\t-yuv444\t\t\tTry to use yuv444 format\n");
   printf("\t-remote <yes/no/auto>\tEnable optimizations for WAN streaming (default auto)\n");
   printf("\t-sdlgp\t\t\tForce to use sdl to drive gamepad\n");
@@ -227,17 +225,16 @@ static void help() {
   printf("\t-surround <5.1/7.1>\tStream 5.1 or 7.1 surround sound\n");
   printf("\t-keydir <directory>\tLoad encryption keys from directory\n");
   printf("\t-mapping <file>\t\tUse <file> as gamepad mappings configuration file\n");
-  printf("\t-platform <system>\tSpecify system used for audio, video and input: rk/x11/x11_vaapi/sdl (default auto)\n");
+  printf("\t-platform <system>\tSpecify system used for audio, video and input: rk/software/vaapi/drm_vaapi/wayland_vaapi/drm/wayland (default auto)\n");
   printf("\t-nounsupported\t\tDon't stream if resolution is not officially supported by the server\n");
   printf("\t-quitappafter\t\tSend quit app request to remote after quitting session\n");
   printf("\t-viewonly\t\tDisable all input processing (view-only mode)\n");
   printf("\t-nomouseemulation\tDisable gamepad mouse emulation support (long pressing Start button)\n");
-  #if defined(HAVE_SDL) || defined(HAVE_X11) || defined(HAVE_WAYLAND)
-  printf("\n WM options (SDL and X11/Wayland/Vaapi only)\n\n");
+  #if defined(HAVE_X11) || defined(HAVE_WAYLAND)
+  printf("\n WM options (X11/Wayland/Vaapi only)\n\n");
   printf("\t-windowed\t\tDisplay screen in a window\n");
   #endif
   #ifdef HAVE_EMBEDDED
-  printf("\n I/O options (Not for SDL)\n\n");
   printf("\t-input <device>\t\tUse <device> as input. Can be used multiple times\n");
   printf("\t-audio <device>\t\tUse <device> as audio output device\n");
   #endif
@@ -346,66 +343,57 @@ int main(int argc, char* argv[]) {
       loop_create();
     }
 
-    config.stream.supportedVideoFormats = VIDEO_FORMAT_H264;
-    if (config.codec == CODEC_HEVC || (config.codec == CODEC_UNSPECIFIED && platform_prefers_codec(system, CODEC_HEVC))) {
-      config.stream.supportedVideoFormats |= VIDEO_FORMAT_H265;
-      //if (config.hdr)
-      //  config.stream.supportedVideoFormats |= VIDEO_FORMAT_H265_MAIN10;
+    // choose codec
+    config.stream.supportedVideoFormats = VIDEO_FORMAT_MASK_H264;
+    switch (config.codec) {
+    case (CODEC_HEVC):
+      config.stream.supportedVideoFormats |= VIDEO_FORMAT_MASK_H265;
+      break;
+    case (CODEC_AV1):
+      config.stream.supportedVideoFormats |= VIDEO_FORMAT_MASK_AV1;
+      break;
+    case (CODEC_H264):
+      config.stream.supportedVideoFormats |= VIDEO_FORMAT_MASK_H264;
+      break;
+    case (CODEC_UNSPECIFIED):
+      if (platform_prefers_codec(system, CODEC_HEVC)) config.stream.supportedVideoFormats |= VIDEO_FORMAT_MASK_H265;
+      if (platform_prefers_codec(system, CODEC_AV1)) config.stream.supportedVideoFormats |= VIDEO_FORMAT_MASK_AV1;
+      break;
     }
-    if (config.codec == CODEC_AV1 || (config.codec == CODEC_UNSPECIFIED && platform_prefers_codec(system, CODEC_AV1))) {
-      config.stream.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN8;
-      //if (config.hdr)
-      //  config.stream.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN10;
-    }
-
-    //if (config.hdr && !(config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_10BIT)) {
-    //  fprintf(stderr, "HDR streaming requires HEVC or AV1 codec\n");
-    //  exit(-1);
-    //}
-
     // set yuv444 depend on config
-    if (config.yuv444 && (system == X11_VAAPI || system == X11)) {
-      if (supportedVideoFormat & VIDEO_FORMAT_MASK_YUV444) {
-        config.stream.supportedVideoFormats |= (supportedVideoFormat & VIDEO_FORMAT_MASK_H264);
-        if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_H265)
-          config.stream.supportedVideoFormats |= (supportedVideoFormat & VIDEO_FORMAT_MASK_H265);
-        if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1)
-          config.stream.supportedVideoFormats |= (supportedVideoFormat & VIDEO_FORMAT_MASK_AV1);
+    if (system == X11_VAAPI || system == X11) {
+      config.stream.supportedVideoFormats &= (supportedVideoFormat & 
+                                              (VIDEO_FORMAT_MASK_H264 |
+                                               VIDEO_FORMAT_MASK_H265 |
+                                               VIDEO_FORMAT_MASK_AV1));
+      if (!wantHdr || (!supportedHDR)) config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_10BIT;
+
+      if (system == X11) {
+        // for not specify codec,but use software decoder platform,use h264 default
+        if (config.codec == CODEC_UNSPECIFIED && !config.yuv444) config.stream.supportedVideoFormats = (supportedVideoFormat & VIDEO_FORMAT_MASK_H264);
+
+        if ((config.stream.supportedVideoFormats & (VIDEO_FORMAT_MASK_H265 | VIDEO_FORMAT_MASK_AV1)) ||
+            (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444)) {
+          fprintf(stderr, "WARNING: Please set lower bitrate(-bitrate N[now: %d]) when using software decoding to avoid lag!\n", config.stream.bitrate);
+        }
+      }
+    }
+    else {
+      config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_YUV444;
+    }
+    if (config.yuv444) {
+      if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444) {
+        if (!wantHdr) {
+          config.stream.colorSpace = COLORSPACE_REC_709;
+          config.stream.colorRange = COLOR_RANGE_FULL;
+        }
+        printf("Try to use yuv444 mode\n");
       }
       else {
         printf("YUV444 is not supported because of platform: %d .\n", (int)system);
         config.yuv444 = false;
       }
     }
-
-    // for not specify codec,but use software decoder platform,use h264 default
-    if (config.codec == CODEC_UNSPECIFIED && system == X11 && !config.yuv444) {
-      config.stream.supportedVideoFormats = (supportedVideoFormat & VIDEO_FORMAT_MASK_H264);
-    }
-
-    if (!supportedHDR && (system == X11_VAAPI || system == X11)) {
-      config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_10BIT;
-    }
-    if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444) {
-      // pass var to ffmpeg
-      if (!supportedHDR) {
-        config.stream.colorSpace = COLORSPACE_REC_709;
-        config.stream.colorRange = COLOR_RANGE_FULL;
-      }
-      printf("Try to use yuv444 mode\n");
-    }
-
-    if (system == X11) {
-      if ((config.stream.supportedVideoFormats & (VIDEO_FORMAT_MASK_H265 | VIDEO_FORMAT_MASK_AV1)) ||
-          (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444)) {
-        fprintf(stderr, "WARNING: Please set lower bitrate(-bitrate N[now: %d]) when using software decoding to avoid lag!\n", config.stream.bitrate);
-      }
-    }
-
-    #ifdef HAVE_SDL
-    if (system == SDL)
-      sdl_init(config.stream.width, config.stream.height, config.fullscreen);
-    #endif
 
     if (config.viewonly) {
       if (config.debug_level > 0)
@@ -465,20 +453,6 @@ int main(int argc, char* argv[]) {
         cec_init();
         #endif /* HAVE_LIBCEC */
       }
-      #ifdef HAVE_SDL
-      else if (system == SDL) {
-        if (config.inputsCount > 0) {
-          fprintf(stderr, "You can't select input devices as SDL will automatically use all available controllers\n");
-          exit(-1);
-        }
-
-        sdlinput_init(config.mapping);
-        rumble_handler = sdlinput_rumble;
-        rumble_triggers_handler = sdlinput_rumble_triggers;
-        set_motion_event_state_handler = sdlinput_set_motion_event_state;
-        set_controller_led_handler = sdlinput_set_controller_led;
-      }
-      #endif
     }
 
     stream(&server, &config, system);

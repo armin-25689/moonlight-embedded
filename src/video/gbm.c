@@ -1,27 +1,19 @@
 #include <gbm.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
-#include <libdrm/drm_fourcc.h>
 
-#include <errno.h>
-#include <stdlib.h>
+#include <libdrm/drm_fourcc.h>
+#include <libavutil/frame.h>
+
 #include <stdio.h>
-#include <stdbool.h>
-#include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
 
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-
-#include "display.h"
+#include "convert.h"
 #include "drm_base.h"
-#include "video.h"
+#include "render.h"
 #include "video_internal.h"
-
-//equal to EGL_NATIVE_VISUAL_ID
-#define DEFAULT_FORMAT GBM_FORMAT_XRGB8888
-#define DEFAULT_FORMAT_10BIT GBM_FORMAT_XRGB2101010
+#include "../util.h"
 
 struct Gbm_Bo {
   uint32_t fd[4];
@@ -36,226 +28,159 @@ struct Gbm_Bo {
   struct gbm_bo *bo;
 };
 
-static struct gbm_device *gbm_display = NULL;
-static struct gbm_surface *gbm_window = NULL;
-static struct Gbm_Bo gbm_bo[MAX_FB_NUM] = {0};
-static struct Drm_Info *drmInfoPtr;
-static drmModeConnectorPtr connPtr;
-static drmModeCrtcPtr crtcPtr;
-static drmModeModeInfoPtr connModePtr;
-static bool isMaster = true;
-// ayuv is packed format, yuv444 is 3_plane format
-//static uint32_t supported_gbm_format[] = { GBM_FORMAT_XRGB8888, GBM_FORMAT_AYUV, GBM_FORMAT_YUV444, GBM_FORMAT_NV12, GBM_FORMAT_YUV420 };
+uint32_t bo_flags = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR | GBM_BO_USE_SCANOUT; // must need by egl
 
-static int frame_width,frame_height,display_width,display_height,x_offset = 0,y_offset = 0;
+int generate_gbm_bo(int fd, struct _drm_buf gbm_buf[], int buffer_num, void *display, int width, int height, int src_fmt, uint64_t size[MAX_PLANE_NUM]) {
+  struct Gbm_Bo *gbm_bo = (struct Gbm_Bo *)gbm_buf;
+  struct gbm_device *gbm_display = (struct gbm_device *)display;
+  int planes = -1;
+  int bpp, buffer_multi, plane_num;
 
-/*
-static int validate_gbm_config (uint32_t format, uint32_t gbm_bo_flags) {
-  gbm_device_is_format_supported(gbm_display, format, gbm_bo_flags );
-}
-*/
+  uint32_t format = translate_format_to_drm(src_fmt, &bpp, &buffer_multi, &plane_num);
 
-static int generate_gbm_bo(struct Gbm_Bo gbm_bo[MAX_FB_NUM], uint32_t format, uint32_t bo_flags) {
-  for (int i = 0; i < MAX_FB_NUM; i++) {
-    gbm_bo[i].bo = gbm_bo_create(gbm_display, display_width, display_height, format,
-                                 bo_flags);
-    if (!gbm_bo[i].bo) {
-      fprintf(stderr, "Failed to create a gbm buffer.\n");
+  for (int i = 0; i < buffer_num; i++) {
+    struct gbm_bo *bo = gbm_bo_create(gbm_display, width, height, format, bo_flags);
+    if (!bo) {
+      fprintf(stderr, "Failed to create a gbm bo.\n");
       return -1;
     }
+    gbm_bo[i].bo = bo;
+    planes = gbm_bo_get_plane_count(bo);
+    uint64_t modifier = gbm_bo_get_modifier(bo);
 
-    gbm_bo[i].fd[0] = gbm_bo_get_fd(gbm_bo[i].bo);
-    if (gbm_bo[i].fd[0] < 0) {
-      fprintf(stderr, "Failed to get fb for gbm bo\n");
-      gbm_bo_destroy(gbm_bo[i].bo);
-      return -1;
-    }
-
-    gbm_bo[i].handle[0] = gbm_bo_get_handle(gbm_bo[i].bo).u32;
-    gbm_bo[i].pitch[0] = gbm_bo_get_stride(gbm_bo[i].bo);
-    gbm_bo[i].offset[0] = 0;
-    gbm_bo[i].width[0] = display_width;
-    gbm_bo[i].height[0] = display_height;
-    gbm_bo[i].format[0] = format;
-    gbm_bo[i].modifiers[0] = 0;
-    drmModeAddFB2(drmInfoPtr->fd, display_width, display_height, format, gbm_bo[i].handle, gbm_bo[i].pitch, gbm_bo[i].offset, &gbm_bo[i].fb_id, 0);
-    if (!gbm_bo[i].fb_id) {
-      fprintf(stderr, "Failed to create framebuffer from gbm buffer object.\n");
-      gbm_bo_destroy(gbm_bo[i].bo);
-      return -1;
+    for (int k = 0; k < planes;  k++) {
+      gbm_bo[i].fd[k] = gbm_bo_get_fd_for_plane(bo, k);
+      gbm_bo[i].handle[k] = gbm_bo_get_handle_for_plane(bo, k).u32;
+      gbm_bo[i].pitch[k] = gbm_bo_get_stride_for_plane(bo, k);
+      gbm_bo[i].offset[k] = gbm_bo_get_offset(bo, k);
+      gbm_bo[i].width[k] = (k != 0 && format == GBM_FORMAT_YUV420) ? (int)(width / 2) : width;
+      gbm_bo[i].height[k] = (k != 0 && (format == GBM_FORMAT_YUV420 || format == GBM_FORMAT_NV12)) ? (int)(height / 2) : height;
+      gbm_bo[i].format[k] = format;
+      gbm_bo[i].modifiers[k] = modifier;
+      size[i] = gbm_bo[i].pitch[k] * gbm_bo[i].height[k];
     }
   }
-  return 0;
+
+  return planes;
 }
 
-static int gbm_setup(int width, int height, int drFlags) {
-  // need to implement get screen width and height
-  connPtr = drmModeGetConnector(drmInfoPtr->fd, drmInfoPtr->connector_id);
-  crtcPtr = drmModeGetCrtc(drmInfoPtr->fd, drmInfoPtr->crtc_id);
-  if (connPtr == NULL || crtcPtr == NULL) {
-    fprintf(stderr, "Could not get connector from drm.\n");
+int generate_gbm_buffer(int fd, struct _drm_buf gbm_buf[], int buffer_num, void *display, int width, int height, int src_fmt) {
+  uint64_t size[MAX_PLANE_NUM];
+  int planes = generate_gbm_bo(fd, gbm_buf, buffer_num, display, width, height, src_fmt, size);
+  if (planes < 1) {
+    fprintf(stderr, "Failed to create gbm buffer.\n");
     return -1;
   }
-  connModePtr = &connPtr->modes[0];
 
-  frame_width = width;
-  frame_height = height;
-  display_width = drmInfoPtr->width;
-  display_height = drmInfoPtr->height;
-//  convert_display(&width, &height, &display_width, &display_height, &x_offset, &y_offset);
-  x_offset = 0;
-  y_offset = 0;
+  for (int i = 0; i < buffer_num; i++) {
+    int flags = 0;
+    if (gbm_buf[i].modifiers[0] != DRM_FORMAT_MOD_INVALID) {
+      flags = DRM_MODE_FB_MODIFIERS;
+    }
+    drmModeAddFB2WithModifiers(fd, width, height, gbm_buf[i].format[0], gbm_buf[i].handle, gbm_buf[i].pitch, gbm_buf[i].offset, gbm_buf[i].modifiers, &gbm_buf[i].fb_id, flags);
+    if (!gbm_buf[i].fb_id) {
+      fprintf(stderr, "Failed to create framebuffer from gbm buffer object.\n");
+      gbm_bo_destroy((struct gbm_bo *)gbm_buf[i].data);
+      return -1;
+    }
+  }
 
-  uint32_t bo_flags = GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT; // must need by egl
-  //uint32_t bo_flags = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR | GBM_BO_USE_SCANOUT; // must need by egl
-  //bo_flags |= GBM_BO_USE_FRONT_RENDERING;
-  generate_gbm_bo(gbm_bo, display_callback_gbm.format, bo_flags);
-  gbm_window = gbm_surface_create(gbm_display, display_width, display_height, DEFAULT_FORMAT, bo_flags);
+  return planes;
+}
+
+void* gbm_get_window(int fd, void * display, int width, int height, uint32_t format) {
+  struct gbm_surface *gbm_window = gbm_surface_create((struct gbm_device *)display, width, height, format, bo_flags);
   if (!gbm_window) {
     fprintf(stderr, "Could not create gbm window.\n");
-    return -1;
-  }
-  if (isMaster && drmModeSetCrtc(drmInfoPtr->fd, crtcPtr->crtc_id, gbm_bo[0].fb_id, x_offset, y_offset, &connPtr->connector_id, 1, connModePtr) < 0) {
-    fprintf(stderr, "Could not set fb to drm crtc.\n");
-    return -1;
+    return NULL;
   }
 
-  return 0;
-}
-
-/*
-static int gbm_attach_display(int width, int height, int index) {
-  //if (drmModeSetPlane(drmInfoPtr->fd, drmInfoPtr->plane_id, drmInfoPtr->crtc_id, gbm_bo[index].fb_id, 0, x_offset, y_offset, display_width, display_height, 0, 0, frame_width << 16,frame_height << 16) < 0) {
-  int res = drmModeSetPlane(drmInfoPtr->fd, drmInfoPtr->plane_id, drmInfoPtr->crtc_id, gbm_bo[index].fb_id, 0, x_offset, y_offset, display_width, display_height, 0, 0, display_width << 16,display_height << 16);
-  if (res < 0) {
-    fprintf(stderr, "DRM: drmModeSetPlane() failed: %d.\n", res);
-    return -1;
-  }
-  return 0;
-}
-*/
-
-static void* gbm_get_display(const char* *device) {
-  uint32_t format = wantHdr ? DEFAULT_FORMAT_10BIT : DEFAULT_FORMAT;
-  display_callback_gbm.hdr_support = wantHdr ? true : false;
-
-  if (gbm_display == NULL) {  
-    drmInfoPtr = drm_init(NULL, format, wantHdr);
-    if (drmInfoPtr == NULL && wantHdr) {
-      display_callback_gbm.format = DEFAULT_FORMAT;
-      drmInfoPtr = drm_init(NULL, display_callback_gbm.format, false);
-      if (drmInfoPtr) {
-        display_callback_gbm.hdr_support = false;
-      }
-    }
-    if (drmInfoPtr == NULL) {
-      fprintf(stderr, "Could not init drm device.\n");
-      return NULL;
-    }
-
-    drm_magic_t magic;
-    if (drmGetMagic(drmInfoPtr->fd, &magic) == 0) {
-      if (drmAuthMagic(drmInfoPtr->fd, magic) != 0) {
-        isMaster = false;
-        //display_callback_gbm.display_put_to_screen = gbm_attach_display;
-        fprintf(stderr, "DRM: drmSetMaster() failed.\n");
-        return NULL;
-      }
-    }
-
-    gbm_display = gbm_create_device(drmInfoPtr->fd);
-    if (!gbm_display) {
-      fprintf(stderr, "Could not create gbm display.\n");
-      drm_close();
-      return NULL;
-    }
-  }
-
-  *device = "/dev/dri/renderD128";
-  return gbm_display;
-}
-
-static void* gbm_get_window() {
   return gbm_window;
 }
 
-static void gbm_get_resolution(int *width, int *height, bool isfullscreen) {
-  *width = drmInfoPtr->width;
-  *height = drmInfoPtr->height;
+void* gbm_get_display(int *fd) {
+  int gbm_fd = *fd;
+  bool has_fd = gbm_fd < 0 ? false : true;
+
+  if (!has_fd) {
+    char drmNode[64] = {'\0'};
+    gbm_fd = get_drm_render_fd(drmNode);
+    if (gbm_fd < 0) {
+      fprintf(stderr, "Could not open device %s.\n", drmNode);
+      return NULL;
+    }
+  }
+  struct gbm_device *gbm_display = gbm_create_device(gbm_fd);
+  if (!gbm_display) {
+    if (!has_fd)
+      close(gbm_fd);
+    fprintf(stderr, "Could not create gbm display.\n");
+    return NULL;
+  }
+  if (!has_fd)
+    *fd = gbm_fd;
+
+  return gbm_display;
+}
+
+void gbm_close_display (int gbm_fd, void *data, int buffer_num, void *display, void *window) {
+
+  if (data) {
+    struct Gbm_Bo *gbm_bo = (struct Gbm_Bo *)data;
+    for (int i = 0; i < buffer_num; i++) {
+      if (gbm_bo[i].bo != NULL) {
+        gbm_bo_destroy(gbm_bo[i].bo);
+        gbm_bo[i].bo = NULL;
+      }
+    }
+  }
+  if (window) {
+    struct gbm_surface *gbm_window = (struct gbm_surface *)window;
+    gbm_surface_destroy(gbm_window);
+  }
+  if (display) {
+    struct gbm_device *gbm_display = (struct gbm_device *)display;
+    gbm_device_destroy(gbm_display);
+  }
+  if (gbm_fd >= 0)
+    close(gbm_fd);
+
   return;
 }
 
-static int gbm_display_done(int width, int height, int index) {
-  return drm_flip_buffer(drmInfoPtr->fd, crtcPtr->crtc_id, gbm_bo[index].fb_id);
-}
+int gbm_convert_image(struct Render_Image *image, struct _drm_buf *drm_buf, int drm_fd, int handle_num, int plane_num, int dst_fmt, uint64_t size[MAX_PLANE_NUM], uint64_t map_offset[MAX_PLANE_NUM]) {
+  AVFrame * sframe = (AVFrame *)image->sframe.frame;
+  struct gbm_bo *bo = (struct gbm_bo *)drm_buf[image->index].data;
 
-static int gbm_vsync_loop(bool *exit, int *index, void(*loop_pre)(void), void(*loop_post)(void)) {
-  while (!(*exit)) {
-    if (drm_flip_buffer(drmInfoPtr->fd, crtcPtr->crtc_id, gbm_bo[*index].fb_id) < 0) {
+  uint8_t *data_buffer[MAX_PLANE_NUM] = {0};
+  void *mapped_handle[MAX_PLANE_NUM] = {0};
+
+  for (int m = 0; m < handle_num; m++) {
+    uint32_t stride = 0;
+    void *data_ptr = gbm_bo_map(bo, 0, 0, drm_buf[image->index].width[m], drm_buf[image->index].height[m], GBM_BO_TRANSFER_READ_WRITE, &stride, &mapped_handle[m]);
+    if (!data_ptr) {
+      fprintf(stderr, "Could not map gbm to userspace.\n");
       return -1;
     }
 
-    loop_pre();
-    loop_post();
-  }
-  
-  return 0;
-}
-
-static void gbm_clear_image_cache () {
-  for (int i = 0; i < MAX_FB_NUM; i++) {
-    if (gbm_bo[i].fb_id != 0) {
-      drmModeRmFB(drmInfoPtr->fd, gbm_bo[i].fb_id);
-      close(gbm_bo[i].fd[0]);
-      gbm_bo_destroy(gbm_bo[i].bo);
-      gbm_bo[i].handle[0] = 0;
-      gbm_bo[i].fb_id = 0;
-      gbm_bo[i].bo = NULL;
+    if (handle_num == 1) {
+      for (int i = 0; i < plane_num; i++) {
+        data_buffer[i] = data_ptr + drm_buf[image->index].offset[i];
+      }
+    } else {
+      data_buffer[m] = data_ptr;
     }
   }
-}
 
-static void gbm_close_display (void *data) {
-  drm_restore_display();
-  gbm_clear_image_cache();
-  if (gbm_window)
-    gbm_surface_destroy(gbm_window);
-  gbm_window = NULL;
-  if (gbm_display)
-    gbm_device_destroy(gbm_display);
-  gbm_display = NULL;
-  if (connPtr != NULL)
-    drmModeFreeConnector(connPtr);
-  if (crtcPtr != NULL)
-    drmModeFreeCrtc(crtcPtr);
-  drm_close();
-  return;
-}
+  convert_frame(sframe, data_buffer, drm_buf[image->index].pitch, dst_fmt);
 
-static void gbm_setup_post(void *data) {};
-static void gbm_change_cursor(struct WINDOW_OP *op, int flags) {}
-static void gbm_export_bo(struct Source_Buffer_Info buffers[MAX_FB_NUM], int *buffer_num, int *plane_num) {
-  *buffer_num = MAX_FB_NUM;
-  *plane_num = 1;
-  for (int i = 0; i < *buffer_num; i++) {
-    memcpy(&buffers[i], &gbm_bo[i], sizeof(buffers[i]));
+  if (handle_num == 1) {
+    gbm_bo_unmap(bo, mapped_handle[0]);
+  } else {
+    for (int m = 0; m < handle_num; m++) {
+      gbm_bo_unmap(bo, mapped_handle[m]);
+    }
   }
-}
 
-struct DISPLAY_CALLBACK display_callback_gbm = {
-  .name = "gbm",
-  .egl_platform = 0x31D7,
-  .format = DEFAULT_FORMAT,
-  .hdr_support = false,
-  .display_get_display = gbm_get_display,
-  .display_get_window = gbm_get_window,
-  .display_close_display = gbm_close_display,
-  .display_setup = gbm_setup,
-  .display_setup_post = gbm_setup_post,
-  .display_put_to_screen = gbm_display_done,
-  .display_get_resolution = gbm_get_resolution,
-  .display_modify_window = gbm_change_cursor,
-  .display_vsync_loop = gbm_vsync_loop,
-  .display_exported_buffer_info = gbm_export_bo,
-  .renders = EGL_RENDER,
-};
+  return image->index;
+}

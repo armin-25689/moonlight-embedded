@@ -55,6 +55,7 @@ typedef struct _CONFIGURATION {
   bool fixed_resolution;
   bool fill_resolution;
   bool less_threads;
+  bool modeset;
 } CONFIGURATION, *PCONFIGURATION;
 
 extern bool inputAdded;

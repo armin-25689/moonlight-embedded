@@ -83,7 +83,7 @@ static void x_get_resolution (int *width, int *height, bool isfullscreen) {
   return;
 }
 
-static int x_setup(int width, int height, int drFlags) {
+static int x_setup(int width, int height, int fps, int drFlags) {
 
   if (!display) {
     fprintf(stderr, "Error: failed to open X display.\n");
@@ -185,8 +185,8 @@ static int x_render_init(struct Render_Init_Info *paras) {
 }
 static void x_render_destroy() {};
 static int x_render_create(struct Render_Init_Info *paras) { return 0; };
-static int x_draw(union Render_Image image) { 
-  vaapi_queue(image.frame_data, window, x_display_width, x_display_height, frame_width, frame_height);
+static int x_draw(struct Render_Image *image) { 
+  vaapi_queue(image->sframe.frame_data, window, x_display_width, x_display_height, frame_width, frame_height);
   return 0;
 }
 

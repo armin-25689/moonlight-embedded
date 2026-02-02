@@ -41,8 +41,18 @@ void evdev_map(char* device);
 void evdev_rumble(unsigned short controller_id, unsigned short low_freq_motor, unsigned short high_freq_motor);
 void evdev_trans_op_fd(int fd);
 void evdev_init_vars(bool isfakegrab, bool issdlgp, bool isswapxyab, bool isinputadded);
-int x11_sdl_init(char* mappings);
 void grab_window(enum grabWindowRequest request);
 void sync_input_state(bool isinputing);
 void evdev_pass_mouse_mode(bool handled_by_window);
 void evdev_switch_mouse_mode(bool handled_by_window);
+
+#if defined(HAVE_SDL)
+extern int sdl_gamepads;
+
+int x11_sdl_init(char* mappings);
+void x11_sdl_clear();
+void sdlinput_rumble(unsigned short controller_id, unsigned short low_freq_motor, unsigned short high_freq_motor);
+void sdlinput_rumble_triggers(unsigned short controller_id, unsigned short left_trigger, unsigned short right_trigger);
+void sdlinput_set_motion_event_state(unsigned short controller_id, unsigned char motion_type, unsigned short report_rate_hz);
+void sdlinput_set_controller_led(unsigned short controller_id, unsigned char r, unsigned char g, unsigned char b);
+#endif

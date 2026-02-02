@@ -32,10 +32,13 @@ extern bool isYUV444;
 
 int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer_count, int thread_count);
 void ffmpeg_destroy(void);
-AVFrame* ffmpeg_get_frame(bool native_frame);
+AVFrame* ffmpeg_get_frame(AVFrame *frame, bool native_frame);
 int ffmpeg_decode(unsigned char* indata, int inlen);
 int ffmpeg_decode2(unsigned char* indata, int inlen, int flags);
 int ffmpeg_is_frame_full_range(const AVFrame* frame);
 int ffmpeg_get_frame_colorspace(const AVFrame* frame);
 void ffmpeg_get_plane_info (const AVFrame *frame, enum AVPixelFormat *pix_fmt, int *plane_num, enum PixelFormatOrder *plane_order);
 int software_supported_video_format(void);
+AVFrame **ffmpeg_alloc_frames(int dec_frames_cnt, enum AVPixelFormat pix_fmt, int width, int height, int align, bool need_alloc_buffer);
+void ffmpeg_free_frames(AVFrame **frames, int frame_count);
+AVFrame ** ffmpeg_get_frames();

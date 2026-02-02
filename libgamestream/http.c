@@ -74,7 +74,7 @@ int http_request(char* url, PHTTP_DATA data) {
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, data);
   curl_easy_setopt(curl, CURLOPT_URL, url);
 #ifdef __FreeBSD__
-  curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1);
+  curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
 #endif
 
   if (debug)

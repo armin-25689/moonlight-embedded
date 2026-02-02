@@ -4,7 +4,7 @@ Moonlight Embedded - Open source implementation of NVIDIA's GameStream
 
 =head1 SYNOPSIS
 
-Usage: I<moonlight> E<lt>actionE<gt> [options] [host]
+Usage: I<moonlight> E<lt>actionE<gt> [options] [host] [-port E<lt>numberE<gt>]
        I<moonlight> E<lt>configfileE<gt>
 
 =head1 ACTIONS
@@ -103,6 +103,10 @@ Can be 'auto', 'h264', 'h265', 'hevc', or 'av1'.
 Not all video decoders support H.265/HEVC or AV1.
 Will still use H.264 if server doesn't support HEVC or AV1.
 
+=item B<-hdr>
+
+Enable hdr display for drm_vaapi/drm/wayland_vaapi/wayland platform.
+
 =item B<-yuv444>
 
 Try to use yuv444 format.Better video quality but not efficiency.
@@ -114,6 +118,15 @@ If meet h264+YUV444P, 'x11' platform is recommended.
 =item B<-render_style> [I<fixed/fill/fixed_fill>]
 
 Change video render style to selected option.
+
+=item B<-rotate> [I<0/90/180/270>]
+
+Enable display rotate. Default is 0.
+Work on rk/drm/drm_vaapi platform.
+
+=item B<-modeset>
+
+Enable modeset for drm/drm_vaapi platform.
 
 =item B<-nograb>
 
@@ -160,10 +173,12 @@ By default the gamecontrollerdb.txt provided by Moonlight Embedded is used.
 =item B<-platform> [I<PLATFORM>]
 
 Select platform for audio and video output and input.
-<PLATFORM> can be vaapi, X11, x11, x11_vaapi, wayland_vaapi, rk or fake etc.
+<PLATFORM> can be vaapi, drm_vaapi, wayland_vaapi, software, drm, wayland, rk or fake etc.
 
-Platform 'x11/x11_vaapi/vaapi' will choose x11/wayland/gbm display automatically.
+Platform 'software/vaapi' will choose x11/wayland/gbm display automatically.
 Platform 'X11' will force to x11 server.
+Platform 'drm_vaapi and wayland_vaapi' support hdr display width vaapi decoder.
+Platform 'drm and wayland' use libyuv or libswscale to complete color convert.
 
 =item B<-nounsupported>
 
@@ -202,7 +217,7 @@ Using SDL gamepad driver instead of evdev when using
 
 =item B<-swapxyab>
 
-Swap x/y and a/b for gamepad.Only effected on embedded(not sdl) platform.
+Swap x/y and a/b for gamepad.
 
 =item B<-audio> [I<DEVICE>]
 
@@ -212,7 +227,7 @@ The default value is 'sysdefault' for ALSA and 'hdmi' for OMX on the Raspberry P
 =item B<-windowed>
 
 Display the stream in a window instead of fullscreen.
-Only available when X11 or SDL platform is used.
+Only available when X11 or wayland platform is used.
 
 =back
 

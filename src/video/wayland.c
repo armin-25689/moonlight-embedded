@@ -25,20 +25,36 @@
 #include "video_internal.h"
 #include "display.h"
 #include "xdg-shell-client-protocol.h"
+#include "wp-colormanagement.h"
+#include "wp-representation.h"
+#include "wp-linuxdmabuf.h"
 #include "wp-viewporter.h"
+#include "wp-presentation-time.h"
 #include "wlr-output-management.h"
 #include "zwp-pointer-constraints.h"
 #include "zwp-relative-pointer.h"
 #include "../input/evdev.h"
 
+#include "render.h"
+#include "drm.h"
+#include "ffmpeg.h"
+#include "gbm.h"
+#include "../loop.h"
+
 #include <Limelight.h>
 
+#include <libavutil/pixfmt.h>
+
+#include <sys/mman.h>
+#include <fcntl.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #define ACTION_MODIFIERS (MODIFIER_ALT|MODIFIER_CTRL)
 #define UNGRAB_WINDOW do { \
@@ -88,11 +104,61 @@ static struct zwp_pointer_constraints_v1 *zwp_pointer_constraints = NULL;
 static struct zwp_locked_pointer_v1 *zwp_locked_pointer = NULL;
 static struct zwp_relative_pointer_manager_v1 *zwp_relative_pointer_manager = NULL;
 static struct zwp_relative_pointer_v1 *zwp_relative_pointer = NULL;
+// for render
+#define COMMIT_TIME 2000000
+struct _frame_callback_object {
+  AVFrame *frame;
+  struct Render_Image *image;
+  struct wl_buffer *buffer;
+};
+struct _wl_render {
+  struct wp_presentation *wp_presentation;
+  struct wp_color_representation_manager_v1 *wp_color_representation;
+  struct wp_color_representation_surface_v1 *wp_representation_surface;
+  struct wp_color_manager_v1 *wp_color_manager;
+  struct wp_color_management_surface_v1 *wp_color_surface;
+  struct wp_color_management_output_v1 *wp_color_output;
+  struct zwp_linux_dmabuf_v1 *zwp_linux_dmabuf;
+  struct zwp_linux_dmabuf_feedback_v1 *feedback;
+  struct _drm_buf drm_buf[MAX_FB_NUM];
+  void *gbm_device;
+  struct _frame_callback_object frame_callback_object[MAX_FB_NUM];
+  struct {
+    bool output_primaries_bt2020;
+    bool set_luminances;
+    bool set_primaries;
+    bool bt2020;
+    bool support;
+  } hdr_support;
+  struct {
+    uint64_t refresh;
+    uint64_t fps_ntime;
+    struct timespec time_ns;
+    uint64_t seq;
+    bool done;
+  } presentation;
+  uint64_t size[MAX_PLANE_NUM];
+  uint32_t *supported_format;
+  int supported_format_count;
+  int drm_fd;
+  int dst_fmt;
+  int plane_num;
+  pthread_t display_thread;
+  int lastrange;
+  int lastcolorspace;
+  int (*wl_set_hdr_metadata) (int index);
+} static wl_render_base = {0};
+struct _dm_table {
+  uint32_t format;
+  uint32_t unuse;
+  uint64_t modifier;
+};
+// render
 
 static const char *quitCode = QUITCODE;
 
 static int offset_x = 0, offset_y = 0;
-static int display_width = 0, display_height = 0;
+static int display_width = 0, display_height = 0, frame_width = 0, frame_height = 0;
 static int output_width = 0, output_height = 0;
 static int *window_op_fd_p = NULL;
 static int32_t outputScaleFactor = 0;
@@ -109,8 +175,10 @@ static bool inputing = true;
 static bool wait_key_release = false;
 static int last_x = -1, last_y = -1;
 static int keyboard_modifiers = 0;
+static const char *render_device = "/dev/dri/renderD128";
 
 static void noop() {};
+static int noop_int() { return 0; };
 
 static void wlr_output_get_scale (void *data,
                              struct zwlr_output_head_v1 *zwlr_output_head_v1,
@@ -345,6 +413,35 @@ static const struct xdg_wm_base_listener xdg_wm_base_listener = {
   .ping = xdg_wm_base_ping,
 };
 
+static void wl_get_color_features (void *data, struct wp_color_manager_v1 *wp_mana, uint32_t features) {
+  switch (features) {
+  case WP_COLOR_MANAGER_V1_FEATURE_SET_LUMINANCES:
+    wl_render_base.hdr_support.set_luminances = true;
+    break;
+  case WP_COLOR_MANAGER_V1_FEATURE_SET_PRIMARIES:
+    wl_render_base.hdr_support.set_primaries = true;
+    break;
+  }
+
+  return;
+}
+
+static void wl_get_primaries_support (void *data, struct wp_color_manager_v1 *wp_mana, uint32_t primaries) {
+  switch (primaries) {
+  case WP_COLOR_MANAGER_V1_PRIMARIES_BT2020:
+    wl_render_base.hdr_support.bt2020 = true;
+    break;
+  }
+}
+
+static const struct wp_color_manager_v1_listener wp_color_manager_listener = {
+  .supported_intent = noop,
+  .supported_feature = wl_get_color_features,
+  .supported_tf_named = noop,
+  .supported_primaries_named = wl_get_primaries_support,
+  .done = noop,
+};
+
 static void registry_handler(void *data,struct wl_registry *registry, uint32_t id,
                              const char *interface,uint32_t version){
   if (strcmp(interface, wl_compositor_interface.name) == 0) {
@@ -367,6 +464,15 @@ static void registry_handler(void *data,struct wl_registry *registry, uint32_t i
     zwp_pointer_constraints = wl_registry_bind(registry, id, &zwp_pointer_constraints_v1_interface, 1);
   } else if (strcmp(interface, zwp_relative_pointer_manager_v1_interface.name) == 0) {
     zwp_relative_pointer_manager = wl_registry_bind(registry, id, &zwp_relative_pointer_manager_v1_interface, 1);
+  } else if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
+    wl_render_base.zwp_linux_dmabuf = wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, 4);
+  } else if (strcmp(interface, wp_color_manager_v1_interface.name) == 0) {
+    wl_render_base.wp_color_manager = wl_registry_bind(registry, id, &wp_color_manager_v1_interface, 1);
+    wp_color_manager_v1_add_listener(wl_render_base.wp_color_manager, &wp_color_manager_listener, NULL);
+  } else if (strcmp(interface, wp_color_representation_manager_v1_interface.name) == 0) {
+    wl_render_base.wp_color_representation = wl_registry_bind(registry, id, &wp_color_representation_manager_v1_interface, 1);
+  } else if (strcmp(interface, wp_presentation_interface.name) == 0) {
+    wl_render_base.wp_presentation = wl_registry_bind(registry, id, &wp_presentation_interface, 2);
   //} else if (strcmp(interface, wl_shm_interface.name) == 0) {
   //  wl_shm_p = wl_registry_bind(registry, id, &wl_shm_interface, 2);
   }
@@ -414,7 +520,7 @@ static const struct xdg_surface_listener xdg_surface_listener = {
   .configure = xdg_surface_handle_configure,
 };
 
-static int wayland_setup(int width, int height, int drFlags) {
+static int wayland_setup(int width, int height, int fps, int drFlags) {
 
   if (!wl_display) {
     fprintf(stderr, "Error: failed to open WL display.\n");
@@ -436,6 +542,10 @@ static int wayland_setup(int width, int height, int drFlags) {
     display_height = output_height;
     isFullscreen = true;
   }
+  frame_width = width;
+  frame_height = height;
+  uint64_t fps_time = 1000000000 / fps;
+  wl_render_base.presentation.fps_ntime = fps_time;
 
   if (compositor == NULL || xdg_wm_base == NULL || wp_viewporter == NULL) {
     fprintf(stderr, "Can't find compositor or xdg_wm_base or wp_viewporter\n");
@@ -482,11 +592,20 @@ static int wayland_setup(int width, int height, int drFlags) {
   if (isFullscreen)
     xdg_toplevel_set_fullscreen(xdg_toplevel, NULL);
 
-  wl_window = wl_egl_window_create(wlsurface, (int)(display_width * scale_factor), (int)(display_height * scale_factor));
-  if (wl_window == NULL) {
-    fprintf(stderr, "Can't create wayland window");
-    return -1;
+  if (drFlags & WAYLAND_RENDER) {
+    wl_render_base.hdr_support.support = wl_render_base.hdr_support.set_luminances && wl_render_base.hdr_support.set_primaries && wl_render_base.hdr_support.bt2020;
+    display_callback_wayland.hdr_support = wl_render_base.hdr_support.support;
+  } else {
+    if (wantHdr)
+      printf("WARNING: NO HDR support!\n");
+    wl_window = wl_egl_window_create(wlsurface, (int)(display_width * scale_factor), (int)(display_height * scale_factor));
+    if (wl_window == NULL) {
+      fprintf(stderr, "Can't create wayland window");
+      return -1;
+    }
+    display_callback_wayland.hdr_support = false;
   }
+
 
   return 0;
 }
@@ -513,7 +632,7 @@ static void* wl_get_display(const char* *device) {
     wl_display = wl_display_connect(NULL);
 
   if (wl_display)
-    *device = "/dev/dri/renderD128";
+    *device = render_device;
   return wl_display;
 }
 
@@ -522,6 +641,22 @@ static void wl_close_display(void *data) {
   *(wp->configure) = (((int64_t)offset_x) << 48) | (((int64_t)offset_y) << 32) | (((int64_t)display_width) << 16) | (int64_t)display_height;
 
   if (wl_display != NULL) {
+    if (wl_render_base.wp_presentation)
+      wp_presentation_destroy(wl_render_base.wp_presentation);
+    if (wl_render_base.wp_color_surface)
+      wp_color_management_surface_v1_destroy(wl_render_base.wp_color_surface);
+    if (wl_render_base.wp_color_output)
+      wp_color_management_output_v1_destroy(wl_render_base.wp_color_output);
+    if (wl_render_base.wp_representation_surface)
+      wp_color_representation_surface_v1_destroy(wl_render_base.wp_representation_surface);
+    if (wl_render_base.wp_color_manager)
+      wp_color_manager_v1_destroy(wl_render_base.wp_color_manager);
+    if (wl_render_base.wp_color_representation)
+      wp_color_representation_manager_v1_destroy(wl_render_base.wp_color_representation);
+    if (wl_render_base.feedback)
+      zwp_linux_dmabuf_feedback_v1_destroy(wl_render_base.feedback);
+    if (wl_render_base.zwp_linux_dmabuf)
+      zwp_linux_dmabuf_v1_destroy(wl_render_base.zwp_linux_dmabuf);
     if (wl_output != NULL) {
       wl_output_release(wl_output);
       wl_output = NULL;
@@ -577,6 +712,8 @@ static void wl_close_display(void *data) {
 }
 
 static int wl_dispatch_event(int width, int height, int index) {
+  if (wl_render_base.drm_fd > 0) return 0;
+
   while(wl_display_prepare_read(wl_display) != 0)
     wl_display_dispatch_pending(wl_display);
   wl_display_flush(wl_display);
@@ -627,7 +764,7 @@ struct DISPLAY_CALLBACK display_callback_wayland = {
   .name = "wayland",
   .egl_platform = 0x31D8,
   .format = NOT_CARE,
-  .hdr_support = false,
+  .hdr_support = true,
   .display_get_display = wl_get_display,
   .display_get_window = wl_get_window,
   .display_close_display = wl_close_display,
@@ -638,6 +775,499 @@ struct DISPLAY_CALLBACK display_callback_wayland = {
   .display_modify_window = wl_change_cursor,
   .display_vsync_loop = NULL,
   .display_exported_buffer_info = NULL,
-  .renders = EGL_RENDER,
+  .renders = EGL_RENDER | WAYLAND_RENDER,
 };
+
+#if defined(HAVE_DRM)
+static int set_hdr_static(int index) {
+
+  static bool hdr_active = false;
+  bool last_stat = hdr_active;
+  SS_HDR_METADATA sunshineHdrMetadata = {0};
+  if (!LiGetHdrMetadata(&sunshineHdrMetadata)) {
+    hdr_active = false;
+  }
+  else {
+    hdr_active = true;
+  }
+
+  if (wl_render_base.lastcolorspace >= 0) {
+    int colorspace = ffmpeg_get_frame_colorspace(wl_render_base.frame_callback_object[index].image->sframe.frame);
+    if (colorspace != wl_render_base.lastcolorspace) {
+      uint32_t color_space = colorspace == COLORSPACE_REC_2020 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT2020 : (colorspace == COLORSPACE_REC_709 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT709 : WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT601);
+      wp_color_representation_surface_v1_set_coefficients_and_range(wl_render_base.wp_representation_surface, color_space, wl_render_base.lastrange);
+      wl_render_base.lastcolorspace = colorspace;
+    }
+  }
+
+  if (last_stat == hdr_active)
+    return 0;
+
+  if (hdr_active == false) {
+    wp_color_management_surface_v1_unset_image_description(wl_render_base.wp_color_surface);
+    return 0;
+  }
+
+  struct wp_image_description_creator_params_v1 *creator = wp_color_manager_v1_create_parametric_creator(wl_render_base.wp_color_manager);
+  if (!creator) {
+    fprintf(stderr, "Cannot create params creator. \n");
+    return -1;
+  }
+
+  wp_image_description_creator_params_v1_set_primaries_named(creator, WP_COLOR_MANAGER_V1_PRIMARIES_BT2020);
+  wp_image_description_creator_params_v1_set_tf_named(creator, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ);
+  wp_image_description_creator_params_v1_set_mastering_luminance(creator, sunshineHdrMetadata.minDisplayLuminance, sunshineHdrMetadata.maxDisplayLuminance);
+  wp_image_description_creator_params_v1_set_mastering_display_primaries(creator, sunshineHdrMetadata.displayPrimaries[0].x, sunshineHdrMetadata.displayPrimaries[0].y, sunshineHdrMetadata.displayPrimaries[1].x, sunshineHdrMetadata.displayPrimaries[1].y, sunshineHdrMetadata.displayPrimaries[2].x, sunshineHdrMetadata.displayPrimaries[2].y, sunshineHdrMetadata.whitePoint.x, sunshineHdrMetadata.whitePoint.y);
+  wp_image_description_creator_params_v1_set_max_cll(creator, sunshineHdrMetadata.maxContentLightLevel);
+  wp_image_description_creator_params_v1_set_max_fall(creator, sunshineHdrMetadata.maxFrameAverageLightLevel);
+
+  struct wp_image_description_v1 *descriptor = wp_image_description_creator_params_v1_create(creator);
+  if (!descriptor) {
+    fprintf(stderr, "wl: cannot set hdr metadata.\n");
+    return -1;
+  }
+
+  wp_color_management_surface_v1_set_image_description(wl_render_base.wp_color_surface, descriptor, 0);
+
+  wp_image_description_v1_destroy(descriptor);
+
+  return 0;
+}
+
+static int wl_render_create(struct Render_Init_Info *paras) { 
+  wl_render_base.drm_fd = -1;
+
+  wl_render_base.gbm_device = gbm_get_display(&wl_render_base.drm_fd);
+  if (wl_render_base.drm_fd < 0) {
+    fprintf(stderr, "Could not open render device: %s.\n", render_device);
+    return -1;
+  }
+
+  return 0;
+}
+
+/*
+static void buffer_release (void *data, struct wl_buffer *buffer) {
+  return;
+}
+
+static const struct wl_buffer_listener buffer_listener = { .release = buffer_release, };
+
+static void frame_send_loop(void *data, struct wl_callback *cb, uint32_t time);
+static const struct wl_callback_listener frame_callback_listener = { .done = frame_send_loop };
+
+static void frame_send_loop(void *data, struct wl_callback *cb, uint32_t time) {};
+*/
+
+static inline void *commit_surface(void *data) {
+  struct _frame_callback_object *object = data;
+  AVFrame *frame = NULL;
+  struct Render_Image *image = NULL;
+
+  if (!done) {
+
+    while (object->image->vlist_num() > 1) {
+      void *tf;
+      void *ti;
+      object->image->mv_vlist_del(&tf, &ti);
+      object->image->mv_vlist_add(tf, ti);
+    }
+    object->image->mv_vlist_del((void **)&frame, (void **)&image);
+    if (image == NULL) {
+      image = object->image;
+    }
+    else {
+      object->image->mv_vlist_add(object->image->sframe.frame, object->image);
+      //wl_render_base.last.image = object->image;
+    }
+
+    int index = image->index;
+    struct wl_buffer *buffer = wl_render_base.frame_callback_object[index].buffer;
+
+    wl_render_base.wl_set_hdr_metadata(index);
+
+    //wl_buffer_add_listener(buffer, &buffer_listener, &wl_render_base.frame_callback_object[index]);
+    wl_surface_attach(wlsurface, buffer, 0, 0);
+    wl_surface_damage_buffer(wlsurface, 0, 0, frame_width, frame_height);
+
+    wl_surface_commit(wlsurface);
+
+    return  &wl_render_base.frame_callback_object[index];
+  }
+  return  NULL;
+}
+
+static void get_drm_format (void *data, struct zwp_linux_dmabuf_feedback_v1 *feedback, int32_t fd, uint32_t size) {
+  void *map = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+  if (map == MAP_FAILED) return;
+  struct _dm_table *drm_fmt = map;
+  int count = size / sizeof(*drm_fmt);
+  if (wl_render_base.supported_format) free(wl_render_base.supported_format);
+  wl_render_base.supported_format = calloc(count, sizeof(uint32_t));
+  for (int i = 0; i < count; i++) {
+    wl_render_base.supported_format[i] = drm_fmt[i].format;
+  }
+  wl_render_base.supported_format_count = count;
+
+  munmap(map, size);
+  close(fd);
+}
+
+static const struct zwp_linux_dmabuf_feedback_v1_listener feedback_listener = {
+  .done = noop,
+  .format_table = get_drm_format,
+  .main_device = noop,
+  .tranche_done = noop,
+  .tranche_target_device = noop,
+  .tranche_formats = noop,
+  .tranche_flags = noop,
+};
+
+static void get_primaries_named(void *data, struct wp_image_description_info_v1 *info, uint32_t named) {
+  if (named == WP_COLOR_MANAGER_V1_PRIMARIES_BT2020) wl_render_base.hdr_support.output_primaries_bt2020 = true;
+}
+
+static const struct wp_image_description_info_v1_listener output_description_info_listener = {
+  .done = noop, .icc_file = noop, .primaries = noop,
+  .primaries_named = get_primaries_named, .tf_power = noop, .tf_named = noop, .luminances = noop,
+  .target_primaries = noop, .target_luminance = noop, .target_max_cll = noop, .target_max_fall = noop,
+};
+
+static void surface_presentation (void *data, struct wp_presentation_feedback *wp_presentation_feedback,
+                                  uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec, uint32_t refresh,
+                                  uint32_t seq_hi, uint32_t seq_lo, uint32_t flags) {
+  uint64_t seq = ((uint64_t)seq_hi << 32) | seq_lo;
+  uint64_t now_tv_sec = ((uint64_t) tv_sec_hi << 32) | tv_sec_lo;
+  if ((wl_render_base.presentation.seq - seq) == 1) {
+    wl_render_base.presentation.fps_ntime = (tv_nsec - wl_render_base.presentation.time_ns.tv_nsec) + ((now_tv_sec - wl_render_base.presentation.time_ns.tv_sec) * 1000000000LL);
+    wl_render_base.presentation.done = true;
+  }
+  wl_render_base.presentation.refresh = refresh;
+  wl_render_base.presentation.time_ns.tv_sec =  now_tv_sec;
+  wl_render_base.presentation.time_ns.tv_nsec =  tv_nsec;
+  wl_render_base.presentation.seq  = seq;
+  wp_presentation_feedback_destroy(wp_presentation_feedback);
+  return;
+}
+
+static void surface_discarded (void *data, struct wp_presentation_feedback *wp_feedback) {
+  wp_presentation_feedback_destroy(wp_feedback);
+  return;
+}
+
+static const struct wp_presentation_feedback_listener presentation_feedback = {
+  .presented = surface_presentation,
+  .discarded = surface_discarded,
+  .sync_output = noop,
+};
+
+static void inline wait_to_commit() {
+  struct timespec now;
+
+  if (wl_render_base.presentation.done) {
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t interval = (now.tv_sec - wl_render_base.presentation.time_ns.tv_sec) * 1000000000LL + (now.tv_nsec - wl_render_base.presentation.time_ns.tv_nsec);
+    uint64_t rem = interval % wl_render_base.presentation.fps_ntime;
+    // 2ms to left
+    uint64_t commit = wl_render_base.presentation.refresh - COMMIT_TIME;
+    uint64_t wait_time = commit < rem ? (wl_render_base.presentation.fps_ntime - rem + commit) : commit - rem;
+    wl_render_base.presentation.done = false;
+
+    now.tv_sec = 0;
+    now.tv_nsec = wait_time;
+  }
+  else {
+    now.tv_sec = 0;
+    now.tv_nsec = wl_render_base.presentation.fps_ntime;
+  }
+
+  nanosleep(&now, NULL);
+
+  return;
+}
+
+static inline void dispatch_wl () {
+  while(wl_display_prepare_read(wl_display) != 0)
+    wl_display_dispatch_pending(wl_display);
+  wl_display_flush(wl_display);
+  wl_display_read_events(wl_display);
+  wl_display_dispatch_pending(wl_display);
+  return;
+}
+
+void *wl_dispatch_handler(void *data) {
+  uint32_t time = 0;
+  bool start = false;
+  struct _frame_callback_object *object = &wl_render_base.frame_callback_object[0];
+  struct wp_presentation_feedback *pr = NULL;
+
+  while (!start && !done) {
+    struct Render_Image *image = object->image;
+    if (image != NULL) {
+      if (image->vlist_num() > 1) start = true;
+    }
+    wait_to_commit();
+    dispatch_wl();
+  }
+
+  void *tf, *ti;
+  // retrive first image
+  object->image->mv_vlist_del(&tf, &ti);
+
+  while (!done) {
+    time++;
+
+    object = commit_surface(object);
+    dispatch_wl();
+    wait_to_commit();
+    if (done) break;
+
+    switch (time) {
+    case 120:
+      time = 0;
+      break;
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+      pr = wp_presentation_feedback(wl_render_base.wp_presentation, wlsurface);
+      wp_presentation_feedback_add_listener(pr, &presentation_feedback, NULL);
+      break;
+    }
+  }
+
+  return (void *)0;
+}
+
+static int wl_render_init(struct Render_Init_Info *paras) { 
+  if (wl_render_base.wp_color_representation == NULL || wl_render_base.zwp_linux_dmabuf == NULL || wl_render_base.wp_presentation == NULL) {
+    fprintf(stderr, "wl: color_representation/linux_dmabuf/presentation could not supported.\n");
+    return -1;
+  }
+  wl_render_base.wp_representation_surface = wp_color_representation_manager_v1_get_surface(wl_render_base.wp_color_representation, wlsurface);
+  if (wl_render_base.wp_representation_surface == NULL) {
+    fprintf(stderr, "wl: color_surface/representation_surface can not supported.\n");
+    return -1;
+  }
+
+  if (wl_render_base.wp_color_manager) {
+    wl_render_base.wp_color_surface = wp_color_manager_v1_get_surface(wl_render_base.wp_color_manager, wlsurface);
+  }
+  if (!wl_render_base.wp_color_surface || !display_callback_wayland.hdr_support) {
+    if (useHdr) {
+      fprintf(stderr, "wl: cannot get color manager surface ,please remove -hdr options.\n");
+      display_callback_wayland.hdr_support = false;
+      return -1;
+    }
+  }
+  if (useHdr) {
+    wl_render_base.wp_color_output = wp_color_manager_v1_get_output(wl_render_base.wp_color_manager, wl_output);
+    struct wp_image_description_v1 *output_description = wp_color_management_output_v1_get_image_description(wl_render_base.wp_color_output);
+    struct wp_image_description_info_v1 *output_description_info = wp_image_description_v1_get_information(output_description);
+    wp_image_description_info_v1_add_listener(output_description_info, &output_description_info_listener, NULL);
+    wp_image_description_v1_destroy(output_description);
+    wl_render_base.wl_set_hdr_metadata = &set_hdr_static;
+  } else
+    wl_render_base.wl_set_hdr_metadata = &noop_int;
+
+  wl_render_base.feedback = zwp_linux_dmabuf_v1_get_surface_feedback(wl_render_base.zwp_linux_dmabuf, wlsurface);
+  zwp_linux_dmabuf_feedback_v1_add_listener(wl_render_base.feedback, &feedback_listener, NULL);
+  wl_surface_commit(wlsurface);
+  wl_display_roundtrip(wl_display);
+
+  if (useHdr && !wl_render_base.hdr_support.output_primaries_bt2020)
+    fprintf(stderr, "WARNNING: wayland output is not BT2020 primaries! \n");
+
+  if (pthread_create(&wl_render_base.display_thread, NULL, wl_dispatch_handler, NULL) != 0) {
+    fprintf(stderr, "Error: Cannot create dislpay thread! \n");
+    return -1;
+  }
+  pthread_setprio(wl_render_base.display_thread, 96);
+
+  return 0; 
+}
+
+static void wl_render_destroy() {
+
+  if (wl_render_base.supported_format)
+    free(wl_render_base.supported_format);
+
+  for (int i = 0; i < MAX_FB_NUM; i++) {
+    if (wl_render_base.frame_callback_object[i].buffer) {
+      wl_buffer_destroy(wl_render_base.frame_callback_object[i].buffer);
+      wl_render_base.frame_callback_object[i].buffer = NULL;
+    }
+  }
+
+  if (wl_render_base.display_thread)
+    pthread_join(wl_render_base.display_thread, NULL);
+
+  if (wl_render_base.drm_fd >= 0 )
+    gbm_close_display (wl_render_base.drm_fd, wl_render_base.drm_buf, MAX_FB_NUM, wl_render_base.gbm_device, NULL);
+
+  memset(&wl_render_base, 0, sizeof(wl_render_base));
+  wl_render_base.drm_fd = -1;
+}
+
+static inline struct wl_buffer *wl_import_dmabuf(struct _drm_buf *drm_buf) {
+  struct wl_buffer *buffer = NULL;
+
+  struct zwp_linux_buffer_params_v1 *creator = zwp_linux_dmabuf_v1_create_params(wl_render_base.zwp_linux_dmabuf);
+  if (!creator) {
+    fprintf(stderr, "Create linux dmabuf creator failed.\n");
+    return NULL;
+  }
+  for (int i = 0; i < wl_render_base.plane_num; i++) {
+    zwp_linux_buffer_params_v1_add(creator, drm_buf->fd[i], i, drm_buf->offset[i], drm_buf->pitch[i], drm_buf->modifiers[i] >> 32, drm_buf->modifiers[i] & 0xFFFFFFFF);
+  }
+
+  buffer = zwp_linux_buffer_params_v1_create_immed(creator, drm_buf->width[0], drm_buf->height[0], drm_buf->format[0], 0);
+  zwp_linux_buffer_params_v1_destroy(creator);
+  if (!buffer) {
+    fprintf(stderr, "Create wayland linux dmabuf failed.\n");
+    return NULL;
+  }
+
+  return buffer;
+}
+
+static inline int store_objects(int index) {
+  struct wl_buffer *buffer = wl_import_dmabuf(&wl_render_base.drm_buf[index]);
+  if (buffer == NULL) {
+    fprintf(stderr, "Create wayland linux dmabuf failed.\n");
+    return -1;
+  }
+  wl_render_base.frame_callback_object[index].buffer = buffer;
+
+  return 0;
+}
+
+static int wl_sync_frame_config(struct Render_Config *config) {
+  int dst_fmt = -1;
+  bool need_change_color_config = false;
+  bool need_generate_buffer = false;
+  bool full_color_range = config->full_color_range;
+  int colorspace = config->color_space;
+
+  switch (config->pix_fmt) {
+  case AV_PIX_FMT_YUV444P:
+  case AV_PIX_FMT_YUVJ444P:
+  case AV_PIX_FMT_YUV420P:
+  case AV_PIX_FMT_YUVJ420P:
+    need_generate_buffer = true;
+    dst_fmt = AV_PIX_FMT_BGR0;
+    break;
+  case AV_PIX_FMT_YUV444P10:
+  case AV_PIX_FMT_YUV420P10:
+    need_generate_buffer = true;
+    dst_fmt = AV_PIX_FMT_X2RGB10LE;
+    break;
+  case AV_PIX_FMT_VUYX:
+  case AV_PIX_FMT_XV30:
+  case AV_PIX_FMT_NV12:
+  case AV_PIX_FMT_P010:
+    dst_fmt = config->pix_fmt;
+    need_change_color_config = true;
+    break;
+  }
+
+  wl_render_base.lastcolorspace = -1;
+  if (need_change_color_config) {
+    uint32_t color_space = colorspace == COLORSPACE_REC_2020 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT2020 : (colorspace == COLORSPACE_REC_709 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT709 : WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT601);
+    uint32_t range = full_color_range ? WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_FULL : WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_LIMITED;
+    wl_render_base.lastrange = range;
+    wl_render_base.lastcolorspace = colorspace;
+    wp_color_representation_surface_v1_set_coefficients_and_range(wl_render_base.wp_representation_surface, color_space, range);
+  }
+
+  if (need_generate_buffer) {
+    wl_render_base.plane_num = generate_gbm_bo(wl_render_base.drm_fd, wl_render_base.drm_buf, MAX_FB_NUM, wl_render_base.gbm_device, frame_width, frame_height, dst_fmt, wl_render_base.size);
+    if (wl_render_base.plane_num < 1) {
+      fprintf(stderr, "Could not generate drm buf.\n");
+      return -1;
+    }
+    for (int buffer = 0; buffer < MAX_FB_NUM; buffer++) {
+      if (store_objects(buffer) < 0)
+        return -1;
+    }
+  }
+
+  if (wl_render_base.supported_format) {
+    int found = -1;
+    for (int p = 0; p < wl_render_base.supported_format_count; p++) {
+      if (wl_render_base.supported_format[p] == wl_render_base.drm_buf[0].format[0]) found = p;
+    }
+    if (found < 0) {
+      fprintf(stderr, "ERROR: wayland linux dmabuf not support the drm format: %.4s.\n", (char *)&wl_render_base.drm_buf[0].format[0]);
+      return -1;
+    }
+  }
+
+  wl_render_base.dst_fmt = dst_fmt;
+  
+  return 0;
+}
+
+static int wl_import_image(struct Source_Buffer_Info *buffer, int planes, int composeOrSeperate, void* *image, int index) {
+  wl_render_base.plane_num = planes;
+  int geted_index = drm_import_hw_buffer (wl_render_base.drm_fd, wl_render_base.drm_buf, buffer, planes, composeOrSeperate, image, index);
+
+  if (wl_render_base.frame_callback_object[index].buffer)
+    wl_buffer_destroy(wl_render_base.frame_callback_object[index].buffer);
+  wl_render_base.frame_callback_object[index].buffer = NULL;
+  if (store_objects(index) < 0)
+    return -1;
+
+  return geted_index;
+}
+
+static void wl_free_image(void* *image, int planes) {};
+
+static int wl_draw(struct Render_Image *image) {
+  int ret = -1;
+  const int handle_num = 1;
+  uint64_t map_offset[MAX_PLANE_NUM] = {0};
+
+  if (ffmpeg_decoder == SOFTWARE) {
+    ret = gbm_convert_image(image, wl_render_base.drm_buf, wl_render_base.drm_buf[image->index].fd[0], handle_num, wl_render_base.plane_num, wl_render_base.dst_fmt, wl_render_base.size, map_offset);
+  } else {
+    ret = image->index;
+  }
+
+  if (ret < 0) {
+    fprintf(stderr, "wl draw failed.");
+    return ret;
+  }
+
+  if (wl_render_base.frame_callback_object[ret].image != image) {
+    if (ret == 0) {
+      struct wp_presentation_feedback *pr = wp_presentation_feedback(wl_render_base.wp_presentation, wlsurface);
+      wp_presentation_feedback_add_listener(pr, &presentation_feedback, NULL);
+      wl_surface_attach(wlsurface, wl_render_base.frame_callback_object[ret].buffer, 0, 0);
+      wl_surface_commit(wlsurface);
+    }
+    wl_render_base.frame_callback_object[ret].frame = image->sframe.frame;
+    wl_render_base.frame_callback_object[ret].image = image;
+  }
+
+  return ret;
+}
+
+struct RENDER_CALLBACK wayland_render = {
+  .name = "wayland",
+  .display_name = "wayland",
+  .is_hardaccel_support = true,
+  .render_type = WAYLAND_RENDER,
+  .decoder_type = SOFTWARE,
+  .data = NULL,
+  .render_create = wl_render_create,
+  .render_init = wl_render_init,
+  .render_sync_config = wl_sync_frame_config,
+  .render_draw = wl_draw,
+  .render_destroy = wl_render_destroy,
+  .render_sync_window_size = NULL,
+  .render_map_buffer = wl_import_image,
+  .render_unmap_buffer = wl_free_image,
+};
+#endif
 #endif

@@ -32,8 +32,6 @@
 #include "ffmpeg_vaapi.h"
 #endif
 // lack conditions
-#include "drm_base.h"
-#include "drm_base_ffmpeg.h"
 
 // General decoder and renderer state
 static AVPacket* pkt;
@@ -42,7 +40,6 @@ static AVCodecContext* decoder_ctx;
 static AVFrame** dec_frames;
 
 static int dec_frames_cnt;
-static int current_frame, next_frame;
 
 int supportedVideoFormat = 0;
 bool supportedHDR = false;
@@ -80,7 +77,7 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
     }
   }
   if (wantHdr && !(videoFormat & VIDEO_FORMAT_MASK_10BIT)) {
-    printf("No HDR support.\n");
+    printf("WARNING: No HDR support.\n");
   }
 
   if (videoFormat & VIDEO_FORMAT_MASK_YUV444) {
@@ -155,29 +152,19 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
     else
       decoder_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
-    AVDictionary* dict = NULL;
     #ifdef HAVE_VAAPI
     if (ffmpeg_decoder == VAAPI) {
       vaapi_init(decoder_ctx);
     }
     #endif
-    // need conditions111111111111111111
-    if (render == DRM_RENDER) {
-      ffmpeg_bind_drm_ctx(decoder_ctx, &dict);
-    }
 
     AVDictionary* *dictPtr = NULL;
-    if(dict)
-      dictPtr = &dict;
     int err = avcodec_open2(decoder_ctx, decoder, dictPtr);
     if (err < 0) {
       printf("Couldn't open codec: %s\n", decoder->name);
       avcodec_free_context(&decoder_ctx);
       continue;
     }
-
-    if (dictPtr != NULL)
-      av_dict_free(&dict);
 
     break;
   }
@@ -192,46 +179,60 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
       
     printf("WARNING: Try use -bitrate N options to reduce bitrate for avoding lag!\n");
 
+  // glteximage2d need 64 type align to render.just for egl with cpu render
+  int widthMulti = 1;
+  if (ffmpeg_decoder == SOFTWARE && render == EGL_RENDER) {
+    widthMulti = isYUV444 ? 64 : 128;
+  }
   dec_frames_cnt = buffer_count;
-  dec_frames = malloc(buffer_count * sizeof(AVFrame*));
+  dec_frames = ffmpeg_alloc_frames(dec_frames_cnt, decoder_ctx->pix_fmt, width, height, widthMulti, (width % widthMulti != 0) ? true : false);
+  if (dec_frames == NULL)
+    return -1;
+
+  return 0;
+}
+
+void ffmpeg_free_frames(AVFrame **frames, int frame_count) {
+  if (frames == NULL) return;
+  for ( int i = 0; i < frame_count; i++) {
+    if (frames[i]) {
+      av_frame_unref(frames[i]);
+      av_frame_free(&frames[i]);
+      frames[i] = NULL;
+    }
+  }
+  free(frames);
+}
+
+AVFrame **ffmpeg_alloc_frames(int dec_frames_cnt, enum AVPixelFormat pix_fmt, int width, int height, int align, bool need_alloc_buffer) {
+  AVFrame **dec_frames = malloc(dec_frames_cnt * sizeof(AVFrame*));
   if (dec_frames == NULL) {
     fprintf(stderr, "Couldn't allocate frames");
-    return -1;
+    return NULL;
   }
 
-  int widthMulti = -1;
-  if (ffmpeg_decoder == SOFTWARE) {
-    if (render == DRM_RENDER) {
-// condition111111111111111111111111
-      widthMulti = get_drm_dbum_aligned(-1, decoder_ctx->pix_fmt, width, height);
-    }
-    else {
-      widthMulti = isYUV444 ? 64 : 128;
-    }
-  }
-
-  for (int i = 0; i < buffer_count; i++) {
+  for (int i = 0; i < dec_frames_cnt; i++) {
     dec_frames[i] = av_frame_alloc();
     if (dec_frames[i] == NULL) {
       fprintf(stderr, "Couldn't allocate frame");
-      return -1;
+      ffmpeg_free_frames(dec_frames, i);
+      return NULL;
     }
-    if (widthMulti > 0) {
-      if (width % widthMulti != 0) {
-        dec_frames[i]->format = decoder_ctx->pix_fmt;
-        dec_frames[i]->width = decoder_ctx->width;
-        dec_frames[i]->height = decoder_ctx->height;
-        // glteximage2d need 64 type least
-        if (av_frame_get_buffer(dec_frames[i], widthMulti) < 0) {
-          fprintf(stderr, "Couldn't allocate frame buffer");
-          return -1;
-        }
+    if (need_alloc_buffer) {
+      dec_frames[i]->format = pix_fmt;
+      dec_frames[i]->width = width;
+      dec_frames[i]->height = height;
+      if (av_frame_get_buffer(dec_frames[i], align) < 0) {
+        fprintf(stderr, "Couldn't allocate frame buffer");
+        ffmpeg_free_frames(dec_frames, i + 1);
+        return NULL;
       }
     }
   }
 
-  return 0;
+  return dec_frames;
 }
+
 
 // This function must be called after
 // decoding is finished
@@ -241,27 +242,21 @@ void ffmpeg_destroy(void) {
     avcodec_free_context(&decoder_ctx);
   }
   if (dec_frames) {
-    for (int i = 0; i < dec_frames_cnt; i++) {
-      if (dec_frames[i])
-        av_frame_free(&dec_frames[i]);
-    }
-    free(dec_frames);
+    ffmpeg_free_frames(dec_frames, dec_frames_cnt);
     dec_frames = NULL;
   }
   decoder_ctx = NULL;
   decoder = NULL;
 }
 
-AVFrame* ffmpeg_get_frame(bool native_frame) {
-  int err = avcodec_receive_frame(decoder_ctx, dec_frames[next_frame]);
+AVFrame* ffmpeg_get_frame(AVFrame *frame, bool native_frame) {
 
+  int err = avcodec_receive_frame(decoder_ctx, frame);
   if (err == 0) {
     av_packet_unref(pkt);
-    current_frame = next_frame;
-    next_frame = (current_frame+1) % dec_frames_cnt;
 
     if (ffmpeg_decoder == SOFTWARE || native_frame)
-      return dec_frames[current_frame];
+      return frame;
   } else if (err != AVERROR(EAGAIN)) {
     char errorstring[512];
     av_strerror(err, errorstring, sizeof(errorstring));
@@ -325,7 +320,6 @@ void ffmpeg_get_plane_info (const AVFrame *frame, enum AVPixelFormat *pix_fmt, i
   }
   else {
     *pix_fmt = frame->format;
-    //*pix_fmt = decoder_ctx->pix_fmt;
   }
   printf("Try to use pixel format: %s \n", av_get_pix_fmt_name(*pix_fmt));
 
@@ -373,4 +367,8 @@ int software_supported_video_format() {
   format |= VIDEO_FORMAT_AV1_MAIN8;
   format |= VIDEO_FORMAT_AV1_MAIN10;
   return format;
+}
+
+AVFrame ** ffmpeg_get_frames() {
+  return dec_frames;
 }

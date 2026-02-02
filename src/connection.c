@@ -24,7 +24,7 @@
 #include <signal.h>
 
 #ifdef HAVE_SDL
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #endif
 
 pthread_t main_thread_id = 0;
@@ -58,7 +58,7 @@ static void connection_terminated(int errorCode) {
 
   #ifdef HAVE_SDL
       SDL_Event event;
-      event.type = SDL_QUIT;
+      event.type = SDL_EVENT_QUIT;
       SDL_PushEvent(&event);
   #endif
 

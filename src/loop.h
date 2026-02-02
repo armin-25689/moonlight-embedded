@@ -19,6 +19,7 @@
 
 #include <sys/epoll.h>
 #include <sys/queue.h>
+#include <stdbool.h>
 
 #define LOOP_RETURN 1
 #define LOOP_OK 0
@@ -36,6 +37,8 @@ struct List_Node {
   LIST_ENTRY(List_Node) node;
   void *data;
 };
+
+extern bool done;
 
 void loop_add_fd(int fd, Fd_Handler handler, int events);
 void loop_add_fd1(int fd, Fd_Handler handler, int events, void *data);

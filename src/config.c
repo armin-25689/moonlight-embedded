@@ -64,6 +64,7 @@ static struct option long_options[] = {
   {"nosops", no_argument, NULL, 'l'},
   {"lessthreads", no_argument, NULL, 'L'},
   {"audio", required_argument, NULL, 'm'},
+  {"modeset", no_argument, NULL, 'M'},
   {"localaudio", no_argument, NULL, 'n'},
   {"config", required_argument, NULL, 'o'},
   {"platform", required_argument, NULL, 'p'},
@@ -202,6 +203,9 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
     break;
   case 'm':
     config->audio_device = value;
+    break;
+  case 'M':
+    config->modeset = true;
     break;
   case 'n':
     config->localaudio = true;
@@ -439,6 +443,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->viewonly = false;
   config->mouse_emulation = true;
   config->rotate = 0;
+  config->modeset = false;
   config->codec = CODEC_UNSPECIFIED;
   config->hdr = false;
   config->pin = 0;
