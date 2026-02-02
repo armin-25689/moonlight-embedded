@@ -883,6 +883,8 @@ static inline void *commit_surface(void *data) {
 
     int index = image->index;
     struct wl_buffer *buffer = wl_render_base.frame_callback_object[index].buffer;
+    if (buffer == NULL)
+      return NULL;
 
     wl_render_base.wl_set_hdr_metadata(index);
 
@@ -1009,6 +1011,7 @@ void *wl_dispatch_handler(void *data) {
     wait_to_commit();
     dispatch_wl();
   }
+  if (done) return (void *)0;
 
   void *tf, *ti;
   // retrive first image
@@ -1171,6 +1174,8 @@ static int wl_sync_frame_config(struct Render_Config *config) {
     break;
   }
 
+  wl_render_base.dst_fmt = dst_fmt;
+  
   wl_render_base.lastcolorspace = -1;
   if (need_change_color_config) {
     uint32_t color_space = colorspace == COLORSPACE_REC_2020 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT2020 : (colorspace == COLORSPACE_REC_709 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT709 : WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT601);
@@ -1203,8 +1208,6 @@ static int wl_sync_frame_config(struct Render_Config *config) {
     }
   }
 
-  wl_render_base.dst_fmt = dst_fmt;
-  
   return 0;
 }
 

@@ -186,12 +186,7 @@ static int drm_setup(int width, int height, int fps, int drFlags) {
   display_height = drmInfoPtr->height;
 
   uint32_t rotate = drFlags & DISPLAY_ROTATE_MASK;
-  int commit = -1;
-  if (rotate) commit = drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->plane_id, drmInfoPtr->plane_rotation_prop_id, (rotate >> 2));
-  if ((rotate & (DISPLAY_ROTATE_90 | DISPLAY_ROTATE_270)) && commit > -1) {
-    display_width = drmInfoPtr->height;
-    display_height = drmInfoPtr->width;
-  }
+  if (rotate) drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->plane_id, drmInfoPtr->plane_rotation_prop_id, (rotate >> 2));
 
   if (drFlags & DRM_RENDER) {
     gbm_close_display (-1, NULL, MAX_FB_NUM, gbm_display, NULL);

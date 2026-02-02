@@ -367,6 +367,7 @@ int main(int argc, char* argv[]) {
                                                VIDEO_FORMAT_MASK_H265 |
                                                VIDEO_FORMAT_MASK_AV1));
       if (!wantHdr || (!supportedHDR)) config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_10BIT;
+      if (!wantYuv444) config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_YUV444;
 
       if (system == X11) {
         // for not specify codec,but use software decoder platform,use h264 default
