@@ -360,14 +360,15 @@ int main(int argc, char* argv[]) {
       if (platform_prefers_codec(system, CODEC_AV1)) config.stream.supportedVideoFormats |= VIDEO_FORMAT_MASK_AV1;
       break;
     }
+    if (!wantHdr) config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_10BIT;
+    if (!wantYuv444) config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_YUV444;
     // set yuv444 depend on config
     if (system == X11_VAAPI || system == X11) {
       config.stream.supportedVideoFormats &= (supportedVideoFormat & 
                                               (VIDEO_FORMAT_MASK_H264 |
                                                VIDEO_FORMAT_MASK_H265 |
                                                VIDEO_FORMAT_MASK_AV1));
-      if (!wantHdr || (!supportedHDR)) config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_10BIT;
-      if (!wantYuv444) config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_YUV444;
+      if (!supportedHDR) config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_10BIT;
 
       if (system == X11) {
         // for not specify codec,but use software decoder platform,use h264 default
