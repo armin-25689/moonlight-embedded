@@ -30,7 +30,6 @@
 #include "video_internal.h"
 #include "render.h"
 #include "ffmpeg.h"
-#include "ffmpeg_vaapi_x11.h"
 #include "../input/x11.h"
 
 static Display *display = NULL;
@@ -175,21 +174,6 @@ static int x_put_to_screen(int width, int height, int i) {
   return 0;
 }
 
-static int x_render_init(struct Render_Init_Info *paras) {
-  frame_width = paras->frame_width;
-  frame_height = paras->frame_height;
-  // direct render not support yuv444
-  if (paras->is_yuv444)
-    return -1;
-  return 0;
-}
-static void x_render_destroy() {};
-static int x_render_create(struct Render_Init_Info *paras) { return 0; };
-static int x_draw(struct Render_Image *image) { 
-  vaapi_queue(image->sframe.frame_data, window, x_display_width, x_display_height, frame_width, frame_height);
-  return 0;
-}
-
 struct DISPLAY_CALLBACK display_callback_x11 = {
   .name = "x11",
   .egl_platform = 0x31D5,
@@ -208,6 +192,22 @@ struct DISPLAY_CALLBACK display_callback_x11 = {
   .renders = (EGL_RENDER | X11_RENDER),
 };
 
+/*
+static int x_render_init(struct Render_Init_Info *paras) {
+  frame_width = paras->frame_width;
+  frame_height = paras->frame_height;
+  // direct render not support yuv444
+  if (paras->is_yuv444)
+    return -1;
+  return 0;
+}
+static void x_render_destroy() {};
+static int x_render_create(struct Render_Init_Info *paras) { return 0; };
+static int x_draw(struct Render_Image *image) { 
+  vaapi_queue(image->sframe.frame_data, window, x_display_width, x_display_height, frame_width, frame_height);
+  return 0;
+}
+
 struct RENDER_CALLBACK x11_render = {
   .name = "x11",
   .display_name = "x11",
@@ -222,3 +222,4 @@ struct RENDER_CALLBACK x11_render = {
   .render_destroy = x_render_destroy,
   .render_sync_window_size = NULL,
 };
+*/
