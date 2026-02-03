@@ -28,15 +28,12 @@
 #include "display.h"
 #include "video.h"
 #include "video_internal.h"
-#include "render.h"
-#include "ffmpeg.h"
 #include "../input/x11.h"
 
 static Display *display = NULL;
 static Window window;
 
 static int screen_width, screen_height;
-static int frame_width, frame_height;
 
 static bool startedMuiltiThreads = false;
 
