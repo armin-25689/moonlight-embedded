@@ -140,11 +140,12 @@ Note2: Only x11 and wayland server worked normaly now.
 Note3: If want -nograb with drm platform to avoiding grab error: 
 $ cat > s.sh <<-EOF
 #!/bin/sh
+stty -echo -isig
 exec < /dev/null
-stty -echo
 moonlight xxx
 EOF
-$ exec s.sh
+$ exec sh s.sh
+or $ . ./s.sh
 redirect stdin to /dev/null
 
 =item B<-remote> [I<yes/no/auto>]

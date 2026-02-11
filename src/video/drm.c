@@ -63,127 +63,6 @@ static int drm_copy (struct Render_Image *image);
 static int drm_direct(struct Render_Image *image) { return image->index; };
 // render
 
-/*
-struct Tty_Stat {
-  struct termios term;
-  struct vt_mode vt;
-  int kd;
-  int stdin;
-  bool has_get;
-};
-static struct Tty_Stat tty_stat = {0};
-
-static inline int get_termios (int fd, struct termios *term) {
-  return tcgetattr(fd, term);
-}
-static int set_new_tty (int fd, struct Tty_Stat *tty) {
-  if (!tty->has_get) {
-    if (get_termios(fd, &tty->term) < 0) {
-      perror("Error: get termios failed: ");
-      return -1;
-    }
-    if (ioctl(fd, KDGETMODE, &tty->kd) < 0) {
-      perror("Error: get kd mode failed: ");
-      return -1;
-    }
-    tty->stdin = dup(STDIN_FILENO);
-    if (tty->stdin < 0) {
-      perror("Error: get stdin failed: ");
-      return -1;
-    }
-/*
-    if (ioctl(fd, VT_GETMODE, &tty->vt) < 0) {
-      perror("Error: get vt mode failed: ");
-      return -1;
-    }
-    if (ioctl(fd, TIOCSCTTY, 0) < 0) {
-      perror("Error: set controller tty failed: ");
-      return -1;
-    }
-*/
-  }
-
-/*
-  struct vt_mode vt = {0};
-  vt.mode = VT_PROCESS;
-  vt.relsig = SIGUSR1;
-  vt.acqsig = SIGUSR2;
-  if (ioctl(fd, VT_SETMODE, &vt) < 0) {
-    perror("Error: set vt mode failed: ");
-    return -1;
-  }
-*/
-  struct termios term = tty->term;
-  term.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
-  term.c_iflag &= ~(ICRNL | INPCK | BRKINT | IXON);
-  term.c_cc[VMIN] = 1;
-  term.c_cc[VTIME] = 0;
-  if (tcsetattr(fd, TCSANOW, &term) < 0) {
-    perror("Error: set termios failed: ");
-    return -1;
-  }
-
-  int mode = KD_GRAPHICS;
-  if (ioctl(fd, KDSETMODE, &mode) < 0) {
-    perror("Error: set kd mode failed: ");
-    return -1;
-  }
-
-  int nfd = open("/dev/null", O_RDONLY);
-  if (nfd < 0) {
-    perror("Error: get /dev/null failed: ");
-  }
-  else {
-    dup2(nfd, STDIN_FILENO);
-    close(nfd);
-  }
-
-  tty->has_get = true;
-
-  return 0;
-}
-static int set_orig_tty (int fd, struct Tty_Stat *tty) {
-  if (!tty->has_get) return 0;
-  int ret = -1;
-
-  if (tty->stdin >= 0) {
-    dup2(tty->stdin, STDIN_FILENO);
-    close(tty->stdin);
-  }
-
-  ret = tcsetattr(fd, TCSANOW, &tty->term);
-  if (ret < 0) perror("Error: set termios failed: ");
-/*
-  ret = ioctl(fd, VT_SETMODE, &tty->vt);
-  if (ret < 0) perror("Error: set vt mode failed: ");
-*/
-  ret = ioctl(fd, KDSETMODE, &tty->kd);
-  if (ret < 0) perror("Error: set kd mode failed: ");
-
-  memset(tty, 0, sizeof(struct Tty_Stat));
-  tty->stdin = -1;
-
-  return ret;
-}
-static int tty_opt (struct Tty_Stat *tty, int (*change_opt) (int fd, struct Tty_Stat *t)) {
-  int ret = -1;
-  const char *tty_name = ttyname(0);
-
-  if (tty == NULL) return ret;
-
-  if (strncmp(tty_name, "/dev/ttyv", 9) == 0) {
-    int tty_fd = open(tty_name,  O_RDWR);
-    if (tty_fd >= 0) {
-      ret = change_opt(tty_fd, tty);
-      if (ret < 0) perror("Error: Set/Get tty attr faild: ");
-      close(tty_fd);
-    }
-  }
-
-  return ret;
-}
-*/
-
 static void get_aligned_width (int width, int ajustedw, int srcw, int *dstw) {
   if (srcw == width) {
     *dstw = ajustedw;
@@ -357,9 +236,6 @@ static void* drm_get_display(const char* *device) {
   if (!drmInfoPtr->have_atomic)
     display_callback_drm.hdr_support = false;
 
-  // disable input for tty
-  //tty_opt (&tty_stat, &set_new_tty);
-
   drm_magic_t magic;
   if (drmGetMagic(drmInfoPtr->fd, &magic) == 0) {
     if (drmAuthMagic(drmInfoPtr->fd, magic) != 0) {
@@ -402,10 +278,6 @@ static void drm_cleanup (void *data) {
   if (connPtr != NULL)
     drmModeFreeConnector(connPtr);
   drm_close();
-
-  // restore tty input stats
-  //tty_opt (&tty_stat, &set_orig_tty);
-
   return;
 }
 
