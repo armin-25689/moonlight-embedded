@@ -68,6 +68,7 @@ struct Tty_Stat {
   struct termios term;
   struct vt_mode vt;
   int kd;
+  int stdin;
   bool has_get;
 };
 static struct Tty_Stat tty_stat = {0};
@@ -85,6 +86,12 @@ static int set_new_tty (int fd, struct Tty_Stat *tty) {
       perror("Error: get kd mode failed: ");
       return -1;
     }
+    tty->stdin = dup(STDIN_FILENO);
+    if (tty->stdin < 0) {
+      perror("Error: get stdin failed: ");
+      return -1;
+    }
+/*
     if (ioctl(fd, VT_GETMODE, &tty->vt) < 0) {
       perror("Error: get vt mode failed: ");
       return -1;
@@ -93,14 +100,26 @@ static int set_new_tty (int fd, struct Tty_Stat *tty) {
       perror("Error: set controller tty failed: ");
       return -1;
     }
+*/
   }
 
+/*
   struct vt_mode vt = {0};
   vt.mode = VT_PROCESS;
   vt.relsig = SIGUSR1;
   vt.acqsig = SIGUSR2;
   if (ioctl(fd, VT_SETMODE, &vt) < 0) {
     perror("Error: set vt mode failed: ");
+    return -1;
+  }
+*/
+  struct termios term = tty->term;
+  term.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
+  term.c_iflag &= ~(ICRNL | INPCK | BRKINT | IXON);
+  term.c_cc[VMIN] = 1;
+  term.c_cc[VTIME] = 0;
+  if (tcsetattr(fd, TCSANOW, &term) < 0) {
+    perror("Error: set termios failed: ");
     return -1;
   }
 
@@ -110,6 +129,15 @@ static int set_new_tty (int fd, struct Tty_Stat *tty) {
     return -1;
   }
 
+  int nfd = open("/dev/null", O_RDONLY);
+  if (nfd < 0) {
+    perror("Error: get /dev/null failed: ");
+  }
+  else {
+    dup2(nfd, STDIN_FILENO);
+    close(nfd);
+  }
+
   tty->has_get = true;
 
   return 0;
@@ -117,32 +145,33 @@ static int set_new_tty (int fd, struct Tty_Stat *tty) {
 static int set_orig_tty (int fd, struct Tty_Stat *tty) {
   if (!tty->has_get) return 0;
   int ret = -1;
+
+  if (tty->stdin >= 0) {
+    dup2(tty->stdin, STDIN_FILENO);
+    close(tty->stdin);
+  }
+
   ret = tcsetattr(fd, TCSANOW, &tty->term);
   if (ret < 0) perror("Error: set termios failed: ");
+/*
   ret = ioctl(fd, VT_SETMODE, &tty->vt);
   if (ret < 0) perror("Error: set vt mode failed: ");
+*/
   ret = ioctl(fd, KDSETMODE, &tty->kd);
   if (ret < 0) perror("Error: set kd mode failed: ");
+
+  memset(tty, 0, sizeof(struct Tty_Stat));
+  tty->stdin = -1;
+
   return ret;
 }
 static int tty_opt (struct Tty_Stat *tty, int (*change_opt) (int fd, struct Tty_Stat *t)) {
-  static pid_t pid = -1;
   int ret = -1;
   const char *tty_name = ttyname(0);
 
   if (tty == NULL) return ret;
 
   if (strncmp(tty_name, "/dev/ttyv", 9) == 0) {
-    if (pid < 0) {
-      pid = fork();
-      if (pid > 0) exit (0);
-      pid = setsid();
-      if (pid < 0) {
-        perror("Error: setsid() failed: ");
-        return -1;
-      }
-    }
-
     int tty_fd = open(tty_name,  O_RDWR);
     if (tty_fd >= 0) {
       ret = change_opt(tty_fd, tty);

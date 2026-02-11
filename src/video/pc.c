@@ -559,7 +559,6 @@ int x11_init(const char *displayName, bool vaapi) {
       }
 
       if (vaapi) {
-        bool directRenderSupport = false;
         if (renderPtr->is_hardaccel_support) {
     #ifdef HAVE_VAAPI
           int drm_fd = -1;
@@ -568,13 +567,10 @@ int x11_init(const char *displayName, bool vaapi) {
           drm_fd = get_drm_render_fd(drmNode);
           dis = (void *)&drm_fd;
 
-          if (!vaapi_validate_test(disPtr->name, renderPtr->name, dis, &directRenderSupport)) {
+          if (!vaapi_validate_test(disPtr->name, renderPtr->name, dis)) {
             renderPtr->is_hardaccel_support = false;
           }
           close(drm_fd);
-          if (directRenderSupport) {
-            renderPtr->is_hardaccel_support = true;
-          }
     #endif
         }
 

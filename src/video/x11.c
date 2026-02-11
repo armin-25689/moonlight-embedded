@@ -188,35 +188,3 @@ struct DISPLAY_CALLBACK display_callback_x11 = {
   .display_exported_buffer_info = NULL,
   .renders = (EGL_RENDER | X11_RENDER),
 };
-
-/*
-static int x_render_init(struct Render_Init_Info *paras) {
-  frame_width = paras->frame_width;
-  frame_height = paras->frame_height;
-  // direct render not support yuv444
-  if (paras->is_yuv444)
-    return -1;
-  return 0;
-}
-static void x_render_destroy() {};
-static int x_render_create(struct Render_Init_Info *paras) { return 0; };
-static int x_draw(struct Render_Image *image) { 
-  vaapi_queue(image->sframe.frame_data, window, x_display_width, x_display_height, frame_width, frame_height);
-  return 0;
-}
-
-struct RENDER_CALLBACK x11_render = {
-  .name = "x11",
-  .display_name = "x11",
-  .is_hardaccel_support = true,
-  .render_type = X11_RENDER,
-  .decoder_type = VAAPI,
-  .data = NULL,
-  .render_create = x_render_create,
-  .render_init = x_render_init,
-  .render_sync_config = NULL,
-  .render_draw = x_draw,
-  .render_destroy = x_render_destroy,
-  .render_sync_window_size = NULL,
-};
-*/

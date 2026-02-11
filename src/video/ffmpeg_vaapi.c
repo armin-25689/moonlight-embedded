@@ -214,18 +214,8 @@ int vaapi_init(AVCodecContext* decoder_ctx) {
   return 0;
 }
 
-#ifdef HAVE_X11
-void vaapi_queue(uint8_t* data[3], Window win, int width, int height, int frame_width, int frame_height) {
-  VASurfaceID surface = (VASurfaceID)(uintptr_t)data[3];
-  AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
-  AVVAAPIDeviceContext *va_ctx = device->hwctx;
-  vaPutSurface(va_ctx->display, surface, win, 0, 0, frame_width, frame_height, 0, 0, width, height, NULL, 0, 0);
-}
-#endif
-
-bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDisplay, bool *directRenderSupport) {
+bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDisplay) {
   bool isTenBit = false;
-  *directRenderSupport = false;
   VADisplay dpy;
 
   dpy = vaGetDisplayDRM(*((int *)nativeDisplay));
@@ -277,34 +267,6 @@ bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDispla
     return false;
   }
 
-  // test can direct render
-/*
-#ifdef HAVE_X11
-  if (strcmp(renderName,"x11") == 0) {
-    VAEntrypoint entrypoints[vaMaxNumEntrypoints(dpy)];
-    int entrypointCount;
-    VAStatus status = vaQueryConfigEntrypoints(dpy, VAProfileNone, entrypoints, &entrypointCount);
-    if (status == VA_STATUS_SUCCESS) {
-      for (int i = 0; i < entrypointCount; i++) {
-        // Without VAEntrypointVideoProc support, the driver will crash inside vaPutSurface()
-        if (entrypoints[i] == VAEntrypointVideoProc) {
-          Display *display = (Display *)nativeDisplay;
-          Window win = XCreateSimpleWindow(display, DefaultRootWindow(display), 0, 0, 1280, 720, 0, 0, 0);
-          printf("FFMPEG_VAAPI(WARNING): Test vaPutSurface() may let moonlight crash,if meet please use modesetting driver instead!\n");
-          st = vaPutSurface(dpy, surfaceId, win, 0, 0, 1280, 720, 0, 0, 1280, 720, NULL, 0, 0);
-          if (st == VA_STATUS_SUCCESS) {
-            printf("FFMPEG_VAAPI: Support vaPutSurface()!\n");
-            *directRenderSupport = true;
-          }
-          XDestroyWindow(display, win);
-          break;
-        }
-      }
-    }
-  }
-#endif
-*/
-
   VADRMPRIMESurfaceDescriptor descriptor;
 
   st = vaExportSurfaceHandle(dpy,
@@ -325,13 +287,6 @@ bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDispla
   }
 
   vaTerminate(dpy);
-/*
-#ifdef HAVE_X11
-  if (strcmp(renderName,"x11") == 0 && !(*directRenderSupport)) {
-    return false;
-  }
-#endif
-*/
   return true;
 }
 

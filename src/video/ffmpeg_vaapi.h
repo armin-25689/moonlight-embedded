@@ -21,7 +21,7 @@
 
 int vaapi_init_lib(const char *device);
 int vaapi_init(AVCodecContext* decoder_ctx);
-bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDisplay, bool *directRenderSupport);
+bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDisplay);
 int vaapi_supported_video_format(void);
 void *vaapi_get_descriptors_ptr(void);
 void vaapi_free_render_images(void **renderImages, void *descriptor, void(*render_unmap_buffer)(void* *image, int planes));
