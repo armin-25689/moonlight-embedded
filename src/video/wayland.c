@@ -492,6 +492,10 @@ static void get_surface_scale (void *data, struct wp_fractional_scale_v1 *wp_fra
                               uint32_t scale) {
   fractionalScale = scale / 120.0;
   wp_fractional_scale_v1_destroy(wp_fractional_scale_v1);
+  display_width = display_width * scale_factor / fractionalScale;
+  display_height = display_height * scale_factor / fractionalScale;
+  wp_viewport_set_destination(wp_viewport, display_width, display_height);
+  scale_factor = fractionalScale;
   return;
 }
 
