@@ -130,13 +130,22 @@ Enable modeset for drm/drm_vaapi platform.
 
 =item B<-nograb>
 
-Fake grab keyboard and mouse on embedded(not SDL) platform.
+Fake grab keyboard and mouse.
 Not grab window anymore.
 Use Ctrl+Alt+Shift+M to switch.
 Use Ctrl+Alt to switch grab state by display server when enable fakegrab/nograb.
-Note: Default nograb mode may lead pointer jump when gameing,try use ctrl+alt to
+Note1: Default nograb mode may lead pointer jump when gameing,try use ctrl+alt to
 switch grab mode for normal usual.
 Note2: Only x11 and wayland server worked normaly now.
+Note3: If want -nograb with drm platform to avoiding grab error: 
+$ cat > s.sh <<-EOF
+#!/bin/sh
+exec < /dev/null
+stty -echo
+moonlight xxx
+EOF
+$ exec s.sh
+redirect stdin to /dev/null
 
 =item B<-remote> [I<yes/no/auto>]
 
@@ -167,7 +176,7 @@ By default the encryption keys are stored in $XDG_CACHE_DIR/moonlight or ~/.cach
 =item B<-mapping> [I<MAPPING>]
 
 Use I<MAPPING> as the mapping file for all inputs.
-This mapping file should have the same format as the gamecontrollerdb.txt for SDL2.
+This mapping file should have the same format as the gamecontrollerdb.txt for SDL.
 By default the gamecontrollerdb.txt provided by Moonlight Embedded is used.
 
 =item B<-platform> [I<PLATFORM>]
@@ -212,8 +221,7 @@ Only evdev devices /dev/input/event* are supported.
 
 =item B<-sdlgp>
 
-Using SDL gamepad driver instead of evdev when using 
-'x11' or 'x11_vaapi'(not sdl) platform.
+Using SDL gamepad driver instead of evdev.
 
 =item B<-swapxyab>
 
@@ -253,11 +261,11 @@ A documented example configuration file can be found at
  FreeBSD supports some controllers.Please see hgame(4) xb360gp(4)
  ps4dshock(4) and FreeBSD forums.
  Embedded platforms such as 'x11/x11_vaapi/vaapi' use evdev driver.
- May be only evdev(not sdl) could support xbox360 seriers on FreeBSD.
+ May be only evdev(not sdlgp) could support xbox360 seriers on FreeBSD.
  Use '$ moonlight map -input /dev/input/eventN >>
       ~/.config/moonlight/gamecontrollerdb.txt' 
- to create mapping for embedded(not sdl) platform.
- Or use 'x11/antimicrox' to create mapping for sdl platform.
+ to create mapping for embedded(not sdlgp) platform.
+ Or use 'x11/antimicrox' to create mapping for -sdlgp.
  $HOME/.config/moonlight/gamecontrollerdb.txt could be created and used
  by default.
 
@@ -274,7 +282,8 @@ A documented example configuration file can be found at
  Use Ctrl+Alt+Shift+G to Enable/Disable vitual key on the top of touchpad
  for the windows precision touchpad.
 
- It could not grab the keyboard Using sdl platform.
+ It could not grab the keyboard,try add write permition to
+ /dev/input/evdevN for user.
 
 =head1 EXAMPLE
 
@@ -301,7 +310,7 @@ Connect:
 
 =head1 COMMENTS
 
- Platform 'sdl' and 'x11' is decoding with cpu.
+ Platform 'drm/wayland/software/x11' is decoding with cpu.
  Only platform 'x11/vaapi/x11_vaapi/wayland' support yuv444 video mode.
  Only some gpu support yuv444 video mode. And need sunshine host support.
  Platform '*vaapi' is decoding with gpu.

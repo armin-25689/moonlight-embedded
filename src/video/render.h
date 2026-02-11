@@ -82,7 +82,9 @@ struct RENDER_CALLBACK {
 };
 
 extern struct RENDER_CALLBACK egl_render;
+#ifdef HAVE_DRM
+extern struct RENDER_CALLBACK drm_render;
 #ifdef HAVE_WAYLAND
 extern struct RENDER_CALLBACK wayland_render;
 #endif
-extern struct RENDER_CALLBACK drm_render;
+#endif

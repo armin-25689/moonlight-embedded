@@ -237,6 +237,8 @@ if (SOFTWARE_FOUND)
     find_path(COLORREPRESENTATION_PATH color-representation-v1.xml PATHS ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/wayland-protocols
               PATH_SUFFIXES unstable/color-representation stable/color-representation staging/color-representation REQUIRED)
     find_path(RTIME_PATH presentation-time.xml PATHS ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/wayland-protocols/stable/presentation-time REQUIRED)
+    find_path(FRACSCALE_PATH fractional-scale-v1.xml PATHS ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/wayland-protocols
+              PATH_SUFFIXES unstable/fractional-scale stable/fractional-scale staging/fractional-scale REQUIRED)
     execute_process(COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner client-header ${XDG_SHELL_PATH}/xdg-shell.xml ./src/video/xdg-shell-client-protocol.h
                    COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner private-code ${XDG_SHELL_PATH}/xdg-shell.xml ./src/video/xdg-shell-client-protocol.c
                    COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner client-header ${VIEWPORTER_PATH}/viewporter.xml ./src/video/wp-viewporter.h
@@ -253,9 +255,11 @@ if (SOFTWARE_FOUND)
                    COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner private-code ${COLORREPRESENTATION_PATH}/color-representation-v1.xml ./src/video/wp-representation.c
                    COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner client-header ${RTIME_PATH}/presentation-time.xml ./src/video/wp-presentation-time.h
                    COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner private-code ${RTIME_PATH}/presentation-time.xml ./src/video/wp-presentation-time.c
+                   COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner client-header ${FRACSCALE_PATH}/fractional-scale-v1.xml ./src/video/wp-fractional-scale.h
+                   COMMAND ${WAYLAND_SCANNER_PATH}/wayland-scanner private-code ${FRACSCALE_PATH}/fractional-scale-v1.xml ./src/video/wp-fractional-scale.c
                    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
                    TIMEOUT 9)
-    target_sources(moonlight PRIVATE ./src/video/wp-presentation-time.c ./src/video/wp-representation.c ./src/video/wp-colormanagement.c ./src/video/wp-linuxdmabuf.c ./src/video/zwp-relative-pointer.c ./src/video/zwp-pointer-constraints.c ./src/video/wlr-output-management.c ./src/video/wp-viewporter.c ./src/video/xdg-shell-client-protocol.c ./src/video/wayland.c)
+    target_sources(moonlight PRIVATE ./src/video/wp-fractional-scale.c ./src/video/wp-presentation-time.c ./src/video/wp-representation.c ./src/video/wp-colormanagement.c ./src/video/wp-linuxdmabuf.c ./src/video/zwp-relative-pointer.c ./src/video/zwp-pointer-constraints.c ./src/video/wp-viewporter.c ./src/video/xdg-shell-client-protocol.c ./src/video/wayland.c)
     target_include_directories(moonlight PRIVATE ${WAYLAND_CLIENT_INCLUDE_DIRS} ${WAYLAND_EGL_INCLUDE_DIRS})
     target_link_libraries(moonlight ${WAYLAND_CLIENT_LIBRARIES} ${WAYLAND_EGL_LIBRARIES})
   endif()

@@ -30,7 +30,7 @@
 #include "wp-linuxdmabuf.h"
 #include "wp-viewporter.h"
 #include "wp-presentation-time.h"
-#include "wlr-output-management.h"
+#include "wp-fractional-scale.h"
 #include "zwp-pointer-constraints.h"
 #include "zwp-relative-pointer.h"
 #include "../input/evdev.h"
@@ -99,7 +99,7 @@ static struct xdg_toplevel *xdg_toplevel;
 static struct xdg_surface *xdg_surface;
 static struct wp_viewporter *wp_viewporter = NULL;
 static struct wp_viewport *wp_viewport = NULL;
-static struct zwlr_output_manager_v1 *wlr_output_manager = NULL;
+static struct wp_fractional_scale_manager_v1 *wp_fracscale = NULL;
 static struct zwp_pointer_constraints_v1 *zwp_pointer_constraints = NULL;
 static struct zwp_locked_pointer_v1 *zwp_locked_pointer = NULL;
 static struct zwp_relative_pointer_manager_v1 *zwp_relative_pointer_manager = NULL;
@@ -179,37 +179,6 @@ static const char *render_device = "/dev/dri/renderD128";
 
 static void noop() {};
 static int noop_int() { return 0; };
-
-static void wlr_output_get_scale (void *data,
-                             struct zwlr_output_head_v1 *zwlr_output_head_v1,
-                             wl_fixed_t scale) {
-  fractionalScale = wl_fixed_to_double(scale);
-}
-
-static const struct zwlr_output_head_v1_listener wlr_output_head_listener = {
-  .name = noop,
-  .description = noop,
-  .physical_size = noop,
-  .mode = noop,
-  .enabled = noop,
-  .current_mode = noop,
-  .position = noop,
-  .transform = noop,
-  .scale = wlr_output_get_scale,
-  .finished = noop,
-};
-
-static void add_head_listener (void *data,
-                               struct zwlr_output_manager_v1 *zwlr_output_manager_v1,
-                               struct zwlr_output_head_v1 *head) {
-  zwlr_output_head_v1_add_listener(head, &wlr_output_head_listener, NULL);
-}
-
-static const struct zwlr_output_manager_v1_listener wlr_output_manager_listener = {
-  .head = add_head_listener,
-  .done = noop,
-  .finished = noop,
-};
 
 static void wl_output_get_mode (void *data, struct wl_output *wl_output, uint32_t flags,
                                 int32_t width, int32_t height, int32_t refresh) {
@@ -457,13 +426,12 @@ static void registry_handler(void *data,struct wl_registry *registry, uint32_t i
     wl_seat_add_listener(wl_seat, &wl_seat_listener, NULL);
   } else if (strcmp(interface, wp_viewporter_interface.name) == 0) {
     wp_viewporter = wl_registry_bind(registry, id, &wp_viewporter_interface, 1);
-  } else if (strcmp(interface, zwlr_output_manager_v1_interface.name) == 0) {
-    wlr_output_manager = wl_registry_bind(registry, id, &zwlr_output_manager_v1_interface, 1);
-    zwlr_output_manager_v1_add_listener(wlr_output_manager, &wlr_output_manager_listener, NULL);
   } else if (strcmp(interface, zwp_pointer_constraints_v1_interface.name) == 0) {
     zwp_pointer_constraints = wl_registry_bind(registry, id, &zwp_pointer_constraints_v1_interface, 1);
   } else if (strcmp(interface, zwp_relative_pointer_manager_v1_interface.name) == 0) {
     zwp_relative_pointer_manager = wl_registry_bind(registry, id, &zwp_relative_pointer_manager_v1_interface, 1);
+  } else if (strcmp(interface, wp_fractional_scale_manager_v1_interface.name) == 0) {
+    wp_fracscale = wl_registry_bind(registry, id, &wp_fractional_scale_manager_v1_interface, 1);
   } else if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
     wl_render_base.zwp_linux_dmabuf = wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, 4);
   } else if (strcmp(interface, wp_color_manager_v1_interface.name) == 0) {
@@ -520,6 +488,17 @@ static const struct xdg_surface_listener xdg_surface_listener = {
   .configure = xdg_surface_handle_configure,
 };
 
+static void get_surface_scale (void *data, struct wp_fractional_scale_v1 *wp_fractional_scale_v1,
+                              uint32_t scale) {
+  fractionalScale = scale / 120.0;
+  wp_fractional_scale_v1_destroy(wp_fractional_scale_v1);
+  return;
+}
+
+static const struct wp_fractional_scale_v1_listener wp_fracscale_listener = {
+  .preferred_scale = get_surface_scale,
+};
+
 static int wayland_setup(int width, int height, int fps, int drFlags) {
 
   if (!wl_display) {
@@ -562,6 +541,16 @@ static int wayland_setup(int width, int height, int fps, int drFlags) {
   if (wp_viewport == NULL) {
     fprintf(stderr, "Can't create wp_viewport\n");
     return -1;
+  }
+
+  if (wp_fracscale) {
+    struct wp_fractional_scale_v1 *wp_fscale = wp_fractional_scale_manager_v1_get_fractional_scale(wp_fracscale, wlsurface);
+    if (wp_fscale) {
+      wp_fractional_scale_v1_add_listener(wp_fscale, &wp_fracscale_listener, NULL);
+      wl_surface_commit(wlsurface);
+      wl_display_dispatch(wl_display);
+      wl_display_roundtrip(wl_display);
+    }
   }
 
   if (fractionalScale > 0 ) {
@@ -657,13 +646,14 @@ static void wl_close_display(void *data) {
       zwp_linux_dmabuf_feedback_v1_destroy(wl_render_base.feedback);
     if (wl_render_base.zwp_linux_dmabuf)
       zwp_linux_dmabuf_v1_destroy(wl_render_base.zwp_linux_dmabuf);
+
+    if (wp_fracscale) {
+      wp_fractional_scale_manager_v1_destroy(wp_fracscale);
+      wp_fracscale = NULL;
+    }
     if (wl_output != NULL) {
       wl_output_release(wl_output);
       wl_output = NULL;
-    }
-    if (wlr_output_manager != NULL) {
-      zwlr_output_manager_v1_destroy(wlr_output_manager);
-      wlr_output_manager = NULL;
     }
     if (zwp_relative_pointer_manager != NULL) {
       zwp_relative_pointer_manager_v1_destroy(zwp_relative_pointer_manager);
@@ -864,39 +854,35 @@ static inline void *commit_surface(void *data) {
   AVFrame *frame = NULL;
   struct Render_Image *image = NULL;
 
-  if (!done) {
-
-    while (object->image->vlist_num() > 1) {
-      void *tf;
-      void *ti;
-      object->image->mv_vlist_del(&tf, &ti);
-      object->image->mv_vlist_add(tf, ti);
-    }
-    object->image->mv_vlist_del((void **)&frame, (void **)&image);
-    if (image == NULL) {
-      image = object->image;
-    }
-    else {
-      object->image->mv_vlist_add(object->image->sframe.frame, object->image);
-      //wl_render_base.last.image = object->image;
-    }
-
-    int index = image->index;
-    struct wl_buffer *buffer = wl_render_base.frame_callback_object[index].buffer;
-    if (buffer == NULL)
-      return NULL;
-
-    wl_render_base.wl_set_hdr_metadata(index);
-
-    //wl_buffer_add_listener(buffer, &buffer_listener, &wl_render_base.frame_callback_object[index]);
-    wl_surface_attach(wlsurface, buffer, 0, 0);
-    wl_surface_damage_buffer(wlsurface, 0, 0, frame_width, frame_height);
-
-    wl_surface_commit(wlsurface);
-
-    return  &wl_render_base.frame_callback_object[index];
+  while (object->image->vlist_num() > 1) {
+    void *tf;
+    void *ti;
+    object->image->mv_vlist_del(&tf, &ti);
+    object->image->mv_vlist_add(tf, ti);
   }
-  return  NULL;
+  object->image->mv_vlist_del((void **)&frame, (void **)&image);
+  if (image == NULL) {
+    image = object->image;
+  }
+  else {
+    object->image->mv_vlist_add(object->image->sframe.frame, object->image);
+    //wl_render_base.last.image = object->image;
+  }
+
+  int index = image->index;
+  struct wl_buffer *buffer = wl_render_base.frame_callback_object[index].buffer;
+  if (buffer == NULL)
+    return NULL;
+
+  wl_render_base.wl_set_hdr_metadata(index);
+
+  //wl_buffer_add_listener(buffer, &buffer_listener, &wl_render_base.frame_callback_object[index]);
+  wl_surface_attach(wlsurface, buffer, 0, 0);
+  wl_surface_damage_buffer(wlsurface, 0, 0, frame_width, frame_height);
+
+  wl_surface_commit(wlsurface);
+
+  return  &wl_render_base.frame_callback_object[index];
 }
 
 static void get_drm_format (void *data, struct zwp_linux_dmabuf_feedback_v1 *feedback, int32_t fd, uint32_t size) {
@@ -1023,7 +1009,6 @@ void *wl_dispatch_handler(void *data) {
     object = commit_surface(object);
     dispatch_wl();
     wait_to_commit();
-    if (done) break;
 
     switch (time) {
     case 120:

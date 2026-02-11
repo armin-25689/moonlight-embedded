@@ -2,9 +2,12 @@
 #include <xf86drmMode.h>
 #include <libdrm/drm_fourcc.h>
 
-#include <sys/types.h>
-#include <sys/stat.h>
+#include <sys/consio.h>
 #include <sys/mman.h>
+#include <sys/signal.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <termios.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -40,7 +43,6 @@ static uint32_t last_fbid = 0;
 
 static int frame_width,frame_height,display_width,display_height;
 
-// for render
 struct _drm_render_config {
   bool full_color_range;
   bool need_change_color;
@@ -60,6 +62,98 @@ static int (*drm_draw_function) (struct Render_Image *image);
 static int drm_copy (struct Render_Image *image);
 static int drm_direct(struct Render_Image *image) { return image->index; };
 // render
+
+/*
+struct Tty_Stat {
+  struct termios term;
+  struct vt_mode vt;
+  int kd;
+  bool has_get;
+};
+static struct Tty_Stat tty_stat = {0};
+
+static inline int get_termios (int fd, struct termios *term) {
+  return tcgetattr(fd, term);
+}
+static int set_new_tty (int fd, struct Tty_Stat *tty) {
+  if (!tty->has_get) {
+    if (get_termios(fd, &tty->term) < 0) {
+      perror("Error: get termios failed: ");
+      return -1;
+    }
+    if (ioctl(fd, KDGETMODE, &tty->kd) < 0) {
+      perror("Error: get kd mode failed: ");
+      return -1;
+    }
+    if (ioctl(fd, VT_GETMODE, &tty->vt) < 0) {
+      perror("Error: get vt mode failed: ");
+      return -1;
+    }
+    if (ioctl(fd, TIOCSCTTY, 0) < 0) {
+      perror("Error: set controller tty failed: ");
+      return -1;
+    }
+  }
+
+  struct vt_mode vt = {0};
+  vt.mode = VT_PROCESS;
+  vt.relsig = SIGUSR1;
+  vt.acqsig = SIGUSR2;
+  if (ioctl(fd, VT_SETMODE, &vt) < 0) {
+    perror("Error: set vt mode failed: ");
+    return -1;
+  }
+
+  int mode = KD_GRAPHICS;
+  if (ioctl(fd, KDSETMODE, &mode) < 0) {
+    perror("Error: set kd mode failed: ");
+    return -1;
+  }
+
+  tty->has_get = true;
+
+  return 0;
+}
+static int set_orig_tty (int fd, struct Tty_Stat *tty) {
+  if (!tty->has_get) return 0;
+  int ret = -1;
+  ret = tcsetattr(fd, TCSANOW, &tty->term);
+  if (ret < 0) perror("Error: set termios failed: ");
+  ret = ioctl(fd, VT_SETMODE, &tty->vt);
+  if (ret < 0) perror("Error: set vt mode failed: ");
+  ret = ioctl(fd, KDSETMODE, &tty->kd);
+  if (ret < 0) perror("Error: set kd mode failed: ");
+  return ret;
+}
+static int tty_opt (struct Tty_Stat *tty, int (*change_opt) (int fd, struct Tty_Stat *t)) {
+  static pid_t pid = -1;
+  int ret = -1;
+  const char *tty_name = ttyname(0);
+
+  if (tty == NULL) return ret;
+
+  if (strncmp(tty_name, "/dev/ttyv", 9) == 0) {
+    if (pid < 0) {
+      pid = fork();
+      if (pid > 0) exit (0);
+      pid = setsid();
+      if (pid < 0) {
+        perror("Error: setsid() failed: ");
+        return -1;
+      }
+    }
+
+    int tty_fd = open(tty_name,  O_RDWR);
+    if (tty_fd >= 0) {
+      ret = change_opt(tty_fd, tty);
+      if (ret < 0) perror("Error: Set/Get tty attr faild: ");
+      close(tty_fd);
+    }
+  }
+
+  return ret;
+}
+*/
 
 static void get_aligned_width (int width, int ajustedw, int srcw, int *dstw) {
   if (srcw == width) {
@@ -234,6 +328,9 @@ static void* drm_get_display(const char* *device) {
   if (!drmInfoPtr->have_atomic)
     display_callback_drm.hdr_support = false;
 
+  // disable input for tty
+  //tty_opt (&tty_stat, &set_new_tty);
+
   drm_magic_t magic;
   if (drmGetMagic(drmInfoPtr->fd, &magic) == 0) {
     if (drmAuthMagic(drmInfoPtr->fd, magic) != 0) {
@@ -276,6 +373,10 @@ static void drm_cleanup (void *data) {
   if (connPtr != NULL)
     drmModeFreeConnector(connPtr);
   drm_close();
+
+  // restore tty input stats
+  //tty_opt (&tty_stat, &set_orig_tty);
+
   return;
 }
 

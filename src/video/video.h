@@ -40,7 +40,7 @@
 
 #define INITIAL_DECODER_BUFFER_SIZE (256*1024)
 
-#ifdef HAVE_X11
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_DRM) 
 int x11_init(const char *displayName, bool vaapi);
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11;
 #ifdef HAVE_VAAPI
@@ -49,9 +49,6 @@ extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vaapi;
 #ifdef HAVE_VDPAU
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vdpau;
 #endif
-#endif
-#ifdef HAVE_SDL
-extern DECODER_RENDERER_CALLBACKS decoder_callbacks_sdl;
 #endif
 
 extern int supportedVideoFormat;

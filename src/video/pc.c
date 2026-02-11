@@ -132,12 +132,13 @@ static void noop_void () {};
 
 static void clear_threads() {
   if (threads.created) {
-    pthread_mutex_lock(&threads.mutex);
     done = true;
     LiWakeWaitForVideoFrame();
+
+    usleep(fps_time);
+
     sem_post(&threads.decoder_sem);
     sem_post(&threads.render_sem);
-    pthread_mutex_unlock(&threads.mutex);
     if (threads.render_id)
       pthread_join(threads.render_id, NULL);
     if (threads.decoder_id)
@@ -146,11 +147,8 @@ static void clear_threads() {
       pthread_join(threads.display_id, NULL);
     sem_destroy(&threads.render_sem);
     sem_destroy(&threads.decoder_sem);
-    threads.created = false;
   }
-  if (threads.mutex != 0)
-    pthread_mutex_destroy(&threads.mutex);
-  threads.mutex = 0;
+  return;
 }
 
 static int window_op_handle (int pipefd, void *data) {
@@ -312,6 +310,7 @@ static inline void mv_vlist_decoder_to_render() {
 static int frame_handle (int pipefd, void *data) {
   AVFrame* frame = NULL;
 
+  if (done) return LOOP_RETURN;
   while (read(pipefd, &frame, sizeof(void*)) > 0);
   if (frame) {
     int res;
@@ -437,6 +436,7 @@ static void* display_handler (void *data) {
       }
       while (VLIST_NUM(display) == 0) {
         pthread_mutex_unlock(&threads.mutex);
+        if (done) goto display_exit;
         usleep(fps_time_10);
         pthread_mutex_lock(&threads.mutex);
       }
@@ -448,11 +448,11 @@ static void* display_handler (void *data) {
     pthread_mutex_unlock(&threads.mutex);
     if (image_data == NULL) {
       fprintf(stderr, "Error: Get NULL image data.\n");
-      break;
+      goto display_exit;
     }
     if (disPtr->display_vsync_loop(&done, frame_width, frame_height, image_data->index) < 0) {
       fprintf(stderr, "Error: display loop failed.\n");
-      break;
+      goto display_exit;
     }
     if (last_image_data != image_data) {
       pthread_mutex_lock(&threads.mutex);
@@ -463,11 +463,12 @@ static void* display_handler (void *data) {
     }
     else {
       if (displayNum > 1) {
-        done = true;
+        goto display_exit;
       }
     }
   }
 
+display_exit:
   done = true;
   sem_post(&threads.decoder_sem);
 
@@ -483,13 +484,14 @@ static void* decoder_thread(void *data) {
     VIDEO_FRAME_HANDLE handle;
     PDECODE_UNIT du;
     if (!LiWaitForNextVideoFrame(&handle, &du)) {
-      continue;
+      // if false ,need exit now.
+      break;
     }
 
-    if (threads.created) {
-      sem_wait(&threads.decoder_sem);
-      if (done)
-        break;
+    sem_wait(&threads.decoder_sem);
+    if (done) {
+      LiCompleteVideoFrame(handle, DR_OK);
+      break;
     }
 
     // blocking in x11_submit_decode_unit();
@@ -497,8 +499,8 @@ static void* decoder_thread(void *data) {
     LiCompleteVideoFrame(handle, status);
   }
 
-  if (threads.created)
-    sem_post(&threads.render_sem);
+  done = true;
+  sem_post(&threads.render_sem);
 
   return NULL;
 }
@@ -822,6 +824,9 @@ void x11_cleanup() {
   window_properties.configure = &window_configure;
   disPtr->display_close_display((void *)&window_properties);
 
+  if (threads.mutex != 0)
+    pthread_mutex_destroy(&threads.mutex);
+  memset(&threads, 0, sizeof(threads));
   disPtr = NULL;
   renderPtr = NULL;
 }
@@ -829,6 +834,9 @@ void x11_cleanup() {
 int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   PLENTRY entry = decodeUnit->bufferList;
   int length = 0;
+
+  if (done)
+    return DR_OK;
 
   ensure_buf_size(&ffmpeg_buffer, &ffmpeg_buffer_size, decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE);
 
@@ -840,34 +848,31 @@ int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
 
   int err = ffmpeg_decode2(ffmpeg_buffer, length, decodeUnit->frameType == FRAME_TYPE_IDR ? AV_PKT_FLAG_KEY : 0);
 
-  if (err < 0) {
-    if (threads.created) {
-      sem_post(&threads.decoder_sem);
-    }
-    return DR_NEED_IDR;
-  }
-
+  if (err < 0)
+    goto next_handle;
   
   pthread_mutex_lock(&threads.mutex);
   AVFrame *frame = VLIST_GET_FRAME(decoder);
   pthread_mutex_unlock(&threads.mutex);
-  if (!frame) {
-    done = true;
-  }
-  if (done) {
-    return DR_OK;
-  }
+  if (frame == NULL)
+    goto decode_exit;
 
   frame = ffmpeg_get_frame(frame, true);
-  if (frame != NULL) {
-    mv_vlist_decoder_to_render();
-    return DR_OK;
-  } else {
-    done = true;
-    return DR_OK;
-  }
+  if (frame == NULL)
+    goto decode_exit;
 
+  mv_vlist_decoder_to_render();
+  return DR_OK;
+
+next_handle:
+  if (threads.created) {
+    sem_post(&threads.decoder_sem);
+  }
   return DR_NEED_IDR;
+
+decode_exit:
+  done = true;
+  return DR_OK;
 }
 
 DECODER_RENDERER_CALLBACKS decoder_callbacks_x11 = {

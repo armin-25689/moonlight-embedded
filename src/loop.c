@@ -171,6 +171,7 @@ void loop_create() {
   sigaddset(&sigset, SIGTERM);
   sigaddset(&sigset, SIGINT);
   sigaddset(&sigset, SIGQUIT);
+  sigaddset(&sigset, SIGTSTP);
   sigprocmask(SIG_BLOCK, &sigset, NULL);
   sigFd = signalfd(-1, &sigset, 0);
 }
