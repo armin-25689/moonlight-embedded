@@ -215,6 +215,7 @@ int vaapi_init(AVCodecContext* decoder_ctx) {
 }
 
 bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDisplay) {
+#ifdef HAVE_DRM
   bool isTenBit = false;
   VADisplay dpy;
 
@@ -288,6 +289,9 @@ bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDispla
 
   vaTerminate(dpy);
   return true;
+#else
+  return true;
+#endif
 }
 
 void vaapi_free_render_images(void **renderImages, void *descriptor, void(*render_unmap_buffer) (void** image, int planes)) {

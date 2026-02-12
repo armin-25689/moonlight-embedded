@@ -269,21 +269,6 @@ static inline void mv_vlist_display_to_decoder() {
   return;
 }
 
-/*
-static inline void mv_vlist_render_to_decoder() {
-  pthread_mutex_lock(&threads.mutex);
-  void *image = VLIST_GET_DATA(render);
-  clear_frame(image);
-  VLIST_ADD(decoder, VLIST_GET_FRAME(render), image);
-  VLIST_DEL(render);
-  if (threads.created)
-    sem_post(&threads.decoder_sem);
-  pthread_mutex_unlock(&threads.mutex);
-
-  return;
-}
-*/
-
 static inline void mv_vlist_render_to_display() {
   pthread_mutex_lock(&threads.mutex);
   VLIST_ADD(display, VLIST_GET_FRAME(render), VLIST_GET_DATA(render));
@@ -615,6 +600,7 @@ int x11_init(const char *displayName, bool vaapi) {
     if (vaapi_init_lib(NULL) != -1) {
       supportedVideoFormat &= vaapi_supported_video_format();
       res = INIT_VAAPI;
+      return res;
     }
   #endif
   } else if (strcmp(disPtr->name, "drm") == 0) {

@@ -324,23 +324,19 @@ static int convert_frame_another(AVFrame * src_frame, uint8_t *dst_buffer[4], ui
   }
 
   int i = 0;
-  //for (int i = 0; i < DST_FRAMES_NUM; i++) {
-    for (int k = 0; k < MAX_DATA_BUFFER; k++) {
-      buffer_ptr[i][k] = dst_frames[i]->data[k];
-      dst_frames[i]->data[k] = dst_buffer[k];
-    }
-  //}
+  for (int k = 0; k < MAX_DATA_BUFFER; k++) {
+    buffer_ptr[i][k] = dst_frames[i]->data[k];
+    dst_frames[i]->data[k] = dst_buffer[k];
+  }
 
   if (sws_convert_frame(src_frame, dst_frames[i]) < 0) {
     fprintf(stderr, "sws convert failed.\n");
     return -1;
   }
 
-  //for (int i = 0; i < DST_FRAMES_NUM; i++) {
-    for (int k = 0; k < MAX_DATA_BUFFER; k++) {
-      dst_frames[i]->data[k] = buffer_ptr[i][k];
-    }
-  //}
+  for (int k = 0; k < MAX_DATA_BUFFER; k++) {
+    dst_frames[i]->data[k] = buffer_ptr[i][k];
+  }
 #else
   yuv_convert(src_frame, dst_buffer, pitch);
 #endif

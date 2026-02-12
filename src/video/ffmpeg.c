@@ -356,16 +356,11 @@ void ffmpeg_get_plane_info (const AVFrame *frame, enum AVPixelFormat *pix_fmt, i
 
 int software_supported_video_format() {
   int format = 0;
-  format |= VIDEO_FORMAT_H264;
-  format |= VIDEO_FORMAT_H264_HIGH8_444;
-  format |= VIDEO_FORMAT_H265_REXT8_444;
-  format |= VIDEO_FORMAT_H265_REXT10_444;
-  format |= VIDEO_FORMAT_H265_MAIN10;
-  format |= VIDEO_FORMAT_H265;
-  format |= VIDEO_FORMAT_AV1_HIGH8_444;
-  format |= VIDEO_FORMAT_AV1_HIGH10_444;
-  format |= VIDEO_FORMAT_AV1_MAIN8;
-  format |= VIDEO_FORMAT_AV1_MAIN10;
+  format |= VIDEO_FORMAT_MASK_H264;
+  format |= VIDEO_FORMAT_MASK_H265;
+  format |= VIDEO_FORMAT_MASK_AV1;
+  format |= VIDEO_FORMAT_MASK_10BIT;
+  format |= VIDEO_FORMAT_MASK_YUV444;
   return format;
 }
 
