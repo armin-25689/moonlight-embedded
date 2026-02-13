@@ -112,8 +112,9 @@ Enable hdr display for drm_vaapi/drm/wayland_vaapi/wayland platform.
 Try to use yuv444 format.Better video quality but not efficiency.
 Note: hevc(h265) with yuv444 format is the more common combination.
 Need sunshine host support(version >=24.0) and just support vaapi or
-x11 platform.
-If meet h264+YUV444P, 'x11' platform is recommended.
+software/x11/drm/wayland/x11_vaapi platform.
+If meet h264+YUV444P, 'drm/wayland' platform is recommended.
+x11 platform also can use, but slow than others.
 
 =item B<-render_style> [I<fixed/fill/fixed_fill>]
 
@@ -183,10 +184,11 @@ By default the gamecontrollerdb.txt provided by Moonlight Embedded is used.
 =item B<-platform> [I<PLATFORM>]
 
 Select platform for audio and video output and input.
-<PLATFORM> can be vaapi, drm_vaapi, wayland_vaapi, software, drm, wayland, rk or fake etc.
+<PLATFORM> can be vaapi, drm_vaapi, wayland_vaapi, x11_vaapi, software, drm, wayland, x11,
+ rk or fake etc.
 
 Platform 'software/vaapi' will choose x11/wayland/gbm display automatically.
-Platform 'X11' will force to x11 server.
+Platform 'x11[_vaapi]/wayland[_vaapi]/drm[_vaapi]' will force to use relative server.
 Platform 'drm_vaapi and wayland_vaapi' support hdr display width vaapi decoder.
 Platform 'drm and wayland' use libyuv or libswscale to complete color convert.
 
@@ -283,7 +285,7 @@ A documented example configuration file can be found at
  Use Ctrl+Alt+Shift+G to Enable/Disable vitual key on the top of touchpad
  for the windows precision touchpad.
 
- It could not grab the keyboard,try add write permition to
+ If could not grab the keyboard,try add write permition to
  /dev/input/evdevN for user.
 
 =head1 EXAMPLE
