@@ -23,7 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef HAVE_GETAUXVAL
+#if defined(HAVE_GETAUXVAL) || defined(__FreeBSD__) || defined(__OpenBSD__)
 #include <sys/auxv.h>
 
 #ifndef HWCAP2_AES
@@ -78,6 +78,22 @@ bool has_fast_aes() {
     return !!(getauxval(AT_HWCAP) & HWCAP_AES);
   #else
     return false;
+  #endif
+#elif (defined(__arm__) || defined(__aarch64__)) && (defined(__FreeBSD__) || defined(__OpenBSD__))
+  unsigned long hwcap2 = 0;
+  elf_aux_info(AT_HWCAP2, &hwcap2, sizeof(hwcap2));
+  if (hwcap2 & HWCAP2_AES)
+    return (hwcap2 & HWCAP2_AES);
+  #ifdef HWCAP_AES
+  unsigned long hwcap = 0;
+  elf_aux_info(AT_HWCAP, &hwcap, sizeof(hwcap));
+  if (hwcap & HWCAP_AES)
+    return (hwcap & HWCAP_AES);
+  #endif
+  #if __SIZEOF_SIZE_T__ == 4
+  return false;
+  #else
+  return true;
   #endif
 #elif defined(HAVE_BICS_AES)
   return __builtin_cpu_supports("aes");
