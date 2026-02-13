@@ -27,10 +27,12 @@
 #include <Limelight.h>
 
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <uuid/uuid.h>
 #include <openssl/sha.h>
 #include <openssl/aes.h>
@@ -178,9 +180,9 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
 
-  snprintf(url, sizeof(url), "%s://%s:%d/serverinfo?uniqueid=%s&uuid=%s",
-    https ? "https" : "http", server->serverInfo.address, https ? server->httpsPort : server->httpPort, unique_id, uuid_str);
-
+  snprintf(url, sizeof(url), "%s://%s%s%s:%d/serverinfo?uniqueid=%s&uuid=%s",
+           https ? "https" : "http", server->ipv6 ? "[" : "", server->serverInfo.address, server->ipv6 ? "]" : "",
+           https ? server->httpsPort : server->httpPort, unique_id, uuid_str);
   PHTTP_DATA data = http_create_data();
   if (data == NULL) {
     ret = GS_OUT_OF_MEMORY;
@@ -416,7 +418,10 @@ int gs_unpair(PSERVER_DATA server) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, sizeof(url), "http://%s:%u/unpair?uniqueid=%s&uuid=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str);
+  snprintf(url, sizeof(url), "http://%s%s%s:%u/unpair?uniqueid=%s&uuid=%s", 
+           server->ipv6 ? "[" : "", server->serverInfo.address, server->ipv6 ? "]" : "",
+           server->httpPort, unique_id, uuid_str);
+
   ret = http_request(url, data);
 
   http_free_data(data);
@@ -450,7 +455,9 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&phrase=getservercert&salt=%s&clientcert=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, salt_hex, cert_hex);
+  snprintf(url, url_max_len, "http://%s%s%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&phrase=getservercert&salt=%s&clientcert=%s",
+           server->ipv6 ? "[" : "", server->serverInfo.address, server->ipv6 ? "]" : "",
+           server->httpPort, unique_id, uuid_str, salt_hex, cert_hex);
   data = http_create_data();
   if (data == NULL)
     return GS_OUT_OF_MEMORY;
@@ -499,7 +506,9 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&clientchallenge=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, challenge_hex);
+  snprintf(url, url_max_len, "http://%s%s%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&clientchallenge=%s",
+           server->ipv6 ? "[" : "", server->serverInfo.address, server->ipv6 ? "]" : "",
+           server->httpPort, unique_id, uuid_str, challenge_hex);
   if ((ret = http_request(url, data)) != GS_OK)
     goto cleanup;
 
@@ -566,7 +575,9 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&serverchallengeresp=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, challenge_response_hex);
+  snprintf(url, url_max_len, "http://%s%s%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&serverchallengeresp=%s",
+           server->ipv6 ? "[" : "", server->serverInfo.address, server->ipv6 ? "]" : "",
+           server->httpPort, unique_id, uuid_str, challenge_response_hex);
   if ((ret = http_request(url, data)) != GS_OK)
     goto cleanup;
 
@@ -620,7 +631,9 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, url_max_len, "http://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&clientpairingsecret=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str, client_pairing_secret_hex);
+  snprintf(url, url_max_len, "http://%s%s%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&clientpairingsecret=%s",
+           server->ipv6 ? "[" : "", server->serverInfo.address, server->ipv6 ? "]" : "",
+           server->httpPort, unique_id, uuid_str, client_pairing_secret_hex);
   if ((ret = http_request(url, data)) != GS_OK)
     goto cleanup;
 
@@ -639,7 +652,9 @@ int gs_pair(PSERVER_DATA server, char* pin) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, url_max_len, "https://%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&phrase=pairchallenge", server->serverInfo.address, server->httpsPort, unique_id, uuid_str);
+  snprintf(url, url_max_len, "https://%s%s%s:%u/pair?uniqueid=%s&uuid=%s&devicename=roth&updateState=1&phrase=pairchallenge",
+           server->ipv6 ? "[" : "", server->serverInfo.address, server->ipv6 ? "]" : "",
+           server->httpsPort, unique_id, uuid_str);
   if ((ret = http_request(url, data)) != GS_OK)
     goto cleanup;
 
@@ -693,7 +708,9 @@ int gs_applist(PSERVER_DATA server, PAPP_LIST *list) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, sizeof(url), "https://%s:%u/applist?uniqueid=%s&uuid=%s", server->serverInfo.address, server->httpsPort, unique_id, uuid_str);
+  snprintf(url, sizeof(url), "https://%s%s%s:%u/applist?uniqueid=%s&uuid=%s",
+           server->ipv6 ? "[" : "", server->serverInfo.address, server->ipv6 ? "]" : "",
+           server->httpsPort, unique_id, uuid_str);
   if (http_request(url, data) != GS_OK)
     ret = GS_IO_ERROR;
   else if (xml_status(data->memory, data->size) == GS_ERROR)
@@ -749,8 +766,9 @@ int gs_start_app(PSERVER_DATA server, STREAM_CONFIGURATION *config, int appId, b
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   int surround_info = SURROUNDAUDIOINFO_FROM_AUDIO_CONFIGURATION(config->audioConfiguration);
-  snprintf(url, sizeof(url), "https://%s:%u/%s?uniqueid=%s&uuid=%s&appid=%d&mode=%dx%dx%d&additionalStates=1&sops=%d&rikey=%s&rikeyid=%d&localAudioPlayMode=%d&surroundAudioInfo=%d&remoteControllersBitmap=%d&gcmap=%d%s%s",
-           server->serverInfo.address, server->httpsPort, server->currentGame ? "resume" : "launch", unique_id, uuid_str, appId, config->width, config->height, fps, sops, rikey_hex, rikeyid, localaudio, surround_info, gamepad_mask, gamepad_mask,
+  snprintf(url, sizeof(url), "https://%s%s%s:%u/%s?uniqueid=%s&uuid=%s&appid=%d&mode=%dx%dx%d&additionalStates=1&sops=%d&rikey=%s&rikeyid=%d&localAudioPlayMode=%d&surroundAudioInfo=%d&remoteControllersBitmap=%d&gcmap=%d%s%s",
+           server->ipv6 ? "[" : "", server->serverInfo.address, server->ipv6 ? "]" : "",
+           server->httpsPort, server->currentGame ? "resume" : "launch", unique_id, uuid_str, appId, config->width, config->height, fps, sops, rikey_hex, rikeyid, localaudio, surround_info, gamepad_mask, gamepad_mask,
            (config->supportedVideoFormats & VIDEO_FORMAT_MASK_10BIT) ? "&hdrMode=1&clientHdrCapVersion=0&clientHdrCapSupportedFlagsInUint32=0&clientHdrCapMetaDataId=NV_STATIC_METADATA_TYPE_1&clientHdrCapDisplayData=0x0x0x0x0x0x0x0x0x0x0" : "",
            LiGetLaunchUrlQueryParameters());
   if ((ret = http_request(url, data)) == GS_OK)
@@ -797,7 +815,9 @@ int gs_quit_app(PSERVER_DATA server) {
 
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
-  snprintf(url, sizeof(url), "https://%s:%u/cancel?uniqueid=%s&uuid=%s", server->serverInfo.address, server->httpsPort, unique_id, uuid_str);
+  snprintf(url, sizeof(url), "https://%s%s%s:%u/cancel?uniqueid=%s&uuid=%s",
+           server->ipv6 ? "[" : "", server->serverInfo.address, server->ipv6 ? "]" : "",
+           server->httpsPort, unique_id, uuid_str);
   if ((ret = http_request(url, data)) != GS_OK)
     goto cleanup;
 
@@ -830,6 +850,20 @@ int gs_init(PSERVER_DATA server, char *address, unsigned short httpPort, const c
   http_init(keyDirectory, log_level);
 
   LiInitializeServerInformation(&server->serverInfo);
+
+  struct in_addr v4;
+  struct in6_addr v6;
+  if (inet_pton(AF_INET, address, &v4) == 1) {
+    server->ipv6 = false;
+  }
+  else if (inet_pton(AF_INET6, address, &v6) == 1) {
+    server->ipv6 = true;
+  }
+  else {
+    gs_error = "Invalid IP address";
+    return GS_ERROR;
+  }
+
   server->serverInfo.address = address;
   server->unsupported = unsupported;
   server->httpPort = httpPort ? httpPort : 47989;
