@@ -392,7 +392,7 @@ int main(int argc, char* argv[]) {
         printf("Try to use yuv444 mode\n");
       }
       else {
-        printf("YUV444 is not supported because of platform: %d .\n", (int)system);
+        printf("YUV444 is not supported because of platform: %d,or codec: %d .\n", (int)system, config.codec );
         config.yuv444 = false;
       }
     }
