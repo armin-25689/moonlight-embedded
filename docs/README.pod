@@ -137,17 +137,7 @@ Use Ctrl+Alt+Shift+M to switch.
 Use Ctrl+Alt to switch grab state by display server when enable fakegrab/nograb.
 Note1: Default nograb mode may lead pointer jump when gameing,try use ctrl+alt to
 switch grab mode for normal usual.
-Note2: Only x11 and wayland server worked normaly now.
-Note3: If want -nograb with drm platform to avoiding grab error: 
-$ cat > s.sh <<-EOF
-#!/bin/sh
-stty -echo -isig
-exec < /dev/null
-moonlight xxx
-EOF
-$ exec sh s.sh
-or $ . ./s.sh
-redirect stdin to /dev/null
+Note2: drm[_vaapi] platform can use -nograb to enable VT-switch feature(alt+fN).
 
 =item B<-remote> [I<yes/no/auto>]
 
