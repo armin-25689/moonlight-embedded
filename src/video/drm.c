@@ -4,7 +4,6 @@
 
 #include <sys/consio.h>
 #include <sys/mman.h>
-#include <sys/signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <termios.h>
@@ -23,6 +22,8 @@
 #include "gbm.h"
 #include "video.h"
 #include "video_internal.h"
+#include "../loop.h"
+#include "../input/evdev.h"
 
 #include "ffmpeg.h"
 #include "render.h"
@@ -40,8 +41,10 @@ static void *gbm_display = NULL;
 static void *gbm_window = NULL;
 static bool isMaster = true;
 static uint32_t last_fbid = 0;
+static uint32_t hdr_blob = 0;
 
 static int frame_width,frame_height,display_width,display_height;
+static uint64_t fps_time;
 
 struct _drm_render_config {
   bool full_color_range;
@@ -62,6 +65,125 @@ static int (*drm_draw_function) (struct Render_Image *image);
 static int drm_copy (struct Render_Image *image);
 static int drm_direct(struct Render_Image *image) { return image->index; };
 // render
+
+struct Tty_Stat {
+  int fd;
+  int index;
+  struct termios term;
+  struct vt_mode vt;
+  int kd;
+  bool has_get;
+  bool out;
+};
+static struct Tty_Stat tty_stat = { .fd = -1, .index = -1, .has_get = false, };
+
+static int stdin_handle (int fd, void *data) {
+  unsigned char key;
+  int ret;
+
+  while ((ret = read(fd, &key, 1)) > 0);
+  if (ret == 0) {
+    loop_remove_fd(fd);
+    close(fd);
+    struct Tty_Stat *tty = (struct Tty_Stat *)data;
+    memset(tty, 0, sizeof(struct Tty_Stat));
+    tty->fd = -1;
+  }
+
+  return 0;
+}
+
+static inline void clear_tty (struct Tty_Stat *tty) {
+  if (tty->fd < 0) return;
+  loop_remove_fd(tty->fd);
+  close(tty->fd);
+  memset(tty, 0, sizeof(struct Tty_Stat));
+  tty->fd = -1;
+}
+
+static inline int get_termios (int fd, struct termios *term) {
+  return tcgetattr(fd, term);
+}
+static int set_new_tty (int fd, struct Tty_Stat *tty) {
+  if (!tty->has_get) {
+    if (get_termios(fd, &tty->term) < 0) {
+      perror("Error: get termios failed: ");
+      return -1;
+    }
+    if (ioctl(fd, KDGETMODE, &tty->kd) < 0) {
+      perror("Error: get kd mode failed: ");
+      return -1;
+    }
+  }
+
+  struct termios term = tty->term;
+  term.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
+  term.c_iflag &= ~(ICRNL | INPCK | BRKINT | IXON);
+  term.c_cc[VMIN] = 1;
+  term.c_cc[VTIME] = 0;
+  if (tcsetattr(fd, TCSANOW, &term) < 0) {
+    perror("Error: set termios failed: ");
+    return -1;
+  }
+
+  int mode = KD_GRAPHICS;
+  if (ioctl(fd, KDSETMODE, &mode) < 0) {
+    perror("Error: set kd mode failed: ");
+    return -1;
+  }
+
+  tty->has_get = true;
+
+  return 0;
+}
+static int set_orig_tty (int fd, struct Tty_Stat *tty) {
+  int ret = -1;
+  if (tty->has_get) {
+    ret = tcsetattr(fd, TCSANOW, &tty->term);
+    if (ret < 0) perror("Error: set termios failed: ");
+    ret = ioctl(fd, KDSETMODE, &tty->kd);
+    if (ret < 0) perror("Error: set kd mode failed: ");
+  }
+
+  clear_tty(tty);
+
+  return ret; 
+}
+static int tty_opt (struct Tty_Stat *tty, int (*change_opt) (int fd, struct Tty_Stat *t)) {
+  int ret = -1;
+  if (!isatty(STDIN_FILENO)) {
+    fprintf(stderr, "Is not valid tty or redirect stdin.\n");
+    return -1;
+  }
+  const char *tty_name = ttyname(0);
+
+  if (tty == NULL) return ret;
+
+  if (strncmp(tty_name, "/dev/ttyv", 9) == 0) {
+    if (tty->fd < 0) {
+      if (!drmInfoPtr->have_atomic) return 0;
+      tty->fd = open(tty_name,  O_RDWR | O_NOCTTY |O_NONBLOCK);
+      if (tty->fd < 0)
+        return ret;
+      int index = -1;
+      sscanf(tty_name, "%*[^0-9]%d", &index);
+      if (index < 0) {
+        close(tty->fd);
+        tty->fd = -1;
+        return ret;
+      }
+      tty->index = index;
+      loop_add_fd1(tty->fd, &stdin_handle, EPOLLIN, tty);
+    }
+    ret = change_opt(tty->fd, tty);
+    if (ret < 0) {
+      perror("Error: Set/Get tty attr faild: ");
+      clear_tty(tty);
+    }
+  }
+
+  return ret;
+}
 
 static void get_aligned_width (int width, int ajustedw, int srcw, int *dstw) {
   if (srcw == width) {
@@ -152,6 +274,7 @@ static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int
 }
 
 static int drm_setup(int width, int height, int fps, int drFlags) {
+  fps_time = ((int)(1000000 / (fps)));
   // need to implement get screen width and height
   connPtr = drmModeGetConnector(drmInfoPtr->fd, drmInfoPtr->connector_id);
   if (connPtr == NULL) {
@@ -215,6 +338,8 @@ static int drm_setup(int width, int height, int fps, int drFlags) {
     }
   }
 
+  tty_opt (&tty_stat, &set_new_tty);
+
   return 0;
 }
 
@@ -236,13 +361,9 @@ static void* drm_get_display(const char* *device) {
   if (!drmInfoPtr->have_atomic)
     display_callback_drm.hdr_support = false;
 
-  drm_magic_t magic;
-  if (drmGetMagic(drmInfoPtr->fd, &magic) == 0) {
-    if (drmAuthMagic(drmInfoPtr->fd, magic) != 0) {
-      isMaster = false;
-      fprintf(stderr, "DRM: drmSetMaster() failed.\n");
-      return NULL;
-    }
+  if (drmSetMaster(drmInfoPtr->fd) < 0) {
+    fprintf(stderr, "DRM: drmSetMaster() failed.\n");
+    return NULL;
   }
 
   *device = "/dev/dri/renderD128";
@@ -270,7 +391,11 @@ static void drm_clear_image_cache (int drm_fd, struct _drm_buf *drm_buf, int buf
 }
 
 static void drm_cleanup (void *data) {
-  drm_restore_display();
+  if (hdr_blob > 0)
+    drmModeDestroyPropertyBlob(drmInfoPtr->fd, hdr_blob);
+  hdr_blob = 0;
+  if (!tty_stat.out)
+    drm_restore_display();
   drm_clear_image_cache(drmInfoPtr->fd, drm_buf, MAX_FB_NUM);
   gbm_close_display (-1, drm_buf, MAX_FB_NUM, gbm_display, gbm_window);
   gbm_display = NULL;
@@ -278,14 +403,15 @@ static void drm_cleanup (void *data) {
   if (connPtr != NULL)
     drmModeFreeConnector(connPtr);
   drm_close();
+
+  tty_opt (&tty_stat, &set_orig_tty);
+
   return;
 }
 
 static void drm_setup_post(void *data) {
   return;
 }
-
-static void drm_change_cursor(struct WINDOW_OP *op, int flags) {}
 
 static void* drm_get_window() {
   return gbm_window;
@@ -333,6 +459,8 @@ static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, uint32_t *hdr_blo
   data.hdmi_metadata_type1.max_cll = sunshineHdrMetadata.maxContentLightLevel;
   data.hdmi_metadata_type1.max_fall = sunshineHdrMetadata.maxFrameAverageLightLevel;
 
+  if (*hdr_blob > 0)
+    drmModeDestroyPropertyBlob(drmInfoPtr->fd, *hdr_blob);
   if (drmModeCreatePropertyBlob(drmInfoPtr->fd, &data, sizeof(struct hdr_output_metadata), hdr_blob) < 0) {
     perror("Failed to create hdr metadata blob: ");
     return -1;
@@ -354,7 +482,11 @@ static int drm_display_done(int width, int height, int index) {
 static int drm_display_loop(bool *exit, int width, int height, int index) {
   int ret = -1;
   uint32_t fb_id;
-  uint32_t hdr_blob = 0;
+
+  if (tty_stat.out) {
+    usleep(fps_time);
+    return 0;
+  }
 
   fb_id = drm_buf[index].fb_id;
   if (fb_id <= 0)
@@ -368,9 +500,6 @@ static int drm_display_loop(bool *exit, int width, int height, int index) {
 
   ret = drm_flip_buffer(drmInfoPtr->fd, drmInfoPtr->crtc_id, fb_id, hdr_blob, dwidth, dheight);
 
-  if (hdr_blob > 0)
-    drmModeDestroyPropertyBlob(drmInfoPtr->fd, hdr_blob);
-
   return ret;
 }
 
@@ -380,6 +509,34 @@ static void drm_export_buffer(struct Source_Buffer_Info buffers[MAX_FB_NUM], int
   for (int i = 0; i < *buffer_num; i++) {
     memcpy(&buffers[i], &drm_buf[i], sizeof(buffers[i]));
   }
+}
+
+static void drm_switch_vt(struct WINDOW_OP *op, int flags) {
+  if (op->switch_vt > 0) {
+    if (tty_stat.index < 0) return;
+    if (tty_stat.index == (op->switch_vt - 1)) {
+      if (tty_stat.out) {
+        sync_input_state(true);
+        if (drmSetMaster(drmInfoPtr->fd) < 0) {
+          fprintf(stderr, "DRM: drmSetMaster() failed.\n");
+        }
+        drm_opt_commit(DRM_RESTORE_COMMIT, NULL, 0, 0, 0);
+        tty_stat.out = false;
+      }
+    }
+    else {
+      //out
+      if (!tty_stat.out) {
+        tty_stat.out = true;
+        usleep(fps_time);
+        drm_restore_display();
+        usleep(fps_time);
+        drmDropMaster(drmInfoPtr->fd);
+        sync_input_state(false);
+      }
+    }
+  }
+  return;
 }
 
 struct DISPLAY_CALLBACK display_callback_drm = {
@@ -394,7 +551,7 @@ struct DISPLAY_CALLBACK display_callback_drm = {
   .display_setup_post = drm_setup_post,
   .display_put_to_screen = drm_display_done,
   .display_get_resolution = drm_get_resolution,
-  .display_modify_window = drm_change_cursor,
+  .display_modify_window = drm_switch_vt,
   .display_vsync_loop = drm_display_loop,
   .display_exported_buffer_info = drm_export_buffer,
   .renders = DRM_RENDER | EGL_RENDER,

@@ -152,23 +152,44 @@ static void clear_threads() {
 }
 
 static int window_op_handle (int pipefd, void *data) {
-  char *opCode = NULL;
+  evwcode opCode = 0;
   struct WINDOW_OP op = {0};
   int flags = 0;
 
-  while (read(pipefd, &opCode, sizeof(char *)) > 0);
-  if (strcmp(opCode, QUITCODE) == 0) {
+  while (read(pipefd, &opCode, sizeof(opCode)) > 0);
+  switch (opCode) {
+  case QUITCODE:
     return LOOP_RETURN;
 #if defined(HAVE_WAYLAND) || defined(HAVE_X11)
-  } else if (strcmp(opCode, GRABCODE) == 0 || strcmp(opCode, FAKEGRABCODE) == 0) {
+  case GRABCODE:
+  case FAKEGRABCODE:
     flags |= (INPUTING | HIDE_CURSOR);
     op.hide_cursor = true;
-    if (strcmp(opCode, FAKEGRABCODE) == 0)
+    if (opCode == FAKEGRABCODE)
       op.inputing = true;
-  } else if (strcmp(opCode, UNGRABCODE) == 0 || strcmp(opCode, UNFAKEGRABCODE) == 0) {
-    flags |= ((strcmp(opCode, UNGRABCODE) == 0 ? INPUTING : 0) | HIDE_CURSOR);
-    if (strcmp(opCode, UNFAKEGRABCODE) == 0)
+    break;
+  case UNGRABCODE:
+  case UNFAKEGRABCODE:
+    flags |= ((opCode == UNGRABCODE ? INPUTING : 0) | HIDE_CURSOR);
+    if (opCode == UNFAKEGRABCODE)
       op.inputing = true;
+    break;
+#endif
+#if defined(HAVE_DRM)
+  case VTF1CODE:
+  case VTF2CODE:
+  case VTF3CODE:
+  case VTF4CODE:
+  case VTF5CODE:
+  case VTF6CODE:
+  case VTF7CODE:
+  case VTF8CODE:
+  case VTF9CODE:
+  case VTFACODE:
+  case VTFBCODE:
+  case VTFCCODE:
+    op.switch_vt = opCode;
+    break;
 #endif
   }
 

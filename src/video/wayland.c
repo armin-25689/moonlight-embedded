@@ -153,8 +153,6 @@ struct _dm_table {
 static int wl_commit_loop(bool *exit, int width, int height, int index);
 // render
 
-static const char *quitCode = QUITCODE;
-
 static int offset_x = 0, offset_y = 0;
 static int display_width = 0, display_height = 0, frame_width = 0, frame_height = 0;
 static int output_width = 0, output_height = 0;
@@ -458,7 +456,8 @@ static const struct wl_registry_listener registry_listener= {
 };
 
 static void window_close(void *data, struct xdg_toplevel *xdg_toplevel) {
-  write(*window_op_fd_p, &quitCode, sizeof(char *));
+  evwcode quitCode = QUITCODE;
+  write(*window_op_fd_p, &quitCode, sizeof(quitCode));
 }
 
 static void window_configure(void *data,

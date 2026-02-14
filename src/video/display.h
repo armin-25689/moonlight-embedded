@@ -21,7 +21,6 @@
 
 #pragma once
 
-#define QUITCODE "quit"
 // compitible for some uint32_t format 
 #define NOT_CARE 0
 #define NEED_CHANGE_WINDOW_SIZE 1
@@ -31,6 +30,7 @@
 struct WINDOW_OP {
   bool hide_cursor;
   bool inputing;
+  int switch_vt;
 };
 
 struct _WINDOW_PROPERTIES {

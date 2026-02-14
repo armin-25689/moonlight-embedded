@@ -44,7 +44,6 @@
 #endif
 #include <math.h>
 
-#define QUITCODE "quit"
 #define MAX_MT_TOUCH_FINGER 5
 #define ONE_FINGER_EVENT 0x01
 #define TWO_FINGER_EVENT 0x02
@@ -63,10 +62,10 @@
 #define CLEAN_MT_EVENT_MASK 0xF000
 
 static int keyboardpipefd = -1;
-static const char *quitstate = QUITCODE;
-static const char *grabcode = GRABCODE;
-static const char *ungrabcode = UNGRABCODE;
-static const char *fakegrabcode = FAKEGRABCODE;
+static const evwcode quitstate = QUITCODE;
+static const evwcode grabcode = GRABCODE;
+static const evwcode ungrabcode = UNGRABCODE;
+static const evwcode fakegrabcode = FAKEGRABCODE;
 
 static bool not_handle_mouse_motion = false;
 static bool not_handle_mouse_motion_var = false;
@@ -232,7 +231,7 @@ static void fake_grab_window() {
   sync_input_state(true);
 #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_DRM)
   if (keyboardpipefd > -1) {
-    write(keyboardpipefd, &fakegrabcode, sizeof(char *));
+    write(keyboardpipefd, &fakegrabcode, sizeof(fakegrabcode));
   }
 #endif
 }
@@ -1075,6 +1074,28 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
           return true;
         }
       }
+      else if ((dev->modifiers == MODIFIER_ALT) && ev->value != 0) {
+        evwcode passkey;
+        switch (ev->code) {
+        case KEY_F1:
+        case KEY_F2:
+        case KEY_F3:
+        case KEY_F4:
+        case KEY_F5:
+        case KEY_F6:
+        case KEY_F7:
+        case KEY_F8:
+        case KEY_F9:
+        case KEY_F10:
+        case KEY_F11:
+        case KEY_F12:
+          passkey = ev->code - 58;
+          if (ev->code == KEY_F11) passkey = 11;
+          if (ev->code == KEY_F12) passkey = 12;
+          write(keyboardpipefd, &passkey, sizeof(passkey));
+          break;
+        }
+      }
       if (waitingToSwitchGrabOnModifierUp) {
         if ((ev->code == GRAB_KEY && ev->value == 0) || 
             (ev->code == FAKE_GRAB_KEY && ev->value == 0)) {
@@ -1103,7 +1124,7 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
         freeallkey();
 #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_DRM)
         if (keyboardpipefd > -1) {
-          write(keyboardpipefd, &quitstate, sizeof(char *));
+          write(keyboardpipefd, &quitstate, sizeof(quitstate));
         }
 #endif
         grab_window(E_UNGRAB_WINDOW);
@@ -1427,7 +1448,7 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
   if (gamepadModified && (dev->buttonFlags & QUIT_BUTTONS) == QUIT_BUTTONS) {
 #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_DRM)
     if (keyboardpipefd > -1) {
-      write(keyboardpipefd, &quitstate, sizeof(char *));
+      write(keyboardpipefd, &quitstate, sizeof(quitstate));
     }
 #endif
     LiSendMultiControllerEvent(dev->controllerId, assignedControllerIds, 0, 0, 0, 0, 0, 0, 0);
@@ -2125,7 +2146,7 @@ void grab_window(enum grabWindowRequest grabstat) {
   if (lastInputStat != isInputing) {
 #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_DRM)
     if (keyboardpipefd > -1) {
-      write(keyboardpipefd, grabstat != E_GRAB_WINDOW ? &ungrabcode : &grabcode, sizeof(char *));
+      write(keyboardpipefd, grabstat != E_GRAB_WINDOW ? &ungrabcode : &grabcode, sizeof(grabcode));
     }
 #endif
   }
@@ -2456,7 +2477,7 @@ static int x11_sdl_event_handle(void *pointer) {
     case SDL_QUIT_APPLICATION:
 #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_DRM)
       if (keyboardpipefd > -1) {
-        write(keyboardpipefd, &quitstate, sizeof(char *));
+        write(keyboardpipefd, &quitstate, sizeof(quitstate));
       }
 #endif
       done = true;

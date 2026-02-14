@@ -70,16 +70,18 @@ static int num_compare (const void *a, const void *b) {
   return -(*(int *)a - *(int *)b);
 }
 
-int drm_opt_commit (enum DrmCommitOpt opt, drmModeAtomicReq *req, uint32_t device_id, uint32_t prop_id, uint64_t value) {
+int drm_opt_commit (enum DrmCommitOpt opt, void *data, uint32_t device_id, uint32_t prop_id, uint64_t value) {
+  #define MAX_PROP_SLOT_NUM 99
   // opt 0 is add, 1 is get, 2 is clear;
   struct {
     struct _commit_list *list;
     uint32_t count;
     size_t slot;
-  } static commit_list = { .list = NULL, .count = 0, .slot = 10, };
+  } static commit_list = { .list = NULL, .count = 0, .slot = 10, },
+           restore_list = { 0 };
 
   switch (opt) {
-  case 0:
+  case DRM_ADD_COMMIT:
     if (commit_list.list == NULL) commit_list.list = calloc(commit_list.slot, sizeof(struct _commit_list));
     if (commit_list.count > commit_list.slot) {
       commit_list.list = realloc(commit_list.list, sizeof(struct _commit_list) * commit_list.slot * 2);
@@ -100,26 +102,55 @@ int drm_opt_commit (enum DrmCommitOpt opt, drmModeAtomicReq *req, uint32_t devic
     commit_list.list[commit_list.count].value = value;
 
     commit_list.count++;
+
     return commit_list.count; 
-  case 1:
-    if (commit_list.count == 0 || req == NULL) return -1;
+  case DRM_APPLY_COMMIT:
+    if (commit_list.count == 0 || data == NULL) return -1;
+    if (restore_list.list == NULL)
+      restore_list.list = calloc(MAX_PROP_SLOT_NUM, sizeof(struct _commit_list));
+    drmModeAtomicReq *req = (drmModeAtomicReq *) data;
     int count = commit_list.count;
     for (int i = 0; i < commit_list.count; i++) {
       drmModeAtomicAddProperty(req, commit_list.list[i].device_id, commit_list.list[i].prop_id, commit_list.list[i].value);
-      commit_list.list[commit_list.count].device_id = 0;
-      commit_list.list[commit_list.count].prop_id = 0;
-      commit_list.list[commit_list.count].value = 0;
+
+      int found = -1;
+      for (int k = 0; k < restore_list.count; k++) {
+        if (restore_list.list[k].prop_id == commit_list.list[i].prop_id &&
+            restore_list.list[k].device_id == commit_list.list[i].device_id) {
+          restore_list.list[k].value = commit_list.list[i].value;
+          found = k;
+          break;
+        }
+      }
+      if (found < 0) {
+        restore_list.list[restore_list.count].device_id = commit_list.list[i].device_id;
+        restore_list.list[restore_list.count].prop_id = commit_list.list[i].prop_id;
+        restore_list.list[restore_list.count].value = commit_list.list[i].value;
+        restore_list.count++;
+      }
     }
+
     commit_list.count = 0;
     return count;
-  case 2:
+  case DRM_RESTORE_COMMIT:
+    if (restore_list.count == 0) return -1;
+    for (int i = 0; i < restore_list.count; i++) {
+      drm_opt_commit (DRM_ADD_COMMIT, NULL, restore_list.list[i].device_id, restore_list.list[i].prop_id, restore_list.list[i].value);
+    }
+    return restore_list.count;
+  case DRM_CLEAR_LIST:
     if (commit_list.list == NULL) return 0;
+    if (restore_list.list != NULL) free(restore_list.list);
     free(commit_list.list);
     commit_list.list = NULL;
     commit_list.slot = 10;
     commit_list.count = 0;
+    restore_list.list = NULL;
+    restore_list.count = 0;
     return 0;
   }
+
+  #undef MAX_PROP_SLOT_NUM
   return -1;
 }
 
@@ -255,28 +286,6 @@ static int drm_choose_connector (int fd, uint32_t bestConn[MAX_CONNECTOR]) {
         continue;
       connSize[index] = conn->mmWidth * conn->mmHeight;
       conns[index++] = conn->connector_id;
-/*
-      if (old_drm_info.connector_id == 0) {
-        old_drm_info.connector_id = conn->connector_id;
-        for (int j = 0; j < conn->count_encoders; j++) {
-          drmModeEncoder* enc = drmModeGetEncoder(fd, conn->encoders[j]);
-          if (!enc) {
-            continue;
-          }
-    
-          for (int k = 0; k < drmres->count_crtcs; k++) {
-            if (!(enc->possible_crtcs & (1 << k))) {
-              continue;
-            }
-            if (drmres->crtcs[k] != enc->crtc_id) {
-              continue;
-            }
-            break;
-          }
-          drmModeFreeEncoder(enc);
-        }
-      }
-*/
     }
     drmModeFreeConnector(conn);
     continue;

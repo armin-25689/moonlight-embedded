@@ -26,7 +26,7 @@ enum DrmBroadcastRgb { AUTORGB = 0, FULLRGB, LIMITEDRGB };
 enum DrmColorspace { DEFAULTCOLOR = 0, D2020RGB, D2020YCC };
 enum DrmColorSpace { DBT601 = 0, DBT709, DBT2020 };
 enum DrmColorRange { LIMITED_RANGE = 0, FULL_RANGE }; 
-enum DrmCommitOpt { DRM_ADD_COMMIT = 0, DRM_APPLY_COMMIT, DRM_CLEAR_LIST };
+enum DrmCommitOpt { DRM_ADD_COMMIT = 0, DRM_APPLY_COMMIT, DRM_RESTORE_COMMIT, DRM_CLEAR_LIST };
 
 struct Drm_Info {
   int fd;
@@ -101,4 +101,4 @@ int translate_format_to_drm(int format, int *bpp, int *heightmulti, int *planenu
 int drm_set_display(int fd, uint32_t crtc_id, uint32_t src_w, uint32_t src_h, uint32_t crtc_w, uint32_t crtc_h, uint32_t *connector_id, uint32_t connector_num, drmModeModeInfoPtr connModePtr, uint32_t fb_id);
 int drm_choose_color_config (enum DrmColorSpace colorspace, bool fullRange);
 int drm_apply_hdr_metadata(int fd, uint32_t conn_id, uint32_t hdr_metadata_prop_id, struct hdr_output_metadata *data);
-int drm_opt_commit (enum DrmCommitOpt opt, drmModeAtomicReq *req, uint32_t device_id, uint32_t prop_id, uint64_t value);
+int drm_opt_commit (enum DrmCommitOpt opt, void *data, uint32_t device_id, uint32_t prop_id, uint64_t value);
