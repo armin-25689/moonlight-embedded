@@ -233,29 +233,6 @@ static inline void* draw_frame (struct Render_Image *images, AVFrame* frame, int
   return images;
 }
 
-static inline int vlist_num_display() {
-  return VLIST_NUM(display);
-}
-
-static inline void mv_vlist_all_del_display(void **frame, void**data) {
-  pthread_mutex_lock(&threads.mutex);
-  void *lastframe = VLIST_GET_FRAME(display);
-  void *lastdata = VLIST_GET_DATA(display);
-  *frame = lastframe;
-  *data = lastdata;
-  VLIST_DEL(display);
-  pthread_mutex_unlock(&threads.mutex);
-}
-
-static inline void mv_vlist_add_decoder(void *frame, void *data) {
-  pthread_mutex_lock(&threads.mutex);
-  clear_frame(data);
-  VLIST_ADD(decoder, frame, data);
-  if (threads.created)
-    sem_post(&threads.decoder_sem);
-  pthread_mutex_unlock(&threads.mutex);
-}
-
 static inline void mv_vlist_display_to_decoder() {
   pthread_mutex_lock(&threads.mutex);
   void *image = VLIST_GET_DATA(display);
@@ -314,17 +291,20 @@ static int frame_handle (int pipefd, void *data) {
     }
     mv_vlist_render_to_display();
 
-    dis_res = disPtr->display_put_to_screen(display_width, display_height, image->index);
-    if (dis_res == NEED_CHANGE_WINDOW_SIZE) {
-      if (renderPtr->render_sync_window_size) {
-        disPtr->display_get_resolution(&display_width, &display_height, false);
-        renderPtr->render_sync_window_size(display_width, display_height, false);
+    if (disPtr->display_vsync_loop) {
+      dis_res = disPtr->display_vsync_loop(&done, frame_width, frame_height, image->index);
+    }
+    else {
+      dis_res = disPtr->display_put_to_screen(display_width, display_height, image->index);
+      if (dis_res == NEED_CHANGE_WINDOW_SIZE) {
+        if (renderPtr->render_sync_window_size) {
+          disPtr->display_get_resolution(&display_width, &display_height, false);
+          renderPtr->render_sync_window_size(display_width, display_height, false);
+        }
       }
     }
-    if (renderPtr->render_type == WAYLAND_RENDER)
-      return res;
-    if (disPtr->display_vsync_loop)
-      disPtr->display_vsync_loop(&done, frame_width, frame_height, image->index);
+    if (dis_res < 0) return LOOP_RETURN;
+
     mv_vlist_display_to_decoder();
 
     return res;
@@ -370,19 +350,17 @@ static void* frame_handler (void *data) {
       break;
     }
     mv_vlist_render_to_display();
-    int dis_res = disPtr->display_put_to_screen(display_width, display_height, ((struct Render_Image *)image_data)->index);
-    if (dis_res < 0) {
-      break;
-    }
-    else if (dis_res == NEED_CHANGE_WINDOW_SIZE) {
-      if (renderPtr->render_sync_window_size) {
-        disPtr->display_get_resolution(&display_width, &display_height, false);
-        renderPtr->render_sync_window_size(display_width, display_height, false);
+    if (disPtr->display_vsync_loop == NULL) {
+      int dis_res = disPtr->display_put_to_screen(display_width, display_height, ((struct Render_Image *)image_data)->index);
+      if (dis_res < 0) {
+        break;
       }
-    }
-    if (renderPtr->render_type == WAYLAND_RENDER)
-      continue;
-    if (!disPtr->display_vsync_loop) {
+      else if (dis_res == NEED_CHANGE_WINDOW_SIZE) {
+        if (renderPtr->render_sync_window_size) {
+          disPtr->display_get_resolution(&display_width, &display_height, false);
+          renderPtr->render_sync_window_size(display_width, display_height, false);
+        }
+      }
       mv_vlist_display_to_decoder();
     }
   }
@@ -674,7 +652,7 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   renderPtr->decoder_type = ffmpeg_decoder;
   renderParas.fixed_resolution = drFlags & FIXED_RESOLUTION;
   renderParas.fill_resolution = drFlags & FILL_RESOLUTION;
-  if (renderPtr->display_name != NULL) {
+  if (renderPtr->display_name == NULL) {
     renderPtr->display_name = disPtr->name;
   }
   if (strcmp(disPtr->name, "drm") == 0)
@@ -706,7 +684,8 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
     threads.display_handler = display_handler;
     sem_init(&threads.render_sem, 0, 0);
     sem_init(&threads.decoder_sem, 0, MAX_FB_NUM);
-    if (strcmp(disPtr->name, "drm") == 0 && pthread_create(&threads.display_id, NULL, threads.display_handler, &pipefd[0]) != 0) {
+    if (disPtr->display_vsync_loop != NULL &&
+        pthread_create(&threads.display_id, NULL, threads.display_handler, &pipefd[0]) != 0) {
       fprintf(stderr, "Error: Cannot create dislpay thread! Please try again or try direct submit mode.\n");
       return -1;
     }
@@ -758,9 +737,6 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
     renderPtr->images[i].images.descriptor = vaapi_descriptors[i];
     renderPtr->images[i].sframe.frame = frames[i];
     renderPtr->images[i].index = i;
-    renderPtr->images[i].mv_vlist_del = &mv_vlist_all_del_display;
-    renderPtr->images[i].mv_vlist_add = &mv_vlist_add_decoder;
-    renderPtr->images[i].vlist_num = &vlist_num_display;
   }
 
   firstDraw = true;

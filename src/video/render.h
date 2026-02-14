@@ -59,9 +59,6 @@ struct Render_Image {
     void *frame;
   } sframe;
   int index;
-  void(*mv_vlist_del)(void **frame, void **data);
-  void(*mv_vlist_add)(void *frame, void *data);
-  int (*vlist_num)(void);
 };
 struct RENDER_CALLBACK {
   char *name;

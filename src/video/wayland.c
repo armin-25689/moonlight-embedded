@@ -39,7 +39,6 @@
 #include "drm.h"
 #include "ffmpeg.h"
 #include "gbm.h"
-#include "../loop.h"
 
 #include <Limelight.h>
 
@@ -54,7 +53,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <pthread.h>
 
 #define ACTION_MODIFIERS (MODIFIER_ALT|MODIFIER_CTRL)
 #define UNGRAB_WINDOW do { \
@@ -143,7 +141,6 @@ struct _wl_render {
   int drm_fd;
   int dst_fmt;
   int plane_num;
-  pthread_t display_thread;
   int lastrange;
   int lastcolorspace;
   int (*wl_set_hdr_metadata) (int index);
@@ -153,6 +150,7 @@ struct _dm_table {
   uint32_t unuse;
   uint64_t modifier;
 };
+static int wl_commit_loop(bool *exit, int width, int height, int index);
 // render
 
 static const char *quitCode = QUITCODE;
@@ -586,6 +584,7 @@ static int wayland_setup(int width, int height, int fps, int drFlags) {
     xdg_toplevel_set_fullscreen(xdg_toplevel, NULL);
 
   if (drFlags & WAYLAND_RENDER) {
+    display_callback_wayland.display_vsync_loop = &wl_commit_loop;
     wl_render_base.hdr_support.support = wl_render_base.hdr_support.set_luminances && wl_render_base.hdr_support.set_primaries && wl_render_base.hdr_support.bt2020;
     display_callback_wayland.hdr_support = wl_render_base.hdr_support.support;
   } else {
@@ -706,8 +705,6 @@ static void wl_close_display(void *data) {
 }
 
 static int wl_dispatch_event(int width, int height, int index) {
-  if (wl_render_base.drm_fd > 0) return 0;
-
   while(wl_display_prepare_read(wl_display) != 0)
     wl_display_dispatch_pending(wl_display);
   wl_display_flush(wl_display);
@@ -840,53 +837,21 @@ static int wl_render_create(struct Render_Init_Info *paras) {
   return 0;
 }
 
-/*
-static void buffer_release (void *data, struct wl_buffer *buffer) {
-  return;
-}
-
-static const struct wl_buffer_listener buffer_listener = { .release = buffer_release, };
-
-static void frame_send_loop(void *data, struct wl_callback *cb, uint32_t time);
-static const struct wl_callback_listener frame_callback_listener = { .done = frame_send_loop };
-
-static void frame_send_loop(void *data, struct wl_callback *cb, uint32_t time) {};
-*/
-
-static inline void *commit_surface(void *data) {
-  struct _frame_callback_object *object = data;
-  AVFrame *frame = NULL;
-  struct Render_Image *image = NULL;
-
-  while (object->image->vlist_num() > 1) {
-    void *tf;
-    void *ti;
-    object->image->mv_vlist_del(&tf, &ti);
-    object->image->mv_vlist_add(tf, ti);
-  }
-  object->image->mv_vlist_del((void **)&frame, (void **)&image);
-  if (image == NULL) {
-    image = object->image;
-  }
-  else {
-    object->image->mv_vlist_add(object->image->sframe.frame, object->image);
-    //wl_render_base.last.image = object->image;
-  }
-
-  int index = image->index;
+static inline int commit_surface(int index) {
   struct wl_buffer *buffer = wl_render_base.frame_callback_object[index].buffer;
-  if (buffer == NULL)
-    return NULL;
+  if (buffer == NULL) {
+    fprintf(stderr, "Invalid buffer.\n");
+    return -1;
+  }
 
   wl_render_base.wl_set_hdr_metadata(index);
 
-  //wl_buffer_add_listener(buffer, &buffer_listener, &wl_render_base.frame_callback_object[index]);
   wl_surface_attach(wlsurface, buffer, 0, 0);
   wl_surface_damage_buffer(wlsurface, 0, 0, frame_width, frame_height);
 
   wl_surface_commit(wlsurface);
 
-  return  &wl_render_base.frame_callback_object[index];
+  return index;
 }
 
 static void get_drm_format (void *data, struct zwp_linux_dmabuf_feedback_v1 *feedback, int32_t fd, uint32_t size) {
@@ -978,57 +943,33 @@ static void inline wait_to_commit() {
   return;
 }
 
-static inline void dispatch_wl () {
-  while(wl_display_prepare_read(wl_display) != 0)
-    wl_display_dispatch_pending(wl_display);
-  wl_display_flush(wl_display);
-  wl_display_read_events(wl_display);
-  wl_display_dispatch_pending(wl_display);
-  return;
-}
-
-void *wl_dispatch_handler(void *data) {
-  uint32_t time = 0;
-  bool start = false;
-  struct _frame_callback_object *object = &wl_render_base.frame_callback_object[0];
+static int wl_commit_loop(bool *exit, int width, int height, int index) {
+  static uint32_t time = 0;
   struct wp_presentation_feedback *pr = NULL;
 
-  while (!start && !done) {
-    struct Render_Image *image = object->image;
-    if (image != NULL) {
-      if (image->vlist_num() > 1) start = true;
-    }
-    wait_to_commit();
-    dispatch_wl();
-  }
-  if (done) return (void *)0;
+  time++;
 
-  void *tf, *ti;
-  // retrive first image
-  object->image->mv_vlist_del(&tf, &ti);
+  int ret = commit_surface(index);
+  if (ret < 0)
+    return -1;
 
-  while (!done) {
-    time++;
+  wl_dispatch_event(width, height, index);
+  wait_to_commit();
 
-    object = commit_surface(object);
-    dispatch_wl();
-    wait_to_commit();
-
-    switch (time) {
-    case 120:
-      time = 0;
-      break;
-    case 1:
-    case 2:
-    case 3:
-    case 4:
-      pr = wp_presentation_feedback(wl_render_base.wp_presentation, wlsurface);
-      wp_presentation_feedback_add_listener(pr, &presentation_feedback, NULL);
-      break;
-    }
+  switch (time) {
+  case 120:
+    time = 0;
+    break;
+  case 1:
+  case 2:
+  case 3:
+  case 4:
+    pr = wp_presentation_feedback(wl_render_base.wp_presentation, wlsurface);
+    wp_presentation_feedback_add_listener(pr, &presentation_feedback, NULL);
+    break;
   }
 
-  return (void *)0;
+  return ret;
 }
 
 static int wl_render_init(struct Render_Init_Info *paras) { 
@@ -1070,12 +1011,6 @@ static int wl_render_init(struct Render_Init_Info *paras) {
   if (useHdr && !wl_render_base.hdr_support.output_primaries_bt2020)
     fprintf(stderr, "WARNNING: wayland output is not BT2020 primaries! \n");
 
-  if (pthread_create(&wl_render_base.display_thread, NULL, wl_dispatch_handler, NULL) != 0) {
-    fprintf(stderr, "Error: Cannot create dislpay thread! \n");
-    return -1;
-  }
-  pthread_setprio(wl_render_base.display_thread, 96);
-
   return 0; 
 }
 
@@ -1090,9 +1025,6 @@ static void wl_render_destroy() {
       wl_render_base.frame_callback_object[i].buffer = NULL;
     }
   }
-
-  if (wl_render_base.display_thread)
-    pthread_join(wl_render_base.display_thread, NULL);
 
   if (wl_render_base.drm_fd >= 0 )
     gbm_close_display (wl_render_base.drm_fd, wl_render_base.drm_buf, MAX_FB_NUM, wl_render_base.gbm_device, NULL);
@@ -1232,12 +1164,6 @@ static int wl_draw(struct Render_Image *image) {
   }
 
   if (wl_render_base.frame_callback_object[ret].image != image) {
-    if (ret == 0) {
-      struct wp_presentation_feedback *pr = wp_presentation_feedback(wl_render_base.wp_presentation, wlsurface);
-      wp_presentation_feedback_add_listener(pr, &presentation_feedback, NULL);
-      wl_surface_attach(wlsurface, wl_render_base.frame_callback_object[ret].buffer, 0, 0);
-      wl_surface_commit(wlsurface);
-    }
     wl_render_base.frame_callback_object[ret].frame = image->sframe.frame;
     wl_render_base.frame_callback_object[ret].image = image;
   }
