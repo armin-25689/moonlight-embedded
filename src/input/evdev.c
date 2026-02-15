@@ -1095,6 +1095,10 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
           passkey = ev->code - 58;
           if (ev->code == KEY_F11) passkey = 11;
           if (ev->code == KEY_F12) passkey = 12;
+
+          if (dev->modifiers == (MODIFIER_ALT | MODIFIER_CTRL))
+            passkey |= FROMDISPLAY;
+
           write(keyboardpipefd, &passkey, sizeof(passkey));
           break;
         }

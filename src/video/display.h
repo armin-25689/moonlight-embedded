@@ -31,6 +31,7 @@ struct WINDOW_OP {
   bool hide_cursor;
   bool inputing;
   int switch_vt;
+  bool from_display_server;
 };
 
 struct _WINDOW_PROPERTIES {

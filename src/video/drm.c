@@ -512,24 +512,29 @@ static void drm_switch_vt(struct WINDOW_OP *op, int flags) {
     if (tty_stat.index < 0) return;
     if (tty_stat.index == (op->switch_vt - 1)) {
       if (tty_stat.out) {
-        usleep(fps_time * 2);
-        if (drmSetMaster(drmInfoPtr->fd) < 0) {
-          fprintf(stderr, "DRM: drmSetMaster() failed.\n");
+        if (op->from_display_server)
+          usleep(1000000);
+        else
+          usleep(fps_time * 2);
+        if (drmSetMaster(drmInfoPtr->fd) == 0) {
+          drm_opt_commit(DRM_RESTORE_COMMIT, NULL, 0, 0, 0);
+          tty_stat.out = false;
+          sync_input_state(true);
         }
-        drm_opt_commit(DRM_RESTORE_COMMIT, NULL, 0, 0, 0);
-        tty_stat.out = false;
-        sync_input_state(true);
       }
     }
     else {
       //out
       if (!tty_stat.out) {
         tty_stat.out = true;
-        usleep(fps_time);
-        drm_restore_display();
-        usleep(fps_time);
         drmDropMaster(drmInfoPtr->fd);
         sync_input_state(false);
+        usleep(fps_time * 3);
+        if (drmSetMaster(drmInfoPtr->fd) == 0) {
+          drm_restore_display();
+          usleep(fps_time);
+          drmDropMaster(drmInfoPtr->fd);
+        }
       }
     }
   }

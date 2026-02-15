@@ -156,11 +156,12 @@ static void clear_threads() {
 }
 
 static int window_op_handle (int pipefd, void *data) {
-  evwcode opCode = 0;
+  evwcode getedCode = 0;
   struct WINDOW_OP op = {0};
   int flags = 0;
 
-  while (read(pipefd, &opCode, sizeof(opCode)) > 0);
+  while (read(pipefd, &getedCode, sizeof(getedCode)) > 0);
+  evwcode opCode = getedCode & (~0xC0);
   switch (opCode) {
   case QUITCODE:
     return LOOP_RETURN;
@@ -193,6 +194,8 @@ static int window_op_handle (int pipefd, void *data) {
   case VTFBCODE:
   case VTFCCODE:
     op.switch_vt = opCode;
+    if (getedCode & FROMDISPLAY)
+      op.from_display_server = true;
     break;
 #endif
   }
