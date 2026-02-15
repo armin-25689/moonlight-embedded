@@ -148,6 +148,10 @@ static void clear_threads() {
     sem_destroy(&threads.render_sem);
     sem_destroy(&threads.decoder_sem);
   }
+  if (threads.mutex != 0)
+    pthread_mutex_destroy(&threads.mutex);
+  memset(&threads, 0, sizeof(threads));
+
   return;
 }
 
@@ -803,9 +807,6 @@ void x11_cleanup() {
   window_properties.configure = &window_configure;
   disPtr->display_close_display((void *)&window_properties);
 
-  if (threads.mutex != 0)
-    pthread_mutex_destroy(&threads.mutex);
-  memset(&threads, 0, sizeof(threads));
   disPtr = NULL;
   renderPtr = NULL;
 }

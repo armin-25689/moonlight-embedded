@@ -98,6 +98,7 @@ static struct xdg_surface *xdg_surface;
 static struct wp_viewporter *wp_viewporter = NULL;
 static struct wp_viewport *wp_viewport = NULL;
 static struct wp_fractional_scale_manager_v1 *wp_fracscale = NULL;
+static struct wp_fractional_scale_v1 *wp_fscale = NULL;
 static struct zwp_pointer_constraints_v1 *zwp_pointer_constraints = NULL;
 static struct zwp_locked_pointer_v1 *zwp_locked_pointer = NULL;
 static struct zwp_relative_pointer_manager_v1 *zwp_relative_pointer_manager = NULL;
@@ -151,7 +152,7 @@ struct _dm_table {
   uint32_t unuse;
   uint64_t modifier;
 };
-static int wl_commit_loop(bool *exit, int width, int height, int index);
+static int wl_commit_loop(void *data, int width, int height, int index);
 // render
 
 static int offset_x = 0, offset_y = 0;
@@ -489,7 +490,6 @@ static const struct xdg_surface_listener xdg_surface_listener = {
 static void get_surface_scale (void *data, struct wp_fractional_scale_v1 *wp_fractional_scale_v1,
                               uint32_t scale) {
   fractionalScale = scale / 120.0;
-  wp_fractional_scale_v1_destroy(wp_fractional_scale_v1);
   display_width = display_width * scale_factor / fractionalScale;
   display_height = display_height * scale_factor / fractionalScale;
   wp_viewport_set_destination(wp_viewport, display_width, display_height);
@@ -507,7 +507,7 @@ static int wayland_setup(int width, int height, int fps, int drFlags) {
     fprintf(stderr, "Error: failed to open WL display.\n");
     return -1;
   }
-  wl_render_base.is_wl_render = drFlags & WAYLAND_RENDER ? true : false;
+  wl_render_base.is_wl_render = (drFlags & WAYLAND_RENDER) ? true : false;
 
   registry = wl_display_get_registry(wl_display);
   wl_registry_add_listener(registry, &registry_listener, NULL);
@@ -547,7 +547,7 @@ static int wayland_setup(int width, int height, int fps, int drFlags) {
   }
 
   if (wp_fracscale) {
-    struct wp_fractional_scale_v1 *wp_fscale = wp_fractional_scale_manager_v1_get_fractional_scale(wp_fracscale, wlsurface);
+    wp_fscale = wp_fractional_scale_manager_v1_get_fractional_scale(wp_fracscale, wlsurface);
     if (wp_fscale) {
       wp_fractional_scale_v1_add_listener(wp_fscale, &wp_fracscale_listener, NULL);
       wl_surface_commit(wlsurface);
@@ -651,6 +651,10 @@ static void wl_close_display(void *data) {
     if (wl_render_base.zwp_linux_dmabuf)
       zwp_linux_dmabuf_v1_destroy(wl_render_base.zwp_linux_dmabuf);
 
+    if (wp_fscale) {
+      wp_fractional_scale_v1_destroy(wp_fscale);
+      wp_fscale = NULL;
+    }
     if (wp_fracscale) {
       wp_fractional_scale_manager_v1_destroy(wp_fracscale);
       wp_fracscale = NULL;
@@ -944,7 +948,7 @@ static void inline wait_to_commit() {
   return;
 }
 
-static int wl_commit_loop(bool *exit, int width, int height, int index) {
+static int wl_commit_loop(void *data, int width, int height, int index) {
   static uint32_t time = 0;
   struct wp_presentation_feedback *pr = NULL;
 

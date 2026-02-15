@@ -128,6 +128,7 @@ Work on rk/drm/drm_vaapi platform.
 =item B<-modeset>
 
 Enable modeset for drm/drm_vaapi platform.
+Change connecter resolution and fps to specified.
 
 =item B<-nograb>
 

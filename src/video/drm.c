@@ -75,7 +75,7 @@ struct Tty_Stat {
   bool has_get;
   bool out;
 };
-static struct Tty_Stat tty_stat = { .fd = -1, .index = -1, .has_get = false, };
+static struct Tty_Stat tty_stat = { .fd = -1, .index = -1, .has_get = false, .out = false, };
 
 static inline void clear_tty (struct Tty_Stat *tty) {
   if (tty->fd < 0) return;
@@ -456,6 +456,7 @@ static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, uint32_t *hdr_blo
 
   if (*hdr_blob > 0)
     drmModeDestroyPropertyBlob(drmInfoPtr->fd, *hdr_blob);
+  *hdr_blob = 0;
   if (drmModeCreatePropertyBlob(drmInfoPtr->fd, &data, sizeof(struct hdr_output_metadata), hdr_blob) < 0) {
     perror("Failed to create hdr metadata blob: ");
     return -1;
@@ -474,7 +475,7 @@ static int drm_display_done(int width, int height, int index) {
   return 0;
 }
 
-static int drm_display_loop(bool *exit, int width, int height, int index) {
+static int drm_display_loop(void *data, int width, int height, int index) {
   int ret = -1;
   uint32_t fb_id;
 
@@ -511,12 +512,13 @@ static void drm_switch_vt(struct WINDOW_OP *op, int flags) {
     if (tty_stat.index < 0) return;
     if (tty_stat.index == (op->switch_vt - 1)) {
       if (tty_stat.out) {
-        sync_input_state(true);
+        usleep(fps_time * 2);
         if (drmSetMaster(drmInfoPtr->fd) < 0) {
           fprintf(stderr, "DRM: drmSetMaster() failed.\n");
         }
         drm_opt_commit(DRM_RESTORE_COMMIT, NULL, 0, 0, 0);
         tty_stat.out = false;
+        sync_input_state(true);
       }
     }
     else {

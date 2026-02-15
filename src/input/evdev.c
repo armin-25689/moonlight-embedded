@@ -1074,7 +1074,9 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
           return true;
         }
       }
-      else if ((dev->modifiers == MODIFIER_ALT) && ev->value != 0) {
+      else if (((dev->modifiers == MODIFIER_ALT) ||
+                (dev->modifiers == (MODIFIER_ALT | MODIFIER_CTRL)))
+               && ev->value != 0) {
         evwcode passkey;
         switch (ev->code) {
         case KEY_F1:
@@ -1089,6 +1091,7 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
         case KEY_F10:
         case KEY_F11:
         case KEY_F12:
+          if (!fakeGrab) break;
           passkey = ev->code - 58;
           if (ev->code == KEY_F11) passkey = 11;
           if (ev->code == KEY_F12) passkey = 12;
