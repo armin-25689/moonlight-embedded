@@ -119,6 +119,7 @@ struct _wl_render {
   struct zwp_linux_dmabuf_v1 *zwp_linux_dmabuf;
   struct zwp_linux_dmabuf_feedback_v1 *feedback;
   struct _drm_buf drm_buf[MAX_FB_NUM];
+  bool is_wl_render;
   void *gbm_device;
   struct _frame_callback_object frame_callback_object[MAX_FB_NUM];
   struct {
@@ -428,17 +429,17 @@ static void registry_handler(void *data,struct wl_registry *registry, uint32_t i
     zwp_relative_pointer_manager = wl_registry_bind(registry, id, &zwp_relative_pointer_manager_v1_interface, 1);
   } else if (strcmp(interface, wp_fractional_scale_manager_v1_interface.name) == 0) {
     wp_fracscale = wl_registry_bind(registry, id, &wp_fractional_scale_manager_v1_interface, 1);
-  } else if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
-    wl_render_base.zwp_linux_dmabuf = wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, 4);
-  } else if (strcmp(interface, wp_color_manager_v1_interface.name) == 0) {
-    wl_render_base.wp_color_manager = wl_registry_bind(registry, id, &wp_color_manager_v1_interface, 1);
-    wp_color_manager_v1_add_listener(wl_render_base.wp_color_manager, &wp_color_manager_listener, NULL);
-  } else if (strcmp(interface, wp_color_representation_manager_v1_interface.name) == 0) {
-    wl_render_base.wp_color_representation = wl_registry_bind(registry, id, &wp_color_representation_manager_v1_interface, 1);
-  } else if (strcmp(interface, wp_presentation_interface.name) == 0) {
-    wl_render_base.wp_presentation = wl_registry_bind(registry, id, &wp_presentation_interface, 2);
-  //} else if (strcmp(interface, wl_shm_interface.name) == 0) {
-  //  wl_shm_p = wl_registry_bind(registry, id, &wl_shm_interface, 2);
+  } else if (wl_render_base.is_wl_render) {
+    if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
+      wl_render_base.zwp_linux_dmabuf = wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, 4);
+    } else if (strcmp(interface, wp_color_manager_v1_interface.name) == 0) {
+      wl_render_base.wp_color_manager = wl_registry_bind(registry, id, &wp_color_manager_v1_interface, 1);
+      wp_color_manager_v1_add_listener(wl_render_base.wp_color_manager, &wp_color_manager_listener, NULL);
+    } else if (strcmp(interface, wp_color_representation_manager_v1_interface.name) == 0) {
+      wl_render_base.wp_color_representation = wl_registry_bind(registry, id, &wp_color_representation_manager_v1_interface, 1);
+    } else if (strcmp(interface, wp_presentation_interface.name) == 0) {
+      wl_render_base.wp_presentation = wl_registry_bind(registry, id, &wp_presentation_interface, 2);
+    }
   }
 }
 
@@ -506,6 +507,7 @@ static int wayland_setup(int width, int height, int fps, int drFlags) {
     fprintf(stderr, "Error: failed to open WL display.\n");
     return -1;
   }
+  wl_render_base.is_wl_render = drFlags & WAYLAND_RENDER ? true : false;
 
   registry = wl_display_get_registry(wl_display);
   wl_registry_add_listener(registry, &registry_listener, NULL);

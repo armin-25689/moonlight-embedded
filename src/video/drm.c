@@ -77,28 +77,23 @@ struct Tty_Stat {
 };
 static struct Tty_Stat tty_stat = { .fd = -1, .index = -1, .has_get = false, };
 
-static int stdin_handle (int fd, void *data) {
-  unsigned char key;
-  int ret;
-
-  while ((ret = read(fd, &key, 1)) > 0);
-  if (ret == 0) {
-    loop_remove_fd(fd);
-    close(fd);
-    struct Tty_Stat *tty = (struct Tty_Stat *)data;
-    memset(tty, 0, sizeof(struct Tty_Stat));
-    tty->fd = -1;
-  }
-
-  return 0;
-}
-
 static inline void clear_tty (struct Tty_Stat *tty) {
   if (tty->fd < 0) return;
   loop_remove_fd(tty->fd);
   close(tty->fd);
   memset(tty, 0, sizeof(struct Tty_Stat));
   tty->fd = -1;
+}
+
+static int stdin_handle (int fd, void *data) {
+  unsigned char key;
+  int ret;
+
+  while ((ret = read(fd, &key, 1)) > 0);
+  if (ret == 0)
+    clear_tty((struct Tty_Stat *) data);
+
+  return 0;
 }
 
 static inline int get_termios (int fd, struct termios *term) {
