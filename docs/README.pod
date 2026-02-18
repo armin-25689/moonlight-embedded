@@ -111,8 +111,8 @@ Enable hdr display for drm_vaapi/drm/wayland_vaapi/wayland platform.
 
 Try to use yuv444 format.Better video quality but not efficiency.
 Note: hevc(h265) with yuv444 format is the more common combination.
-Need sunshine host support(version >=24.0) and just support vaapi or
-software/x11/drm/wayland/drm_vaapi/x11_vaapi platform.
+Need sunshine host support(version >=24.0) and just support  
+vaapi/software/x11/drm/wayland/drm_vaapi/x11_vaapi platform.
 If meet h264+YUV444P, 'drm/wayland' platform is recommended.
 x11 platform also can use, but slow than others.
 
@@ -181,7 +181,8 @@ Select platform for audio and video output and input.
 Platform 'software/vaapi' will choose x11/wayland/gbm display automatically.
 Platform 'x11[_vaapi]/wayland[_vaapi]/drm[_vaapi]' will force to use relative server.
 Platform 'drm_vaapi and wayland_vaapi' support hdr display with vaapi decoder.
-Platform 'drm and wayland' use libyuv or libswscale to complete color convert.
+Platform 'drm and wayland' use libyuv or libswscale to complete color convert,
+and support hdr also.
 
 =item B<-nounsupported>
 
@@ -305,7 +306,6 @@ Connect:
 =head1 COMMENTS
 
  Platform 'drm/wayland/software/x11' is decoding with cpu.
- Only platform 'x11/vaapi/x11_vaapi/wayland' support yuv444 video mode.
  Only some gpu support yuv444 video mode. And need sunshine host support.
  Platform '*vaapi' is decoding with gpu.
  If you want to decoding with intel gpu,you must do:

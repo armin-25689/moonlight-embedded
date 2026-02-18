@@ -23,7 +23,7 @@
 #define MAX_CONNECTOR 5
 
 enum DrmBroadcastRgb { AUTORGB = 0, FULLRGB, LIMITEDRGB };
-enum DrmColorspace { DEFAULTCOLOR = 0, D2020RGB, D2020YCC };
+enum DrmColorspace { DEFAULTCOLOR = 0, D2020RGB, D2020YCC, D601YCC, D709YCC };
 enum DrmColorSpace { DBT601 = 0, DBT709, DBT2020 };
 enum DrmColorRange { LIMITED_RANGE = 0, FULL_RANGE }; 
 enum DrmCommitOpt { DRM_ADD_COMMIT = 0, DRM_APPLY_COMMIT, DRM_RESTORE_COMMIT, DRM_CLEAR_LIST };
@@ -38,7 +38,7 @@ struct Drm_Info {
   uint32_t connector_type;
   uint32_t conn_hdr_metadata_prop_id;
   uint32_t conn_colorspace_prop_id;
-  uint64_t conn_colorspace_values[3];
+  uint64_t conn_colorspace_values[5];
   uint32_t conn_max_bpc_prop_id;
   uint32_t conn_crtc_prop_id;
   uint32_t conn_broadcast_rgb_prop_id;

@@ -463,7 +463,7 @@ static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, uint32_t *hdr_blo
   }
 
   drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, 
-                 (drm_config.need_change_color && drmInfoPtr->conn_colorspace_values[D2020YCC] > 0) ? drmInfoPtr->conn_colorspace_values[D2020YCC] : drmInfoPtr->conn_colorspace_values[D2020RGB]);
+                 drm_config.need_change_color ? drmInfoPtr->conn_colorspace_values[D2020YCC] : drmInfoPtr->conn_colorspace_values[D2020RGB]);
   drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_hdr_metadata_prop_id, (uint64_t)(*hdr_blob));
   drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->plane_id, drmInfoPtr->plane_eotf_prop_id, 2);
   usehdr = hdrp;
@@ -620,6 +620,8 @@ static int get_config_from_frame(struct Render_Config *config) {
     enum DrmColorSpace colorspace = drm_config.colorspace == COLORSPACE_REC_2020 ? DBT2020 : (drm_config.colorspace == COLORSPACE_REC_709 ? DBT709 : DBT601);
     drm_choose_color_config(colorspace, drm_config.full_color_range);
   }
+  drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, 
+                 !drm_config.need_change_color ? drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020RGB : DEFAULTCOLOR] : drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020YCC : (drm_config.colorspace == COLORSPACE_REC_709 ? D709YCC : D601YCC)]);
 
   if (isMaster && drm_set_display(drmInfoPtr->fd, drmInfoPtr->crtc_id, frame_width, frame_height, display_width, display_height, &connPtr->connector_id, 1, connModePtr, drm_buf[0].fb_id) < 0) {
     fprintf(stderr, "Could not set fb to drm crtc.\n");
@@ -763,10 +765,14 @@ static void drm_free_buffer (void* *image, int planes) {
 
 static int drm_draw(struct Render_Image *image) { 
   int colorspace = ffmpeg_get_frame_colorspace(image->sframe.frame);
-  if (drm_config.need_change_color && drm_config.colorspace != colorspace) {
-    drm_config.colorspace = colorspace;
-    enum DrmColorSpace colorspace = drm_config.colorspace == COLORSPACE_REC_2020 ? DBT2020 : (drm_config.colorspace == COLORSPACE_REC_709 ? DBT709 : DBT601);
-    drm_choose_color_config(colorspace, drm_config.full_color_range);
+  if (drm_config.colorspace != colorspace) {
+    if (drm_config.need_change_color) {
+      drm_config.colorspace = colorspace;
+      enum DrmColorSpace colorspace = drm_config.colorspace == COLORSPACE_REC_2020 ? DBT2020 : (drm_config.colorspace == COLORSPACE_REC_709 ? DBT709 : DBT601);
+      drm_choose_color_config(colorspace, drm_config.full_color_range);
+    }
+    drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, 
+                   !drm_config.need_change_color ? drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020RGB : DEFAULTCOLOR] : drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020YCC : (drm_config.colorspace == COLORSPACE_REC_709 ? D709YCC : D601YCC)]);
   }
 
   return drm_draw_function(image);

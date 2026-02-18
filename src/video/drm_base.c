@@ -476,14 +476,7 @@ static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
 #define PNUM 14
 #define CNUM 9
 #define NUMS 23
-    uint32_t ids[] = { drm_info->connector_id, drm_info->connector_id, drm_info->connector_id, drm_info->connector_id,
-                       drm_info->connector_id, drm_info->connector_id,  
-                       drm_info->crtc_id, drm_info->crtc_id, drm_info->crtc_id, 
-                       drm_info->plane_id, drm_info->plane_id,  
-                       drm_info->plane_id, drm_info->plane_id, drm_info->plane_id, drm_info->plane_id,  
-                       drm_info->plane_id, drm_info->plane_id, drm_info->plane_id, drm_info->plane_id,  
-                       drm_info->plane_id, drm_info->plane_id, drm_info->plane_id, drm_info->plane_id,
-                     };
+
     const char *names[] = { "CRTC_ID", "HDR_OUTPUT_METADATA", "Colorspace", "max bpc", "Broadcast RGB", "allm_enable",
                              "MODE_ID", "ACTIVE", "VRR_ENABLED",
                              "FB_ID", "CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H", "SRC_X", "SRC_Y", "SRC_W", "SRC_H", "rotation", "CRTC_ID", "COLOR_ENCODING", "COLOR_RANGE", "EOTF"
@@ -502,10 +495,12 @@ static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
                                &drm_info->plane_eotf_prop_id,
                              };
     uint64_t tmp_value[NUMS] = {0};
-    uint64_t *values_list[] = { &tmp_value[0], &tmp_value[1], &tmp_value[2], &tmp_value[3], &tmp_value[4], &tmp_value[5], &tmp_value[6], &tmp_value[7], &tmp_value[8], &tmp_value[9],
-                                &tmp_value[10], &tmp_value[11], &tmp_value[12], &tmp_value[13], &tmp_value[14], &tmp_value[15], &tmp_value[16], &tmp_value[17], &tmp_value[18], &tmp_value[19],
-                                &tmp_value[20], &tmp_value[20], &tmp_value[21],
-                              };
+    uint64_t *values_list[NUMS];
+    uint32_t ids[NUMS];
+    for (int i = 0; i < NUMS; i++) {
+      values_list[i] = &tmp_value[i];
+      ids[i] = (i < CONUM) ? drm_info->connector_id : ((i < CNUM) ? drm_info->crtc_id : drm_info->plane_id);
+    }
 
     const char **connnames = &names[0], **crtcnames = &names[CONUM], **pnames = &names[CNUM];
     uint32_t **co_props_list = &props_list[0], **cr_props_list = &props_list[CONUM], **p_props_list = &props_list[CNUM];
@@ -561,10 +556,13 @@ static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
   drm_get_prop_enum (drm_info->fd, color_space_name, 3, drm_info->plane_color_encoding_prop_id, drm_info->plane_color_encoding_prop_values);
   const char *colorange_name[3] = { "YCbCr limited range", "YCbCr full range", "nonono"};
   drm_get_prop_enum (drm_info->fd, colorange_name, 3, drm_info->plane_color_range_prop_id, drm_info->plane_color_range_prop_values);
-  const char *colorspace_name[3] = { "Default", "BT2020_RGB", "BT2020_YCC" };
-  drm_get_prop_enum (drm_info->fd, colorspace_name, 3, drm_info->conn_colorspace_prop_id, drm_info->conn_colorspace_values);
+  const char *colorspace_name[5] = { "Default", "BT2020_RGB", "BT2020_YCC", "BT601_YCC", "BT709_YCC" };
+  drm_get_prop_enum (drm_info->fd, colorspace_name, 5, drm_info->conn_colorspace_prop_id, drm_info->conn_colorspace_values);
   const char *broadcast_rgb_name[3] = { "Automatic", "Full", "Limited 16:235" };
   drm_get_prop_enum (drm_info->fd, broadcast_rgb_name, 3, drm_info->conn_broadcast_rgb_prop_id, drm_info->conn_broadcast_rgb_prop_values);
+  if (drm_info->conn_colorspace_values[D2020YCC] == 0) drm_info->conn_colorspace_values[D2020YCC] = drm_info->conn_colorspace_values[D2020RGB];
+  if (drm_info->conn_colorspace_values[D601YCC] == 0) drm_info->conn_colorspace_values[D601YCC] = drm_info->conn_colorspace_values[DEFAULTCOLOR];
+  if (drm_info->conn_colorspace_values[D709YCC] == 0) drm_info->conn_colorspace_values[D709YCC] = drm_info->conn_colorspace_values[DEFAULTCOLOR];
 
   if (format_site < 0)
     fprintf(stderr, "No matched plane format!\n");
