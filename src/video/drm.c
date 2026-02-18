@@ -433,7 +433,8 @@ static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, uint32_t *hdr_blo
   if (usehdr == hdrp) return 0;
 
   if (!hdrp) {
-    drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, drmInfoPtr->conn_colorspace_values[DEFAULTCOLOR]);
+    if (drm_config.colorspace == COLORSPACE_REC_2020)
+      drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, drmInfoPtr->conn_colorspace_values[DEFAULTCOLOR]);
     drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_hdr_metadata_prop_id, 0);
     drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->plane_id, drmInfoPtr->plane_eotf_prop_id, 0);
     usehdr = hdrp;
