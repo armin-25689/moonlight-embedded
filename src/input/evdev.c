@@ -157,6 +157,8 @@ struct input_device {
   short rightStickX, rightStickY;
   bool gamepadModified;
   bool mouseEmulation;
+  bool hasaccel;
+  bool hasgyro;
   pthread_t meThread;
   struct input_abs_parms xParms, yParms, rxParms, ryParms, zParms, rzParms;
   struct input_abs_parms leftParms, rightParms, upParms, downParms;
@@ -434,6 +436,9 @@ static void send_controller_arrival(struct input_device *dev) {
       type = LI_CTYPE_XBOX;
     }
   }
+  if (type != LI_CTYPE_XBOX) {
+    if (!dev->hasaccel && !dev->hasgyro) type = LI_CTYPE_XBOX;
+  }
 
   SET_BTN_FLAG(dev->map->btn_a, A_FLAG);
   SET_BTN_FLAG(dev->map->btn_b, B_FLAG);
@@ -453,6 +458,10 @@ static void send_controller_arrival(struct input_device *dev) {
   SET_BTN_FLAG(dev->map->btn_paddle4, PADDLE4_FLAG);
   SET_BTN_FLAG(dev->map->btn_touchpad, TOUCHPAD_FLAG);
 
+  if (dev->hasaccel)
+    capabilities |= LI_CCAP_ACCEL;
+  if (dev->hasgyro)
+    capabilities |= LI_CCAP_GYRO;
   if (dev->map->abs_lefttrigger >= 0 && dev->map->abs_righttrigger >= 0)
     capabilities |= LI_CCAP_ANALOG_TRIGGERS;
 
@@ -1724,13 +1733,15 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
   bool is_touchscreen = !is_mouse && libevdev_has_event_code(evdev, EV_KEY, BTN_TOUCH);
 
   // This classification logic comes from SDL
-  bool is_accelerometer =
-    ((libevdev_has_event_code(evdev, EV_ABS, ABS_X) &&
-      libevdev_has_event_code(evdev, EV_ABS, ABS_Y) &&
-      libevdev_has_event_code(evdev, EV_ABS, ABS_Z)) ||
-     (libevdev_has_event_code(evdev, EV_ABS, ABS_RX) &&
-      libevdev_has_event_code(evdev, EV_ABS, ABS_RY) &&
-      libevdev_has_event_code(evdev, EV_ABS, ABS_RZ))) &&
+  bool hasaccel =
+    libevdev_has_event_code(evdev, EV_ABS, ABS_X) &&
+    libevdev_has_event_code(evdev, EV_ABS, ABS_Y) &&
+    libevdev_has_event_code(evdev, EV_ABS, ABS_Z);
+  bool hasgyro = 
+    libevdev_has_event_code(evdev, EV_ABS, ABS_RX) &&
+    libevdev_has_event_code(evdev, EV_ABS, ABS_RY) &&
+    libevdev_has_event_code(evdev, EV_ABS, ABS_RZ);
+  bool is_accelerometer = (hasaccel || hasgyro) &&
     !libevdev_has_event_type(evdev, EV_KEY);
   bool is_gamepad =
     ((libevdev_has_event_code(evdev, EV_ABS, ABS_X) &&
@@ -1756,10 +1767,6 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
   // the keyboard becoming unresponsive on FreeBSD.
   bool is_likekeyboard =
     is_keyboard && isUseKbdmux && strcmp(name, "System keyboard multiplexer") != 0;
-/*
-    (is_keyboard && guid[0] <= 3) ||
-    strcmp(name, "AT keyboard") == 0;
-*/
 
   // In some cases,acpibutton can be mistaken for a keyboard and freeze the keyboard when tring grab.
   if (is_acpibutton) {
@@ -1776,15 +1783,7 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
     is_keyboard = false;
   }
 
-  if (is_accelerometer) {
-    if (verbose)
-      printf("Ignoring accelerometer: %s\n", name);
-    libevdev_free(evdev);
-    close(fd);
-    return;
-  }
-
-  if (is_gamepad) {
+  if (is_gamepad || is_accelerometer) {
 
     if (sdlgp) {
       if (verbose)
@@ -1801,7 +1800,7 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
     }
   } else {
     if (verbose)
-      printf("Not mapping %s as a gamepad\n", name);
+      printf("Not mapping %s as a gamepad or accelerometer\n", name);
     mappings = NULL;
   }
 
@@ -1861,6 +1860,10 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
       }
     }
   }
+  if (is_gamepad) {
+    dev->hasaccel = hasaccel;
+    dev->hasgyro = hasgyro;
+  }
 
 
   int nbuttons = 0;
@@ -1917,6 +1920,7 @@ static void evdev_map_key(char* keyName, short* key) {
   currentHat = NULL;
   currentAbs = NULL;
   *key = -1;
+  done = false;
   loop_main();
 
   usleep(250000);
@@ -1930,6 +1934,7 @@ static void evdev_map_abs(char* keyName, short* abs, bool* reverse) {
   currentAbs = abs;
   currentReverse = reverse;
   *abs = -1;
+  done = false;
   loop_main();
 
   usleep(250000);
@@ -1946,6 +1951,7 @@ static void evdev_map_hatkey(char* keyName, short* hat, short* hat_dir, short* k
   *hat = -1;
   *hat_dir = -1;
   *currentReverse = false;
+  done = false;
   loop_main();
 
   usleep(250000);
@@ -1961,6 +1967,7 @@ static void evdev_map_abskey(char* keyName, short* abs, short* key, bool* revers
   *key = -1;
   *abs = -1;
   *currentReverse = false;
+  done = false;
   loop_main();
 
   usleep(250000);
