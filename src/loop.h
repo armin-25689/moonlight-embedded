@@ -46,6 +46,6 @@ void loop_mod_fd(int fd, Fd_Handler handler, int events, void *data);
 void loop_remove_fd(int fd);
 
 void loop_create();
-void loop_init();
+void loop_start();
 void loop_main();
 void loop_destroy();

@@ -1915,34 +1915,32 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
 }
 
 static void evdev_map_key(char* keyName, short* key) {
-  printf("Press %s\n", keyName);
+  fprintf(stderr, "Press %s\n", keyName);
   currentKey = key;
   currentHat = NULL;
   currentAbs = NULL;
   *key = -1;
-  done = false;
-  loop_main();
+  loop_start();
 
   usleep(250000);
   evdev_drain();
 }
 
 static void evdev_map_abs(char* keyName, short* abs, bool* reverse) {
-  printf("Move %s\n", keyName);
+  fprintf(stderr, "Move %s\n", keyName);
   currentKey = NULL;
   currentHat = NULL;
   currentAbs = abs;
   currentReverse = reverse;
   *abs = -1;
-  done = false;
-  loop_main();
+  loop_start();
 
   usleep(250000);
   evdev_drain();
 }
 
 static void evdev_map_hatkey(char* keyName, short* hat, short* hat_dir, short* key) {
-  printf("Press %s\n", keyName);
+  fprintf(stderr, "Press %s\n", keyName);
   currentKey = key;
   currentHat = hat;
   currentHatDir = hat_dir;
@@ -1951,15 +1949,14 @@ static void evdev_map_hatkey(char* keyName, short* hat, short* hat_dir, short* k
   *hat = -1;
   *hat_dir = -1;
   *currentReverse = false;
-  done = false;
-  loop_main();
+  loop_start();
 
   usleep(250000);
   evdev_drain();
 }
 
 static void evdev_map_abskey(char* keyName, short* abs, short* key, bool* reverse) {
-  printf("Press %s\n", keyName);
+  fprintf(stderr, "Press %s\n", keyName);
   currentKey = key;
   currentHat = NULL;
   currentAbs = abs;
@@ -1967,8 +1964,7 @@ static void evdev_map_abskey(char* keyName, short* abs, short* key, bool* revers
   *key = -1;
   *abs = -1;
   *currentReverse = false;
-  done = false;
-  loop_main();
+  loop_start();
 
   usleep(250000);
   evdev_drain();
@@ -2034,7 +2030,6 @@ void evdev_map(char* device) {
   if (ioctl(((struct input_device *)(LIST_FIRST(head_device)->data))->fd, EVIOCGRAB, 0) < 0)
     fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
 
-  loop_destroy();
   mapping_print(&map);
 }
 

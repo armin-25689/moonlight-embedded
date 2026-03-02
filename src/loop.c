@@ -33,7 +33,8 @@ LIST_HEAD(head_of_list, List_Node);
 static struct head_of_list first_node;
 static struct head_of_list *head_node = &first_node;
 static int epoll_fd = -1;
-static int sigFd;
+static int sigFd = -1;
+static bool exitnow = false;
 bool done = false;
 
 static int loop_sig_handler(int fd, void *data) {
@@ -45,6 +46,7 @@ static int loop_sig_handler(int fd, void *data) {
     case SIGTERM:
     case SIGQUIT:
     case SIGHUP:
+      exitnow = true;
       return LOOP_RETURN;
   }
   return LOOP_OK;
@@ -174,10 +176,8 @@ void loop_create() {
   sigaddset(&sigset, SIGTSTP);
   sigprocmask(SIG_BLOCK, &sigset, NULL);
   sigFd = signalfd(-1, &sigset, 0);
-}
-
-void loop_init() {
-  loop_add_fd(sigFd, &loop_sig_handler, EPOLLIN | EPOLLERR | EPOLLHUP);
+  if (sigFd >= 0)
+    loop_add_fd(sigFd, &loop_sig_handler, EPOLLIN | EPOLLERR | EPOLLHUP);
 }
 
 void loop_main() {
@@ -202,8 +202,18 @@ void loop_main() {
   done = true;
 }
 
+void loop_start() {
+  if (exitnow) return;
+  done = false;
+  loop_main();
+}
+
 void loop_destroy() {
   done = true;
+  if (sigFd >= 0) {
+    close(sigFd);
+    sigFd = -1;
+  }
   if (epoll_fd >= 0)
     close(epoll_fd);
   epoll_fd = -1;

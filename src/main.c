@@ -141,9 +141,6 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
     connection_debug = true;
   }
 
-  if (IS_EMBEDDED(system))
-    loop_init();
-
   platform_start(system);
   PDECODER_RENDERER_CALLBACKS videoCallback = platform_get_video(system);
 
@@ -270,6 +267,8 @@ int main(int argc, char* argv[]) {
     loop_create();
     evdev_create(config.inputs[0], NULL, config.debug_level > 0, config.rotate);
     evdev_map(config.inputs[0]);
+    evdev_stop();
+    loop_destroy();
     exit(0);
   }
 
