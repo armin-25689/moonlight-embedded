@@ -200,7 +200,7 @@ static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int
   uint32_t format = translate_format_to_drm(src_format, &drm_config.bpp, &drm_config.buffer_multi, &drm_config.plane_num);
   if (format <= 0) {
     fprintf(stderr, "drm: not support pix format.\n");
-    return -1;
+    return 0;
   }
   drm_config.plane_format = format;
   
@@ -223,11 +223,11 @@ static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int
       createBuf.bpp = drm_config.bpp;
       if (drmIoctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &createBuf) < 0) {
         perror("Could not create drm dumb: ");
-        return -1;
+        return 0;
       }
       if (drmPrimeHandleToFD(drm_fd, createBuf.handle, O_CLOEXEC, &drm_buf[i].fd[j]) < 0) {
         fprintf(stderr, "Cannot get drm fd.\n");
-        return -1;
+        return 0;
       }
       drm_buf[i].handle[j] = createBuf.handle;
       drm_buf[i].pitch[j] = createBuf.pitch;
@@ -260,7 +260,7 @@ static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int
         destroyBuf.handle = drm_buf[i].handle[m];
         drmIoctl(drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroyBuf);
       }
-      return -1;
+      return 0;
     }
   }
   drm_config.handle_num = handle_num;
@@ -593,7 +593,7 @@ static int get_config_from_frame(struct Render_Config *config) {
   int flags = 0;
   if (need_generate_buffer) {
     drm_clear_image_cache(drmInfoPtr->fd, drm_buf, MAX_FB_NUM);
-    if (drm_generate_drm_buf(drmInfoPtr->fd, drm_config.dst_fmt, frame_width, frame_height, flags, drm_buf, MAX_FB_NUM) < 0) {
+    if (drm_generate_drm_buf(drmInfoPtr->fd, drm_config.dst_fmt, frame_width, frame_height, flags, drm_buf, MAX_FB_NUM) == 0) {
       fprintf(stderr, "Could not generate buf.\n");
       return -1;
     }
