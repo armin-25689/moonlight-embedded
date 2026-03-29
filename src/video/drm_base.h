@@ -97,7 +97,7 @@ void convert_display (const uint32_t *src_w, const uint32_t *src_h, uint32_t *ds
 int get_drm_dbum_aligned (int fd, int pixfmt, int width, int height);
 int drm_flip_buffer (uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint64_t hdr_data, uint32_t width, uint32_t height);
 int drm_get_plane_info (struct Drm_Info *drm_info, uint32_t format);
-int translate_format_to_drm(int format, int *bpp, int *heightmulti, int *planenum);
+uint32_t translate_format_to_drm(int format, int *bpp, int *heightmulti, int *planenum);
 int drm_set_display(int fd, uint32_t crtc_id, uint32_t src_w, uint32_t src_h, uint32_t crtc_w, uint32_t crtc_h, uint32_t *connector_id, uint32_t connector_num, drmModeModeInfoPtr connModePtr, uint32_t fb_id);
 int drm_choose_color_config (enum DrmColorSpace colorspace, bool fullRange);
 int drm_apply_hdr_metadata(int fd, uint32_t conn_id, uint32_t hdr_metadata_prop_id, struct hdr_output_metadata *data);

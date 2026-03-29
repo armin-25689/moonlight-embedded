@@ -710,7 +710,7 @@ void drm_restore_display() {
   }
 }
 
-int translate_format_to_drm(int format, int *bpp, int *heightmulti, int *planenum) {
+uint32_t translate_format_to_drm(int format, int *bpp, int *heightmulti, int *planenum) {
   switch (format) {
   case AV_PIX_FMT_X2RGB10LE:
     *bpp = 32;
