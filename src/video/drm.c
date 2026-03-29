@@ -252,7 +252,11 @@ static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int
       drm_buf[i].modifiers[k] = DRM_FORMAT_MOD_LINEAR;
     }
     int add_flags = DRM_MODE_FB_MODIFIERS;
+#if defined(__arm__) || defined(__aarch64__)
+    drmModeAddFB2(drm_fd, width, height, format, drm_buf[i].handle, drm_buf[i].pitch, drm_buf[i].offset, &drm_buf[i].fb_id, 0);
+#else
     drmModeAddFB2WithModifiers(drm_fd, width, height, format, drm_buf[i].handle, drm_buf[i].pitch, drm_buf[i].offset, drm_buf[i].modifiers, &drm_buf[i].fb_id, add_flags);
+#endif
     if (!drm_buf[i].fb_id) {
       perror("Failed to create framebuffer from drm buffer object: ");
       for (int m = 0; m < handle_num; m++) {
