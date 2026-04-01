@@ -34,6 +34,7 @@
 #define DEFAULT_FORMAT_10BIT DRM_FORMAT_XRGB2101010
 
 static struct _drm_buf drm_buf[MAX_FB_NUM] = {0};
+static uint8_t* drm_buf_dataptr[MAX_FB_NUM][MAX_PLANE_NUM] = {0};
 static struct Drm_Info *drmInfoPtr;
 static drmModeConnectorPtr connPtr;
 static drmModeModeInfoPtr connModePtr;
@@ -58,7 +59,7 @@ struct _drm_render_config {
   int colorspace;
   AVFrame *frame;
   uint32_t plane_format;
-  uint64_t size[MAX_FB_NUM][4];
+  uint64_t size[MAX_FB_NUM][MAX_PLANE_NUM];
 } static drm_config = {0};
 
 static int (*drm_draw_function) (struct Render_Image *image);
@@ -195,6 +196,35 @@ static void get_aligned_width (int width, int ajustedw, int srcw, int *dstw) {
   return;
 }
 
+static int drm_get_buffer_ptr (int drm_fd, uint8_t **drm_buf_dataptr, uint64_t *size, uint32_t *handle, uint32_t *offset, int handle_num, int plane_num) {
+  uint64_t map_offset[MAX_PLANE_NUM] = {0};
+
+  for (int m = 0; m < handle_num; m++) {
+    struct drm_mode_map_dumb mapBuf = {};
+    mapBuf.handle = handle[m];
+    if (drmIoctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &mapBuf) < 0) {
+      perror("Could not map dumb: ");
+      return -1;
+    }
+    map_offset[m] = mapBuf.offset;
+
+    uint8_t *data_ptr = (uint8_t*)mmap(NULL, size[m], PROT_WRITE, MAP_SHARED, drm_fd, map_offset[m]);
+    if (data_ptr == MAP_FAILED) {
+      perror("Could not map dumb buffer to userspace: ");
+      return -1;
+    }
+    drm_buf_dataptr[m] = data_ptr;
+  }
+
+  if (handle_num == 1) {
+    for (int j = 0; j < plane_num; j++) {
+      drm_buf_dataptr[j] = drm_buf_dataptr[0] + offset[j];
+    }
+  }
+
+  return 0;
+}
+
 static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int height, uint32_t flags, struct _drm_buf *drm_buf, int buffer_num) {
 
   uint32_t format = translate_format_to_drm(src_format, &drm_config.bpp, &drm_config.buffer_multi, &drm_config.plane_num);
@@ -266,7 +296,13 @@ static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int
       }
       return 0;
     }
+
+    if (drm_get_buffer_ptr(drm_fd, drm_buf_dataptr[i], drm_config.size[i], drm_buf[i].handle, drm_buf[i].offset, handle_num, drm_config.plane_num) < 0) {
+      fprintf(stderr, "Could not get buffer ptr from dumb\n");
+      return 0;
+    }
   }
+
   drm_config.handle_num = handle_num;
 
   return format;
@@ -378,11 +414,14 @@ static void drm_clear_image_cache (int drm_fd, struct _drm_buf *drm_buf, int buf
       for (int j = 0; j < drm_config.handle_num; j++) {
         close(drm_buf[i].fd[j]);
         if (gbm_display == NULL) {
+          if (drm_buf_dataptr[i][j] != 0 && drm_config.size[i][j] > 0)
+            munmap(drm_buf_dataptr[i][j], drm_config.size[i][j]);
           struct drm_mode_destroy_dumb destroyBuf = {0};
           destroyBuf.handle = drm_buf[i].handle[j];
           drmIoctl(drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroyBuf);
         }
       }
+      memset(drm_buf_dataptr[i], 0, sizeof(drm_buf_dataptr[i]));
       memset(&drm_buf[i], 0, sizeof(drm_buf[i]));
       memset(drm_buf[i].fd, -1, sizeof(drm_buf[i].fd));
     }
@@ -618,53 +657,10 @@ static int get_config_from_frame(struct Render_Config *config) {
   return 0;
 }
 
-static inline int drm_convert_image(struct Render_Image *image, struct _drm_buf *drm_buf, int drm_fd, int handle_num, int plane_num, int dst_fmt, uint64_t size[MAX_PLANE_NUM], uint64_t map_offset[MAX_PLANE_NUM]) {
-  AVFrame * sframe = (AVFrame *)image->sframe.frame;
-  uint8_t *data_buffer[4] = {0};
-
-  for (int m = 0; m < handle_num; m++) {
-    uint8_t *data_ptr = (uint8_t*)mmap(NULL, size[m], PROT_WRITE, MAP_SHARED, drm_fd, map_offset[m]);
-    if (data_ptr == MAP_FAILED) {
-      perror("Could not map dumb buffer to userspace: ");
-      return -1;
-    }
-
-    if (handle_num == 1) {
-      for (int i = 0; i < plane_num; i++) {
-        data_buffer[i] = data_ptr + drm_buf[image->index].offset[i];
-      }
-    } else {
-      data_buffer[m] = data_ptr;
-    }
-  }
-
-  convert_frame(sframe, data_buffer, drm_buf[image->index].pitch, dst_fmt);
-
-  if (handle_num == 1) {
-    munmap(data_buffer[0], size[0]);
-  } else {
-    for (int m = 0; m < handle_num; m++) {
-      munmap(data_buffer[m], size[m]);
-    }
-  }
-
-  return image->index;
-}
-
 static int drm_copy(struct Render_Image *image) { 
-  uint64_t map_offset[MAX_PLANE_NUM] = {0};
-
-  for (int m = 0; m < drm_config.handle_num; m++) {
-    struct drm_mode_map_dumb mapBuf = {};
-    mapBuf.handle = drm_buf[image->index].handle[m];
-    if (drmIoctl(drmInfoPtr->fd, DRM_IOCTL_MODE_MAP_DUMB, &mapBuf) < 0) {
-      fprintf(stderr, "Could not map dumb\n");
-      return -1;
-    }
-    map_offset[m] = mapBuf.offset;
-  }
-
-  return drm_convert_image(image, drm_buf, drmInfoPtr->fd, drm_config.handle_num, drm_config.plane_num, drm_config.dst_fmt, drm_config.size[image->index], map_offset);
+  AVFrame * sframe = (AVFrame *)image->sframe.frame;
+  convert_frame(sframe, drm_buf_dataptr[image->index], drm_buf[image->index].pitch, drm_config.dst_fmt);
+  return image->index;
 }
 
 int drm_import_hw_buffer (int fd, struct _drm_buf *drm_buf, struct Source_Buffer_Info *buffer, int planes, int composeOrSeperate, void* *image, int index) {
