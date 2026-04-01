@@ -26,7 +26,6 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
-#include <GLES2/gl2ext.h>
 #include <libavcodec/avcodec.h>
 
 #include <Limelight.h>
@@ -61,7 +60,13 @@ struct Window_Size {
   int view_height;
 } static window_info = {0};
 
+#ifndef PFNGLEGLIMAGETARGETTEXTURE2DOESPROC
+typedef void (GL_APIENTRYP PFNGLEGLIMAGETARGETTEXTURE2DOESPROC) (GLenum target, EGLImage image);
+#endif
 static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES = NULL;
+#ifndef PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC
+typedef void (GL_APIENTRYP PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC) (GLenum target, EGLImage image, const GLint* attrib_list);
+#endif
 static PFNGLEGLIMAGETARGETTEXSTORAGEEXTPROC glEGLImageTargetTexStorageEXT;
 
 // for planeNum 0, 1, 2, 3, 4
