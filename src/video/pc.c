@@ -472,6 +472,18 @@ static void* decoder_thread(void *data) {
   pthread_setname_np(threads.decoder_id, "m_decoder_t");
 
   while (!done) {
+
+    sem_wait(&threads.decoder_sem);
+
+    pthread_mutex_lock(&threads.mutex);
+    AVFrame *frame = VLIST_GET_FRAME(decoder);
+    pthread_mutex_unlock(&threads.mutex);
+    int err = ffmpeg_get_frame(frame, true);
+    if (err == 0) {
+      mv_vlist_decoder_to_render();
+      continue;
+    }
+
     VIDEO_FRAME_HANDLE handle;
     PDECODE_UNIT du;
     if (!LiWaitForNextVideoFrame(&handle, &du)) {
@@ -479,7 +491,6 @@ static void* decoder_thread(void *data) {
       break;
     }
 
-    sem_wait(&threads.decoder_sem);
     if (done) {
       LiCompleteVideoFrame(handle, DR_OK);
       break;
@@ -818,9 +829,6 @@ int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   PLENTRY entry = decodeUnit->bufferList;
   int length = 0;
 
-  if (done)
-    return DR_OK;
-
   ensure_buf_size(&ffmpeg_buffer, &ffmpeg_buffer_size, decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE);
 
   while (entry != NULL) {
@@ -830,7 +838,8 @@ int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   }
 
   int err = ffmpeg_decode2(ffmpeg_buffer, length, decodeUnit->frameType == FRAME_TYPE_IDR ? AV_PKT_FLAG_KEY : 0);
-
+  if (done)
+    return DR_OK;
   if (err < 0)
     goto next_handle;
   
@@ -840,9 +849,15 @@ int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   if (frame == NULL)
     goto decode_exit;
 
-  frame = ffmpeg_get_frame(frame, true);
-  if (frame == NULL)
+  err = ffmpeg_get_frame(frame, true);
+  if (err < 0)
     goto decode_exit;
+  else if (err > 0) {
+    if (threads.created) {
+      sem_post(&threads.decoder_sem);
+    }
+    return DR_OK;
+  }
 
   mv_vlist_decoder_to_render();
   return DR_OK;

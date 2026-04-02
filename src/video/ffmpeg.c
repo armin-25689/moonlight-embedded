@@ -249,20 +249,20 @@ void ffmpeg_destroy(void) {
   decoder = NULL;
 }
 
-AVFrame* ffmpeg_get_frame(AVFrame *frame, bool native_frame) {
+int ffmpeg_get_frame(AVFrame *frame, bool native_frame) {
 
   int err = avcodec_receive_frame(decoder_ctx, frame);
   if (err == 0) {
-    av_packet_unref(pkt);
-
     if (ffmpeg_decoder == SOFTWARE || native_frame)
-      return frame;
-  } else if (err != AVERROR(EAGAIN)) {
-    char errorstring[512];
-    av_strerror(err, errorstring, sizeof(errorstring));
-    fprintf(stderr, "Receive failed - %d/%s\n", err, errorstring);
+      return 0;
+  } else if (err == AVERROR(EAGAIN)) {
+    return 1;
   }
-  return NULL;
+  char errorstring[512];
+  av_strerror(err, errorstring, sizeof(errorstring));
+  fprintf(stderr, "Receive failed - %d/%s\n", err, errorstring);
+
+  return -1;
 }
 
 // packets must be decoded in order
@@ -275,6 +275,7 @@ static inline int ffmpeg_decode_packet(unsigned char* indata, int inlen, int fla
   pkt->flags = flags;
 
   err = avcodec_send_packet(decoder_ctx, pkt);
+  av_packet_unref(pkt);
   if (err < 0) {
     char errorstring[512];
     av_strerror(err, errorstring, sizeof(errorstring));

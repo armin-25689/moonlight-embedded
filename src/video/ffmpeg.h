@@ -32,7 +32,7 @@ extern bool isYUV444;
 
 int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer_count, int thread_count);
 void ffmpeg_destroy(void);
-AVFrame* ffmpeg_get_frame(AVFrame *frame, bool native_frame);
+int ffmpeg_get_frame(AVFrame *frame, bool native_frame);
 int ffmpeg_decode(unsigned char* indata, int inlen);
 int ffmpeg_decode2(unsigned char* indata, int inlen, int flags);
 int ffmpeg_is_frame_full_range(const AVFrame* frame);
