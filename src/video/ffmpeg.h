@@ -24,6 +24,8 @@
 // Uses hardware acceleration
 #define VDPAU_ACCELERATION 0x40
 #define VAAPI_ACCELERATION 0x80
+#define FILTER_DEFAULT_HDR_FMT AV_PIX_FMT_X2RGB10LE
+#define FILTER_DEFAULT_FMT AV_PIX_FMT_BGR0
 
 #include "video_internal.h"
 
@@ -42,3 +44,6 @@ int software_supported_video_format(void);
 AVFrame **ffmpeg_alloc_frames(int dec_frames_cnt, enum AVPixelFormat pix_fmt, int width, int height, int align, bool need_alloc_buffer);
 void ffmpeg_free_frames(AVFrame **frames, int frame_count);
 AVFrame ** ffmpeg_get_frames();
+int ffmpeg_need_filter(int action);
+int ffmpeg_remove_filter(int action);
+void ffmpeg_stop_decoder();

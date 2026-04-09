@@ -47,6 +47,7 @@ struct Render_Init_Info {
   int egl_platform;
   void *display;
   void *window;
+  int use_filter;
   void(*display_exported_buffer)(struct Source_Buffer_Info *buffer, int *buffersNum, int *planesNum);
 };
 struct Render_Image {

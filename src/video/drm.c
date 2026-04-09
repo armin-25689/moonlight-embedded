@@ -57,6 +57,7 @@ struct _drm_render_config {
   int bpp;
   int buffer_multi;
   int colorspace;
+  int filter_action;
   AVFrame *frame;
   uint32_t plane_format;
   uint64_t size[MAX_FB_NUM][MAX_PLANE_NUM];
@@ -463,10 +464,9 @@ static void drm_get_resolution(int *width, int *height, bool isfullscreen) {
 
 static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, uint32_t *hdr_blob) {
   struct hdr_output_metadata data = {0};
-  SS_HDR_METADATA sunshineHdrMetadata = {0};
   bool hdrp = false;
 
-  if (!LiGetHdrMetadata(&sunshineHdrMetadata)) {
+  if (!LiGetCurrentHostDisplayHdrMode()) {
     hdrp = false;
   }
   else 
@@ -481,16 +481,17 @@ static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, uint32_t *hdr_blo
   data.metadata_type = 0; // HDMI_STATIC_METADATA_TYPE1
   data.hdmi_metadata_type1.eotf = 2; // SMPTE ST 2084
   data.hdmi_metadata_type1.metadata_type = 0; // Static Metadata Type 1
+  int idx = 0;
   for (int i = 0; i < 3; i++) {
-    data.hdmi_metadata_type1.display_primaries[i].x = sunshineHdrMetadata.displayPrimaries[i].x;
-    data.hdmi_metadata_type1.display_primaries[i].y = sunshineHdrMetadata.displayPrimaries[i].y;
+    data.hdmi_metadata_type1.display_primaries[i].x = ffmpeg_hdr_metadata[idx++];
+    data.hdmi_metadata_type1.display_primaries[i].y = ffmpeg_hdr_metadata[idx++];
   }
-  data.hdmi_metadata_type1.white_point.x = sunshineHdrMetadata.whitePoint.x;
-  data.hdmi_metadata_type1.white_point.y = sunshineHdrMetadata.whitePoint.y;
-  data.hdmi_metadata_type1.max_display_mastering_luminance = sunshineHdrMetadata.maxDisplayLuminance;
-  data.hdmi_metadata_type1.min_display_mastering_luminance = sunshineHdrMetadata.minDisplayLuminance;
-  data.hdmi_metadata_type1.max_cll = sunshineHdrMetadata.maxContentLightLevel;
-  data.hdmi_metadata_type1.max_fall = sunshineHdrMetadata.maxFrameAverageLightLevel;
+  data.hdmi_metadata_type1.white_point.x = ffmpeg_hdr_metadata[idx++];
+  data.hdmi_metadata_type1.white_point.y = ffmpeg_hdr_metadata[idx++];
+  data.hdmi_metadata_type1.max_display_mastering_luminance = ffmpeg_hdr_metadata[8];
+  data.hdmi_metadata_type1.min_display_mastering_luminance = ffmpeg_hdr_metadata[9];
+  data.hdmi_metadata_type1.max_cll = ffmpeg_hdr_metadata[10];
+  data.hdmi_metadata_type1.max_fall = ffmpeg_hdr_metadata[11];
 
   if (*hdr_blob > 0)
     drmModeDestroyPropertyBlob(drmInfoPtr->fd, *hdr_blob);
@@ -594,27 +595,37 @@ struct DISPLAY_CALLBACK display_callback_drm = {
 
 static int drm_render_create(struct Render_Init_Info *paras) { return 0; };
 
-static int drm_render_init(struct Render_Init_Info *paras) { return 0; };
+static int drm_render_init(struct Render_Init_Info *paras) {
+  if (paras->use_filter > 0) {
+#ifdef HAVE_FFMPEGFILTER
+    if ((paras->use_filter & FILTER_SCALE_SIZE) && drm_render.decoder_type != SOFTWARE) {
+      frame_width = display_width;
+      frame_height = display_height;
+      ffmpeg_filters_args.video_size.width = display_width;
+      ffmpeg_filters_args.video_size.height = display_height;
+    }
+    drm_config.filter_action = paras->use_filter;
+#endif
+  }
+  return 0;
+}
 
 static void drm_render_destroy() {};
 
 static int get_config_from_frame(struct Render_Config *config) {
   bool need_change_color_config = false;
-  bool need_generate_buffer = false;
   drm_config.src_fmt = config->pix_fmt;
   drm_config.colorspace = -1;
 
   switch (config->pix_fmt) {
   case AV_PIX_FMT_YUV444P:
   case AV_PIX_FMT_YUVJ444P:
-    need_generate_buffer = true;
     drm_config.dst_fmt = AV_PIX_FMT_BGR0;
     break;
   case AV_PIX_FMT_YUV420P:
   case AV_PIX_FMT_YUVJ420P:
     drm_config.dst_fmt = AV_PIX_FMT_NV12;
     need_change_color_config = true;
-    need_generate_buffer = true;
     break;
   case AV_PIX_FMT_VUYX:
   case AV_PIX_FMT_XV30:
@@ -624,17 +635,33 @@ static int get_config_from_frame(struct Render_Config *config) {
     need_change_color_config = true;
     break;
   case AV_PIX_FMT_YUV444P10:
-    need_generate_buffer = true;
     drm_config.dst_fmt = AV_PIX_FMT_X2RGB10LE;
     break;
   case AV_PIX_FMT_YUV420P10:
-    need_generate_buffer = true;
     need_change_color_config = true;
     drm_config.dst_fmt = AV_PIX_FMT_P010;
     break;
+  default:
+    drm_config.dst_fmt = config->pix_fmt;
+    break;
+  }
+  if (drm_config.filter_action & FILTER_SCALE_FMT) {
+    need_change_color_config = false;
+#ifdef HAVE_FFMPEGFILTER
+    if (ffmpeg_filters_args.pix_fmt > 0) {
+      drm_config.dst_fmt = ffmpeg_filters_args.pix_fmt;
+    }
+    else
+#endif
+    {
+      if (useHdr)
+        drm_config.dst_fmt = FILTER_DEFAULT_HDR_FMT;
+      else
+        drm_config.dst_fmt = FILTER_DEFAULT_FMT;
+    }
   }
   int flags = 0;
-  if (need_generate_buffer) {
+  if (drm_render.decoder_type == SOFTWARE) {
     drm_clear_image_cache(drmInfoPtr->fd, drm_buf, MAX_FB_NUM);
     if (drm_generate_drm_buf(drmInfoPtr->fd, drm_config.dst_fmt, frame_width, frame_height, flags, drm_buf, MAX_FB_NUM) == 0) {
       fprintf(stderr, "Could not generate buf.\n");

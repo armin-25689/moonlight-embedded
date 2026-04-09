@@ -19,6 +19,7 @@
 
 #include <libavcodec/avcodec.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/mastering_display_metadata.h>
 
 #include <stdlib.h>
 #include <pthread.h>
@@ -31,14 +32,15 @@
 #ifdef HAVE_VAAPI
 #include "ffmpeg_vaapi.h"
 #endif
-// lack conditions
+#ifdef HAVE_FFMPEGFILTER
+#include "ffmpeg_filter.h"
+#endif
 
 // General decoder and renderer state
 static AVPacket* pkt;
 static const AVCodec* decoder;
 static AVCodecContext* decoder_ctx;
 static AVFrame** dec_frames;
-
 static int dec_frames_cnt;
 
 int supportedVideoFormat = 0;
@@ -48,8 +50,134 @@ bool wantYuv444 = false;
 bool isYUV444 = false;
 bool useHdr = false;
 enum decoders ffmpeg_decoder;
+uint16_t ffmpeg_hdr_metadata[12] = {0};
 
 #define BYTES_PER_PIXEL 4
+
+static int (*ffmpeg_get_frame_function) (AVFrame *frame, bool native_frame);
+
+static inline int ffmpeg_attach_hdr10_metadata (AVFrame *frame) {
+  if (av_frame_get_side_data(frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA) == NULL) {
+
+    SS_HDR_METADATA data;
+    if (LiGetHdrMetadata(&data)) {
+      AVMasteringDisplayMetadata *mastering = av_mastering_display_metadata_create_side_data(frame);
+      if (mastering == NULL) {
+        fprintf(stderr, "Cannot get metadata ptr from frame.\n");
+        return -1;
+      }
+      mastering->display_primaries[0][0] = av_make_q(data.displayPrimaries[0].x, 50000);
+      mastering->display_primaries[0][1] = av_make_q(data.displayPrimaries[0].y, 50000);
+      mastering->display_primaries[1][0] = av_make_q(data.displayPrimaries[1].x, 50000);
+      mastering->display_primaries[1][1] = av_make_q(data.displayPrimaries[1].y, 50000);
+      mastering->display_primaries[2][0] = av_make_q(data.displayPrimaries[2].x, 50000);
+      mastering->display_primaries[2][1] = av_make_q(data.displayPrimaries[2].y, 50000);
+
+      mastering->white_point[0] = av_make_q(data.whitePoint.x, 50000);
+      mastering->white_point[1] = av_make_q(data.whitePoint.y, 50000);
+
+      mastering->min_luminance = av_make_q(data.minDisplayLuminance, 10000);
+      mastering->max_luminance = av_make_q(data.maxDisplayLuminance, 1);
+
+      mastering->has_luminance = data.maxDisplayLuminance != 0 ? 1 : 0;
+      mastering->has_primaries = data.displayPrimaries[0].x != 0 ? 1 : 0;
+
+      if (data.maxContentLightLevel > 0 && data.maxFrameAverageLightLevel > 0) {
+        AVContentLightMetadata *light = av_content_light_metadata_create_side_data(frame);
+        if (light == NULL) {
+          fprintf(stderr, "Cannot get light ptr from frame.\n");
+          return -1;
+        }
+        light->MaxCLL = data.maxContentLightLevel;
+        light->MaxFALL = data.maxFrameAverageLightLevel;
+        if (ffmpeg_hdr_metadata[10] == 0) {
+          ffmpeg_hdr_metadata[10] = light->MaxCLL;
+          ffmpeg_hdr_metadata[11] = light->MaxFALL;
+        }
+/*
+        light->MaxCLL = data.maxContentLightLevel > 0 ? data.maxContentLightLevel : data.maxDisplayLuminance;
+        light->MaxFALL = data.maxFrameAverageLightLevel > 0 ? data.maxFrameAverageLightLevel : (int)(light->MaxCLL / 5);
+        light->MaxFALL = light->MaxFALL < 100 ? 100 : light->MaxFALL;
+*/
+      }
+
+      if (ffmpeg_hdr_metadata[0] == 0) {
+        int index = 0;
+        ffmpeg_hdr_metadata[index++] = data.displayPrimaries[0].x;
+        ffmpeg_hdr_metadata[index++] = data.displayPrimaries[0].y;
+        ffmpeg_hdr_metadata[index++] = data.displayPrimaries[1].x;
+        ffmpeg_hdr_metadata[index++] = data.displayPrimaries[1].y;
+        ffmpeg_hdr_metadata[index++] = data.displayPrimaries[2].x;
+        ffmpeg_hdr_metadata[index++] = data.displayPrimaries[2].y;
+        ffmpeg_hdr_metadata[index++] = data.whitePoint.x;
+        ffmpeg_hdr_metadata[index++] = data.whitePoint.y;
+        ffmpeg_hdr_metadata[index++] = data.maxDisplayLuminance;
+        ffmpeg_hdr_metadata[index++] = data.minDisplayLuminance;
+      }
+    }
+  }
+
+  return 0;
+}
+
+static inline void ffmpeg_detach_hdr10_metadata (AVFrame *frame) {
+  av_frame_remove_side_data(frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+  av_frame_remove_side_data(frame, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+  return;
+}
+
+static int ffmpeg_get_frame_from_decoder(AVFrame *frame, bool native_frame) {
+  int err = avcodec_receive_frame(decoder_ctx, frame);
+  if (err == 0) {
+    if (frame->colorspace == AVCOL_SPC_BT2020_NCL || frame->colorspace == AVCOL_SPC_BT2020_CL)
+      ffmpeg_attach_hdr10_metadata(frame);
+    else
+      ffmpeg_detach_hdr10_metadata(frame);
+    if (ffmpeg_decoder == SOFTWARE || native_frame)
+      return 0;
+  } else if (err == AVERROR(EAGAIN)) {
+    return 1;
+  }
+  char errorstring[512];
+  av_strerror(err, errorstring, sizeof(errorstring));
+  fprintf(stderr, "Receive failed - %d/%s\n", err, errorstring);
+
+  return -1;
+}
+
+static int ffmpeg_get_frame_from_filter(AVFrame *frame, bool native_frame) {
+#ifdef HAVE_FFMPEGFILTER
+  return ffmpeg_filte_frame(frame, decoder_ctx, &ffmpeg_get_frame_from_decoder);
+#else
+  return -1;
+#endif
+}
+
+static int ffmpeg_get_frame_chooser (AVFrame *frame, bool native_frame) {
+#ifdef HAVE_FFMPEGFILTER
+  static int times = 0;
+  if (ffmpeg_modify_filter_action(0) > 0 && ffmpeg_decoder != SOFTWARE) {
+    times++;
+    int err = ffmpeg_init_filter(frame, decoder_ctx, useHdr, ffmpeg_hdr_metadata, &ffmpeg_get_frame_from_decoder);
+    if (err >= 0) {
+      ffmpeg_get_frame_function = &ffmpeg_get_frame_from_filter;
+      return 0;
+    }
+    if (times >= 4) {
+      fprintf(stderr, "Inital ffmpeg filter and test frame failed.\n");
+      ffmpeg_get_frame_function = &ffmpeg_get_frame_from_decoder;
+      return -1;
+    }
+    return 1;
+  }
+  else
+#endif
+  {
+    ffmpeg_get_frame_function = &ffmpeg_get_frame_from_decoder;
+    return ffmpeg_get_frame_from_decoder(frame, native_frame);
+  }
+  return -1;
+}
 
 // This function must be called before
 // any other decoding functions
@@ -147,10 +275,18 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
     decoder_ctx->width = width;
     decoder_ctx->height = height;
 
-    if (videoFormat & VIDEO_FORMAT_MASK_YUV444)
-      decoder_ctx->pix_fmt = AV_PIX_FMT_YUV444P;
-    else
-      decoder_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    if (isYUV444) {
+      if (useHdr)
+        decoder_ctx->pix_fmt = AV_PIX_FMT_YUV444P10;
+      else
+        decoder_ctx->pix_fmt = AV_PIX_FMT_YUV444P;
+    }
+    else {
+      if (useHdr)
+        decoder_ctx->pix_fmt = AV_PIX_FMT_YUV420P10;
+      else
+        decoder_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    }
 
     #ifdef HAVE_VAAPI
     if (ffmpeg_decoder == VAAPI) {
@@ -188,6 +324,8 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
   dec_frames = ffmpeg_alloc_frames(dec_frames_cnt, decoder_ctx->pix_fmt, width, height, widthMulti, (width % widthMulti != 0) ? true : false);
   if (dec_frames == NULL)
     return -1;
+
+  ffmpeg_get_frame_function = &ffmpeg_get_frame_chooser;
 
   return 0;
 }
@@ -234,35 +372,41 @@ AVFrame **ffmpeg_alloc_frames(int dec_frames_cnt, enum AVPixelFormat pix_fmt, in
 }
 
 
+void ffmpeg_stop_decoder () {
+  AVFrame *frame = av_frame_alloc();
+  avcodec_send_packet(decoder_ctx, NULL);
+  while (avcodec_receive_frame(decoder_ctx, frame) != AVERROR_EOF);
+  av_frame_free(&frame);
+#ifdef HAVE_FFMPEGFILTER
+  ffmpeg_filter_stop_filte();
+#endif
+  return;
+}
+
 // This function must be called after
 // decoding is finished
 void ffmpeg_destroy(void) {
-  av_packet_free(&pkt);
+  ffmpeg_stop_decoder();
   if (decoder_ctx) {
     avcodec_free_context(&decoder_ctx);
   }
+#ifdef HAVE_FFMPEGFILTER
+  ffmpeg_filter_destroy();
+#endif
+  av_packet_free(&pkt);
   if (dec_frames) {
     ffmpeg_free_frames(dec_frames, dec_frames_cnt);
     dec_frames = NULL;
   }
+#ifdef HAVE_VAAPI
+  vaapi_destroy();
+#endif
   decoder_ctx = NULL;
   decoder = NULL;
 }
 
 int ffmpeg_get_frame(AVFrame *frame, bool native_frame) {
-
-  int err = avcodec_receive_frame(decoder_ctx, frame);
-  if (err == 0) {
-    if (ffmpeg_decoder == SOFTWARE || native_frame)
-      return 0;
-  } else if (err == AVERROR(EAGAIN)) {
-    return 1;
-  }
-  char errorstring[512];
-  av_strerror(err, errorstring, sizeof(errorstring));
-  fprintf(stderr, "Receive failed - %d/%s\n", err, errorstring);
-
-  return -1;
+  return ffmpeg_get_frame_function(frame, native_frame);
 }
 
 // packets must be decoded in order
@@ -367,4 +511,20 @@ int software_supported_video_format() {
 
 AVFrame ** ffmpeg_get_frames() {
   return dec_frames;
+}
+
+int ffmpeg_need_filter(int action) {
+#ifdef HAVE_FFMPEGFILTER
+  return ffmpeg_modify_filter_action(action);
+#else
+  return 0;
+#endif
+}
+
+int ffmpeg_remove_filter(int action) {
+#ifdef HAVE_FFMPEGFILTER
+  return ffmpeg_reject_filter_action(action);
+#else
+  return 0;
+#endif
 }

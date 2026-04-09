@@ -34,6 +34,7 @@ typedef struct _CONFIGURATION {
   char* audio_device;
   char* config_file;
   char key_dir[4096];
+  char* filters;
   bool sops;
   bool localaudio;
   bool fullscreen;

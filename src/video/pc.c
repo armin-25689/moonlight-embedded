@@ -680,6 +680,10 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
 
   isTenBit = videoFormat & VIDEO_FORMAT_MASK_10BIT;
 
+  // egl not need filter
+  if (renderPtr->render_type == EGL_RENDER)
+    ffmpeg_remove_filter(FILTER_FLAGS);
+
   struct Render_Init_Info renderParas = {0};
   renderParas.window = window;
   renderParas.frame_width = frame_width;
@@ -691,6 +695,8 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   renderPtr->decoder_type = ffmpeg_decoder;
   renderParas.fixed_resolution = drFlags & FIXED_RESOLUTION;
   renderParas.fill_resolution = drFlags & FILL_RESOLUTION;
+  // drm can use fmt scale flag to convert yuv420p to bgr0 instead of nv12
+  renderParas.use_filter = drFlags & FILTER_FLAGS;
   if (renderPtr->display_name == NULL) {
     renderPtr->display_name = disPtr->name;
   }
@@ -808,18 +814,20 @@ void x11_cleanup() {
     pipefd[1] = -1;
     pipefd[0] = -1;
   }
-  if (ffmpeg_decoder == SOFTWARE && strcmp(disPtr->name, renderPtr->name) == 0) {
-    convert_destroy();
-  }
+
   for (int i = 0; i < MAX_FB_NUM; i++) {
     ffmpeg_free_images(renderPtr->images[i].images.image_data, renderPtr->images[i].images.descriptor, renderPtr->render_unmap_buffer);
   }
   renderPtr->render_destroy();
-  ffmpeg_destroy();
 
   struct _WINDOW_PROPERTIES window_properties = {0};
   window_properties.configure = &window_configure;
   disPtr->display_close_display((void *)&window_properties);
+
+  if (ffmpeg_decoder == SOFTWARE && strcmp(disPtr->name, renderPtr->name) == 0) {
+    convert_destroy();
+  }
+  ffmpeg_destroy();
 
   disPtr = NULL;
   renderPtr = NULL;

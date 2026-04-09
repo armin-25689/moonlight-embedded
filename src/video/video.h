@@ -32,6 +32,11 @@
 #define FILL_RESOLUTION 0x80
 // 0x0F00 is render type
 #define MODESET 0x2000
+#define FILTER_FLAGS 0xF0000
+#define FILTER_TONEMAP_COLOR_PRIMARIES 0x10000
+#define FILTER_TONEMAP_LIGHT 0x20000
+#define FILTER_SCALE_FMT 0x40000
+#define FILTER_SCALE_SIZE 0x80000
 
 #define INIT_EGL 1
 #define INIT_VAAPI 2
@@ -48,6 +53,29 @@ extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vaapi;
 #endif
 #ifdef HAVE_VDPAU
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vdpau;
+#endif
+#ifdef HAVE_FFMPEGFILTER
+struct Ffmpeg_Filters_Args {
+  struct {
+    int minlight;
+    int middlelight;
+    int maxlight;
+  } light;
+  struct {
+    int width;
+    int height;
+  } video_size;
+  int action;
+  const char *color_primaries;
+  int pix_fmt;
+  struct {
+    const char *p3;
+    const char *bt2020;
+    const char *bt709;
+    const char *bt601;
+  } color;
+};
+extern struct Ffmpeg_Filters_Args ffmpeg_filters_args;
 #endif
 #endif
 

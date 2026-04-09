@@ -145,6 +145,7 @@ struct _wl_render {
   int plane_num;
   int lastrange;
   int lastcolorspace;
+  int filter_action;
   int (*wl_set_hdr_metadata) (int index);
 } static wl_render_base = {0};
 struct _dm_table {
@@ -779,8 +780,7 @@ static int set_hdr_static(int index) {
 
   static bool hdr_active = false;
   bool last_stat = hdr_active;
-  SS_HDR_METADATA sunshineHdrMetadata = {0};
-  if (!LiGetHdrMetadata(&sunshineHdrMetadata)) {
+  if (!LiGetCurrentHostDisplayHdrMode()) {
     hdr_active = false;
   }
   else {
@@ -810,12 +810,20 @@ static int set_hdr_static(int index) {
     return -1;
   }
 
-  wp_image_description_creator_params_v1_set_primaries_named(creator, WP_COLOR_MANAGER_V1_PRIMARIES_BT2020);
+#ifdef HAVE_FFMPEGFILTER
+  const char* preferd_primaries = ffmpeg_filters_args.color_primaries;
+#else
+  const char* preferd_primaries = NULL;
+#endif
+  uint32_t primaries_flag = (preferd_primaries != NULL && strcmp(preferd_primaries, "smpte432") == 0) ? WP_COLOR_MANAGER_V1_PRIMARIES_DISPLAY_P3 : WP_COLOR_MANAGER_V1_PRIMARIES_BT2020;
+  wp_image_description_creator_params_v1_set_primaries_named(creator, primaries_flag);
   wp_image_description_creator_params_v1_set_tf_named(creator, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ);
-  wp_image_description_creator_params_v1_set_mastering_luminance(creator, sunshineHdrMetadata.minDisplayLuminance, sunshineHdrMetadata.maxDisplayLuminance);
-  wp_image_description_creator_params_v1_set_mastering_display_primaries(creator, sunshineHdrMetadata.displayPrimaries[0].x, sunshineHdrMetadata.displayPrimaries[0].y, sunshineHdrMetadata.displayPrimaries[1].x, sunshineHdrMetadata.displayPrimaries[1].y, sunshineHdrMetadata.displayPrimaries[2].x, sunshineHdrMetadata.displayPrimaries[2].y, sunshineHdrMetadata.whitePoint.x, sunshineHdrMetadata.whitePoint.y);
-  wp_image_description_creator_params_v1_set_max_cll(creator, sunshineHdrMetadata.maxContentLightLevel);
-  wp_image_description_creator_params_v1_set_max_fall(creator, sunshineHdrMetadata.maxFrameAverageLightLevel);
+  wp_image_description_creator_params_v1_set_mastering_display_primaries(creator, ffmpeg_hdr_metadata[0] * 20, ffmpeg_hdr_metadata[1] * 20, ffmpeg_hdr_metadata[2] * 20, ffmpeg_hdr_metadata[3] * 20, ffmpeg_hdr_metadata[4] * 20, ffmpeg_hdr_metadata[5] * 20, ffmpeg_hdr_metadata[6] * 20, ffmpeg_hdr_metadata[7] * 20);
+  wp_image_description_creator_params_v1_set_mastering_luminance(creator, ffmpeg_hdr_metadata[9], ffmpeg_hdr_metadata[8]);
+  if (ffmpeg_hdr_metadata[10] > 0 && ffmpeg_hdr_metadata[11] > 0) {
+    wp_image_description_creator_params_v1_set_max_cll(creator, ffmpeg_hdr_metadata[10]);
+    wp_image_description_creator_params_v1_set_max_fall(creator, ffmpeg_hdr_metadata[11]);
+  }
 
   struct wp_image_description_v1 *descriptor = wp_image_description_creator_params_v1_create(creator);
   if (!descriptor) {
@@ -1016,6 +1024,8 @@ static int wl_render_init(struct Render_Init_Info *paras) {
   if (useHdr && !wl_render_base.hdr_support.output_primaries_bt2020)
     fprintf(stderr, "WARNNING: wayland output is not BT2020 primaries! \n");
 
+  wl_render_base.filter_action = paras->use_filter;
+
   return 0; 
 }
 
@@ -1074,7 +1084,6 @@ static inline int store_objects(int index) {
 static int wl_sync_frame_config(struct Render_Config *config) {
   int dst_fmt = -1;
   bool need_change_color_config = false;
-  bool need_generate_buffer = false;
   bool full_color_range = config->full_color_range;
   int colorspace = config->color_space;
 
@@ -1083,12 +1092,10 @@ static int wl_sync_frame_config(struct Render_Config *config) {
   case AV_PIX_FMT_YUVJ444P:
   case AV_PIX_FMT_YUV420P:
   case AV_PIX_FMT_YUVJ420P:
-    need_generate_buffer = true;
     dst_fmt = AV_PIX_FMT_BGR0;
     break;
   case AV_PIX_FMT_YUV444P10:
   case AV_PIX_FMT_YUV420P10:
-    need_generate_buffer = true;
     dst_fmt = AV_PIX_FMT_X2RGB10LE;
     break;
   case AV_PIX_FMT_VUYX:
@@ -1098,6 +1105,24 @@ static int wl_sync_frame_config(struct Render_Config *config) {
     dst_fmt = config->pix_fmt;
     need_change_color_config = true;
     break;
+  default:
+    dst_fmt = config->pix_fmt;
+    break;
+  }
+  if (wl_render_base.filter_action & FILTER_SCALE_FMT) {
+#ifdef HAVE_FFMPEGFILTER
+    if (ffmpeg_filters_args.pix_fmt > 0) {
+      dst_fmt = ffmpeg_filters_args.pix_fmt;
+    }
+    else
+#endif
+    {
+      if (useHdr)
+        dst_fmt = FILTER_DEFAULT_HDR_FMT;
+      else
+        dst_fmt = FILTER_DEFAULT_FMT;
+    }
+    need_change_color_config = false;
   }
 
   wl_render_base.dst_fmt = dst_fmt;
@@ -1111,7 +1136,7 @@ static int wl_sync_frame_config(struct Render_Config *config) {
     wp_color_representation_surface_v1_set_coefficients_and_range(wl_render_base.wp_representation_surface, color_space, range);
   }
 
-  if (need_generate_buffer) {
+  if (wayland_render.decoder_type == SOFTWARE) {
     wl_render_base.plane_num = generate_gbm_bo(wl_render_base.drm_fd, wl_render_base.drm_buf, MAX_FB_NUM, wl_render_base.gbm_device, frame_width, frame_height, dst_fmt, wl_render_base.size);
     if (wl_render_base.plane_num < 1) {
       fprintf(stderr, "Could not generate drm buf.\n");

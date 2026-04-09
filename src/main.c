@@ -136,6 +136,47 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
     printf("Ignoring invalid rotation value: %d\n", config->rotate);
   }
 
+#ifdef HAVE_FFMPEGFILTER
+  if (config->filters) {
+    if (strstr(config->filters, "color_primaries:")) {
+      drFlags |= FILTER_TONEMAP_COLOR_PRIMARIES;
+      if (strstr(config->filters, "p3")) {
+        ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.p3;
+      } else if (strstr(config->filters, ":bt2020")) {
+        ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.bt2020;
+      } else if (strstr(config->filters, ":bt709")) {
+        ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.bt709;
+      } else if (strstr(config->filters, ":bt601")) {
+        ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.bt601;
+      } else  {
+        ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.bt2020;
+      }
+    }
+#define MAXV(a, b)  ((a) > (b) ? (a) : (b))
+    double minlight;
+    int middlelight, maxlight;
+    const char *flagpos = strstr(config->filters, "light:");
+    if (flagpos) {
+      if (sscanf(flagpos, "light:%lf:%d:%d", &minlight, &middlelight, &maxlight) == 3) {
+        drFlags |= FILTER_TONEMAP_LIGHT;
+        ffmpeg_filters_args.light.minlight = minlight < 0.0001 ? 0 : (minlight > 100.0 ? 0 : (int)(minlight * 10000));
+        ffmpeg_filters_args.light.maxlight = maxlight < 0 ? 0 : (maxlight > 65535 ? 10000 : maxlight);
+        ffmpeg_filters_args.light.middlelight = middlelight < 0 ? 0 : (middlelight > 65535 ? 10000 : middlelight);
+      }
+    }
+#undef MAXV
+    if (strstr(config->filters, "scale:")) {
+      if (strstr(config->filters, ":fmt")) {
+        drFlags |= FILTER_SCALE_FMT;
+      }
+      if (strstr(config->filters, ":size")) {
+        drFlags |= FILTER_SCALE_SIZE;
+      }
+    }
+    ffmpeg_filters_args.action = drFlags & FILTER_FLAGS;
+  }
+#endif
+
   if (config->debug_level > 0) {
     printf("Stream %d x %d, %d fps, %d kbps\n", config->stream.width, config->stream.height, config->stream.fps, config->stream.bitrate);
     connection_debug = true;
@@ -211,6 +252,7 @@ static void help() {
   printf("\t-codec <codec>\t\tSelect used codec: auto/h264/h265/av1 (default auto)\n");
   printf("\t-hdr \t\t\tEnable hdr support for wayland_vaapi/drm_vaapi/drm/wayland platform\n");
   printf("\t-yuv444\t\t\tTry to use yuv444 format\n");
+  printf("\t-filters <filters>\tUse ffmpeg video filters to modify video\n");
   printf("\t-remote <yes/no/auto>\tEnable optimizations for WAN streaming (default auto)\n");
   printf("\t-sdlgp\t\t\tForce to use sdl to drive gamepad\n");
   printf("\t-swapxyab\t\tSwap X/Y and A/B for gamepad for embedded(not sdl) platform\n");

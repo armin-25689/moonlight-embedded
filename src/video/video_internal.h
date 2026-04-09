@@ -96,3 +96,5 @@ struct Source_Buffer_Info {
 
 extern bool isYUV444;
 extern bool useHdr;
+// order is r.x r.y g.x g.y b.x b.y w.x w.y l.max l.min maxcll maxfall
+extern uint16_t ffmpeg_hdr_metadata[12];

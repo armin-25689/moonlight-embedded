@@ -722,6 +722,11 @@ uint32_t translate_format_to_drm(int format, int *bpp, int *heightmulti, int *pl
     *heightmulti = 1;
     *planenum = 1;
     return DRM_FORMAT_XRGB8888;
+  case AV_PIX_FMT_BGRA:
+    *bpp = 32;
+    *heightmulti = 1;
+    *planenum = 1;
+    return DRM_FORMAT_ARGB8888;
   case AV_PIX_FMT_YUV444P:
   case AV_PIX_FMT_YUVJ444P:
     *bpp = 8;

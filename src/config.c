@@ -55,6 +55,7 @@ static struct option long_options[] = {
   {"width", required_argument, NULL, 'c'},
   {"height", required_argument, NULL, 'd'},
   {"yuv444", no_argument, NULL, 'f'},
+  {"filters", required_argument, NULL, 'F'},
   {"bitrate", required_argument, NULL, 'g'},
   {"packetsize", required_argument, NULL, 'h'},
   {"app", required_argument, NULL, 'i'},
@@ -166,6 +167,9 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
     break;
   case 'f':
     config->yuv444 = true;
+    break;
+  case 'F':
+    config->filters = value;
     break;
   case 'g':
     config->stream.bitrate = atoi(value);
@@ -435,6 +439,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->address = NULL;
   config->config_file = NULL;
   config->audio_device = NULL;
+  config->filters = NULL;
   config->sops = true;
   config->localaudio = false;
   config->fullscreen = true;

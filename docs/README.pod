@@ -116,9 +116,26 @@ vaapi/software/x11/drm/wayland/drm_vaapi/x11_vaapi platform.
 If meet h264+YUV444P, 'drm/wayland' platform is recommended.
 x11 platform also can use, but slow than others.
 
+=item B<-filters> [I<FILTERS>]
+
+Arguments as '[color_primaries:p3],[light:0:100:400],[scale:fmt:size]'
+color_primaries can use p3|bt2020|bt601|bt709.
+light fill minDisplayLuminance:maxfall:maxDisplayLuminance.
+scale can fill fmt|size. Fill size will change decoder frame w,h to 
+display width and height.Fill fmt will change frame format to better
+compatible format such as ARGB or X2RGB10.
+wayland_vaapi platform can use scale:fmt filters to render yuv444.
+Use color_primaries:p3 to change hdr bt2020 to hdr display p3.
+Use light try to finish light tonemap.This may not supported now.
+Note: this option may not work correctly because of FreeBSD 
+HDR support or option implemention.
+The option is only worked with drm|drm_vaapi|wayland|wayland_vaapi 
+platform.
+
 =item B<-render_style> [I<fixed/fill/fixed_fill>]
 
-Change video render style to selected option.
+Change video render style to selected option. Only platform 
+'software or vaapi' and not -hdr can work.
 
 =item B<-rotate> [I<0/90/180/270>]
 

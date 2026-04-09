@@ -46,7 +46,8 @@
 #define VAProfileH264High444 99
 #endif
 
-static AVBufferRef* device_ref;
+static AVBufferRef* device_ref = NULL;
+static AVBufferRef* frames_ctx_ref = NULL;
 static VADRMPRIMESurfaceDescriptor prime_descriptors[MAX_FB_NUM] = {0};
 static VADRMPRIMESurfaceDescriptor *primeDescriptors[MAX_FB_NUM] = {0};
 
@@ -160,11 +161,11 @@ static enum AVPixelFormat get_format_from_slot (bool useHDR, bool yuv444) {
     return hw_sw_format.yuv420;
 }
 
-static enum AVPixelFormat va_get_format(AVCodecContext* context, const enum AVPixelFormat* pixel_format) {
+static inline void va_alloc_ctx (AVCodecContext* context) {
   AVBufferRef* hw_ctx = av_hwframe_ctx_alloc(device_ref);
   if (hw_ctx == NULL) {
     fprintf(stderr, "Failed to initialize Vaapi buffer\n");
-    return AV_PIX_FMT_NONE;
+    return;
   }
 
   AVHWFramesContext* fr_ctx = (AVHWFramesContext*) hw_ctx->data;
@@ -172,7 +173,7 @@ static enum AVPixelFormat va_get_format(AVCodecContext* context, const enum AVPi
   fr_ctx->sw_format = get_format_from_slot(useHdr, isYUV444);
   if (fr_ctx->sw_format == AV_PIX_FMT_NONE) {
     fprintf(stderr, "Failed to initialize VAAPI frame context because of no pix_fomat");
-    return AV_PIX_FMT_NONE;
+    return;
   }
   fr_ctx->width = context->coded_width;
   fr_ctx->height = context->coded_height;
@@ -181,14 +182,33 @@ static enum AVPixelFormat va_get_format(AVCodecContext* context, const enum AVPi
   if (av_hwframe_ctx_init(hw_ctx) < 0) {
     fprintf(stderr, "Failed to initialize VAAPI frame context");
     av_buffer_unref(&hw_ctx);
-    return AV_PIX_FMT_NONE;
+    return;
   }
 
+  if (context->hw_frames_ctx) {
+    av_buffer_unref(&context->hw_frames_ctx);
+  }
+  if (context->hw_device_ctx) {
+    av_buffer_unref(&context->hw_device_ctx);
+  }
   context->pix_fmt = AV_PIX_FMT_VAAPI;
-  context->hw_device_ctx = device_ref;
-  context->hw_frames_ctx = hw_ctx;
+  context->hw_device_ctx = av_buffer_ref(device_ref);
+  context->hw_frames_ctx = av_buffer_ref(hw_ctx);
   context->slice_flags = SLICE_FLAG_CODED_ORDER | SLICE_FLAG_ALLOW_FIELD;
-  return AV_PIX_FMT_VAAPI;
+
+  if (frames_ctx_ref)
+    av_buffer_unref(&frames_ctx_ref);
+  frames_ctx_ref = hw_ctx;
+
+  return;
+}
+
+static enum AVPixelFormat va_get_format(AVCodecContext* context, const enum AVPixelFormat* pixel_format) {
+  va_alloc_ctx(context);
+  if (context->pix_fmt == AV_PIX_FMT_VAAPI)
+    return AV_PIX_FMT_VAAPI;
+  else
+    return AV_PIX_FMT_NONE;
 }
 
 static int va_get_buffer(AVCodecContext* context, AVFrame* frame, int flags) {
@@ -196,6 +216,8 @@ static int va_get_buffer(AVCodecContext* context, AVFrame* frame, int flags) {
 }
 
 int vaapi_init_lib(const char *device) {
+  if (device_ref)
+    av_buffer_unref(&device_ref);
   if(av_hwdevice_ctx_create(&device_ref, AV_HWDEVICE_TYPE_VAAPI, device, NULL, 0) == 0) {
     vaapiSupportedFormat = is_support_yuv444();
     return 0;
@@ -212,6 +234,16 @@ int vaapi_init(AVCodecContext* decoder_ctx) {
   decoder_ctx->get_format = va_get_format;
   decoder_ctx->get_buffer2 = va_get_buffer;
   return 0;
+}
+
+void vaapi_destroy() {
+  if (device_ref)
+    av_buffer_unref(&device_ref);
+  if (frames_ctx_ref)
+    av_buffer_unref(&frames_ctx_ref);
+  device_ref = NULL;
+  frames_ctx_ref = NULL;
+  return;
 }
 
 bool vaapi_validate_test(char *displayName, char *renderName, void *nativeDisplay) {
