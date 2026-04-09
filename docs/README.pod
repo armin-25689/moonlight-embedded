@@ -332,8 +332,17 @@ Connect:
  Multi keyboard may meet bugs.Please man kbdmux or kbdcontrol.
  And try to disable kbdmux or use -input to specify wanted keyboards or mouses.
 
- Note: If meet crash frequently, try adjust Integrated Graphics Device(IDG)
+ Note1: If meet crash frequently, try adjust Integrated Graphics Device(IDG)
        Aperture size from BIOS.
+ Note2: If want use drm platform smoothly, The sunshine need to switch to 
+       software encoder to enable slice multi-thread for decoder.
+ Note3: If have no audio device,use vitual_oss:
+       # virtual_oss -C 2 -c 2 -r 48000 -b 16 -s 1024 -P /dev/null \
+       -R /dev/null -w vdsp.ctl -d dsp &
+ Note4: If use moonlight with rk3399 or others weak cpu with drm render. Enable 
+       software encoder is recommended, and use '-filters scale:fmt' to
+       avoid bugs for display, use '-platform drm' to display, use 
+       '-bitrate 10000' and '-1080' to reduce cpu load.
 
 =head1 AUTHOR
 
