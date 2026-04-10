@@ -528,3 +528,7 @@ int ffmpeg_remove_filter(int action) {
   return 0;
 #endif
 }
+
+bool ffmpeg_has_hdr_metadata(AVFrame *frame) {
+  return av_frame_get_side_data(frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA) == NULL ? false : true;
+}

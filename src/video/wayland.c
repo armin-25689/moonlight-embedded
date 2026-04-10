@@ -780,7 +780,7 @@ static int set_hdr_static(int index) {
 
   static bool hdr_active = false;
   bool last_stat = hdr_active;
-  if (!LiGetCurrentHostDisplayHdrMode()) {
+  if (!ffmpeg_has_hdr_metadata(wl_render_base.frame_callback_object[index].image->sframe.frame)) {
     hdr_active = false;
   }
   else {

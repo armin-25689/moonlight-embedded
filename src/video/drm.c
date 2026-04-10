@@ -462,11 +462,11 @@ static void drm_get_resolution(int *width, int *height, bool isfullscreen) {
   return;
 }
 
-static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, uint32_t *hdr_blob) {
+static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, AVFrame *frame, uint32_t *hdr_blob) {
   struct hdr_output_metadata data = {0};
   bool hdrp = false;
 
-  if (!LiGetCurrentHostDisplayHdrMode()) {
+  if (!ffmpeg_has_hdr_metadata(frame)) {
     hdrp = false;
   }
   else 
@@ -784,7 +784,7 @@ static int drm_draw(struct Render_Image *image) {
     }
     drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, 
                    !drm_config.need_change_color ? drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020RGB : DEFAULTCOLOR] : drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020YCC : (drm_config.colorspace == COLORSPACE_REC_709 ? D709YCC : D601YCC)]);
-    set_hdr_metadata_blob (drmInfoPtr, &hdr_blob);
+    set_hdr_metadata_blob (drmInfoPtr, image->sframe.frame, &hdr_blob);
   }
 
   return drm_draw_function(image);

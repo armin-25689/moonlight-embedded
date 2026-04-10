@@ -47,3 +47,4 @@ AVFrame ** ffmpeg_get_frames();
 int ffmpeg_need_filter(int action);
 int ffmpeg_remove_filter(int action);
 void ffmpeg_stop_decoder();
+bool ffmpeg_has_hdr_metadata(AVFrame *frame);
