@@ -155,14 +155,15 @@ static int ffmpeg_get_frame_from_filter(AVFrame *frame, bool native_frame) {
 
 static int ffmpeg_get_frame_chooser (AVFrame *frame, bool native_frame) {
   static int times = 0;
+  char *errdesc = NULL;
 
   times++;
   if (times == 1)
-    return 1;
+    goto chooser_exit;
 
   if (frame == NULL) {
-    fprintf(stderr, "NULL frame.\n");
-    return -1;
+    errdesc = "NULL frame";
+    goto chooser_exit;
   }
 
 #ifdef HAVE_FFMPEGFILTER
@@ -172,12 +173,7 @@ static int ffmpeg_get_frame_chooser (AVFrame *frame, bool native_frame) {
       ffmpeg_get_frame_function = &ffmpeg_get_frame_from_filter;
       return 0;
     }
-    if (times >= 4) {
-      fprintf(stderr, "Inital ffmpeg filter and test frame failed.\n");
-      ffmpeg_get_frame_function = &ffmpeg_get_frame_from_decoder;
-      return -1;
-    }
-    return 1;
+    errdesc = "Inital ffmpeg filter and test frame failed";
   }
   else
 #endif
@@ -187,15 +183,16 @@ static int ffmpeg_get_frame_chooser (AVFrame *frame, bool native_frame) {
       ffmpeg_get_frame_function = &ffmpeg_get_frame_from_decoder;
       return 0;
     }
-    else {
-      if (times >= 4) {
-        fprintf(stderr, "Decode frame failed much times.\n");
-        return -1;
-      }
-    }
-    return 1;
+    errdesc = "Decode frame failed much times";
   }
-  return -1;
+
+chooser_exit:
+  if (times >= 4) {
+    fprintf(stderr, "FFMPEG ERROR: %s.\n", errdesc);
+    return -1;
+  }
+
+  return 1;
 }
 
 // This function must be called before
