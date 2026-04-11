@@ -970,7 +970,7 @@ static int wl_commit_loop(void *data, int width, int height, int index) {
   wait_to_commit();
 
   switch (time) {
-  case 120:
+  case 30:
     time = 0;
     break;
   case 1:

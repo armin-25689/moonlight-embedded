@@ -27,32 +27,8 @@ struct Gbm_Bo {
   uint32_t fb_id;
   struct gbm_bo *bo;
 };
-static uint8_t* gbm_buf_dataptr[MAX_FB_NUM][MAX_PLANE_NUM] = {0};
-static void *mapped_handle[MAX_FB_NUM][MAX_PLANE_NUM] = {0};
-static int buf_handle_num = 0;
 
 uint32_t bo_flags = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR | GBM_BO_USE_SCANOUT; // must need by egl
-
-static int gbm_get_buffer_ptr (struct gbm_bo *bo, uint8_t **drm_buf_dataptr, void **mapped_handle, uint32_t *offset, uint32_t *width, uint32_t *height, int handle_num, int plane_num) {
-
-  for (int m = 0; m < handle_num; m++) {
-    uint32_t stride = 0;
-    void *data_ptr = gbm_bo_map(bo, 0, 0, width[m], height[m], GBM_BO_TRANSFER_READ_WRITE, &stride, &mapped_handle[m]);
-    if (!data_ptr) {
-      fprintf(stderr, "Could not map gbm to userspace.\n");
-      return -1;
-    }
-    drm_buf_dataptr[m] = data_ptr;
-  }
-
-  if (handle_num == 1) {
-    for (int j = 0; j < plane_num; j++) {
-      drm_buf_dataptr[j] = drm_buf_dataptr[0] + offset[j];
-    }
-  }
-
-  return 0;
-}
 
 int generate_gbm_bo(int fd, struct _drm_buf gbm_buf[], int buffer_num, void *display, int width, int height, int src_fmt, uint64_t size[MAX_PLANE_NUM]) {
   struct Gbm_Bo *gbm_bo = (struct Gbm_Bo *)gbm_buf;
@@ -152,13 +128,6 @@ void gbm_close_display (int gbm_fd, void *data, int buffer_num, void *display, v
   if (data) {
     struct Gbm_Bo *gbm_bo = (struct Gbm_Bo *)data;
     for (int i = 0; i < buffer_num; i++) {
-      for (int m = 0; m < buf_handle_num; m++) {
-        if (gbm_buf_dataptr[i][m] != 0 && mapped_handle[i][m] != 0)
-          gbm_bo_unmap(gbm_bo[i].bo, mapped_handle[i][m]);
-      }
-      memset(gbm_buf_dataptr[i], 0, sizeof(gbm_buf_dataptr[i]));
-      memset(mapped_handle[i], 0, sizeof(mapped_handle[i]));
-
       if (gbm_bo[i].bo != NULL) {
         gbm_bo_destroy(gbm_bo[i].bo);
         gbm_bo[i].bo = NULL;
@@ -183,15 +152,35 @@ int gbm_convert_image(struct Render_Image *image, struct _drm_buf *drm_buf, int 
   AVFrame * sframe = (AVFrame *)image->sframe.frame;
   struct gbm_bo *bo = (struct gbm_bo *)drm_buf[image->index].data;
 
-  if (gbm_buf_dataptr[image->index][0] == 0) {
-    buf_handle_num = handle_num;
-    if (gbm_get_buffer_ptr(bo, gbm_buf_dataptr[image->index], mapped_handle[image->index], drm_buf[image->index].offset, drm_buf[image->index].width, drm_buf[image->index].height, handle_num, plane_num) < 0) {
+  uint8_t *data_buffer[MAX_PLANE_NUM] = {0};
+  void *mapped_handle[MAX_PLANE_NUM] = {0};
+
+  for (int m = 0; m < handle_num; m++) {
+    uint32_t stride = 0;
+    void *data_ptr = gbm_bo_map(bo, 0, 0, drm_buf[image->index].width[m], drm_buf[image->index].height[m], GBM_BO_TRANSFER_READ_WRITE, &stride, &mapped_handle[m]);
+    if (!data_ptr) {
       fprintf(stderr, "Could not map gbm to userspace.\n");
       return -1;
     }
+
+    if (handle_num == 1) {
+      for (int i = 0; i < plane_num; i++) {
+        data_buffer[i] = data_ptr + drm_buf[image->index].offset[i];
+      }
+    } else {
+      data_buffer[m] = data_ptr;
+    }
   }
 
-  convert_frame(sframe, gbm_buf_dataptr[image->index], drm_buf[image->index].pitch, dst_fmt);
+  convert_frame(sframe, data_buffer, drm_buf[image->index].pitch, dst_fmt);
+
+  if (handle_num == 1) {
+    gbm_bo_unmap(bo, mapped_handle[0]);
+  } else {
+    for (int m = 0; m < handle_num; m++) {
+      gbm_bo_unmap(bo, mapped_handle[m]);
+    }
+  }
 
   return image->index;
 }
