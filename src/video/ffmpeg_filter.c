@@ -471,6 +471,8 @@ int ffmpeg_filte_frame(AVFrame *frame, AVCodecContext *decoder_ctx, int (*decode
 }
 
 int ffmpeg_modify_filter_action (int action) {
+  if (action == 0)
+    return 0;
   if (hdr_filter_graph->graph || sdr_filter_graph->graph) {
     fprintf(stderr, "Filter Graph has created, could not change now.\n");
     return -1;
@@ -480,6 +482,8 @@ int ffmpeg_modify_filter_action (int action) {
 }
 
 int ffmpeg_reject_filter_action (int action) {
+  if (ffmpeg_filters_args.action == 0)
+    return 0;
   if (hdr_filter_graph->graph || sdr_filter_graph->graph) {
     fprintf(stderr, "Filter Graph has created, could not change now.\n");
     return -1;

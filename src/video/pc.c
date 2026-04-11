@@ -474,6 +474,8 @@ static void* decoder_thread(void *data) {
   while (!done) {
 
     sem_wait(&threads.decoder_sem);
+    if (done)
+      break;
 
     pthread_mutex_lock(&threads.mutex);
     AVFrame *frame = VLIST_GET_FRAME(decoder);

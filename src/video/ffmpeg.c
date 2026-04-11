@@ -154,10 +154,19 @@ static int ffmpeg_get_frame_from_filter(AVFrame *frame, bool native_frame) {
 }
 
 static int ffmpeg_get_frame_chooser (AVFrame *frame, bool native_frame) {
-#ifdef HAVE_FFMPEGFILTER
   static int times = 0;
+
+  times++;
+  if (times == 1)
+    return 1;
+
+  if (frame == NULL) {
+    fprintf(stderr, "NULL frame.\n");
+    return -1;
+  }
+
+#ifdef HAVE_FFMPEGFILTER
   if (ffmpeg_modify_filter_action(0) > 0 && ffmpeg_decoder != SOFTWARE) {
-    times++;
     int err = ffmpeg_init_filter(frame, decoder_ctx, useHdr, ffmpeg_hdr_metadata, &ffmpeg_get_frame_from_decoder);
     if (err >= 0) {
       ffmpeg_get_frame_function = &ffmpeg_get_frame_from_filter;
@@ -173,8 +182,18 @@ static int ffmpeg_get_frame_chooser (AVFrame *frame, bool native_frame) {
   else
 #endif
   {
-    ffmpeg_get_frame_function = &ffmpeg_get_frame_from_decoder;
-    return ffmpeg_get_frame_from_decoder(frame, native_frame);
+    int err = ffmpeg_get_frame_from_decoder(frame, native_frame);
+    if (err == 0 && frame->format >= 0) {
+      ffmpeg_get_frame_function = &ffmpeg_get_frame_from_decoder;
+      return 0;
+    }
+    else {
+      if (times >= 4) {
+        fprintf(stderr, "Decode frame failed much times.\n");
+        return -1;
+      }
+    }
+    return 1;
   }
   return -1;
 }
