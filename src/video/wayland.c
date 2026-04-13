@@ -951,7 +951,16 @@ static void inline wait_to_commit() {
     now.tv_nsec = wl_render_base.presentation.fps_ntime;
   }
 
-  nanosleep(&now, NULL);
+  static const struct timespec wait_flip = { .tv_sec = 0, .tv_nsec = COMMIT_TIME * 2 };
+  if (now.tv_nsec > wait_flip.tv_nsec) {
+    now.tv_nsec = now.tv_nsec - wait_flip.tv_nsec;
+    nanosleep(&wait_flip, NULL);
+    wl_dispatch_event(0, 0, 0);
+    nanosleep(&now, NULL);
+  }
+  else {
+    nanosleep(&now, NULL);
+  }
 
   return;
 }
