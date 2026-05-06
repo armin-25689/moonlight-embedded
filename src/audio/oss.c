@@ -47,25 +47,25 @@ static int oss_renderer_init(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURA
     return -1;
 
   const char* oss_name = "/dev/dsp";
-  fd = open(oss_name, O_WRONLY);
+  fd = open(oss_name, O_WRONLY | O_NONBLOCK);
   if (fd == -1) {
-    printf("Open audio device /dev/dsp failed! error %d\n", errno);
+    fprintf(stderr, "Open audio device /dev/dsp failed! error %d\n", errno);
     return -1;
   }
   // buffer size for fragment ,selector 12 is 4096;11 is 2048;10 is 1024; 13is 8192
   int frag = 12;
   if (ioctl(fd, SNDCTL_DSP_SETFRAGMENT, &frag) == -1)
-    printf("Set fragment for /dev/dsp failed.");
+    perror("Set fragment for /dev/dsp failed.");
 
   int format = AFMT_S16_LE;
   int channels = opusConfig->channelCount;
   int rate = opusConfig->sampleRate;
   if (ioctl(fd, SNDCTL_DSP_SETFMT, &format) == -1)
-    printf("Set format for /dev/dsp failed.");
+    perror("Set format for /dev/dsp failed.");
   if (ioctl(fd, SNDCTL_DSP_CHANNELS, &channels) == -1)
-    printf("Set channels for /dev/dsp failed.");
+    perror("Set channels for /dev/dsp failed.");
   if (ioctl(fd, SNDCTL_DSP_SPEED, &rate) == -1)
-    printf("Set sample rate for /dev/dsp failed.");
+    perror("Set sample rate for /dev/dsp failed.");
 
   return 0;
 }
@@ -88,9 +88,24 @@ static void oss_renderer_cleanup() {
 }
 
 static void oss_renderer_decode_and_play_sample(char* data, int length) {
+  static int times = 0;
+  static int opened = 1;
+
+  if (opened == 0) return;
+
   int decodeLen = opus_multistream_decode(decoder, data, length, pcmBuffer, samplesPerFrame, 0);
   if (decodeLen > 0) {
-    write(fd, pcmBuffer, decodeLen * channelCount * sizeof(short));
+    size_t buf_size = decodeLen * channelCount * sizeof(short);
+    if (write(fd, pcmBuffer, buf_size) == buf_size) {
+      times = 0;
+    }
+    else {
+      times++;
+      if (times > 1000) {
+        perror("Audio error occurs and close audio play: ");
+        opened = 0;
+      }
+    }
   } else if (decodeLen < 0) {
     printf("Opus error from decode: %d\n", decodeLen);
   }
