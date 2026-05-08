@@ -28,7 +28,9 @@ struct Gbm_Bo {
   struct gbm_bo *bo;
 };
 
-uint32_t bo_flags = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR | GBM_BO_USE_SCANOUT; // must need by egl
+static int handle_num = 0;
+static bool out_fd = true;
+static uint32_t bo_flags = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR | GBM_BO_USE_SCANOUT; // must need by egl
 
 int generate_gbm_bo(int fd, struct _drm_buf gbm_buf[], int buffer_num, void *display, int width, int height, int src_fmt, uint64_t size[MAX_PLANE_NUM]) {
   struct Gbm_Bo *gbm_bo = (struct Gbm_Bo *)gbm_buf;
@@ -60,6 +62,10 @@ int generate_gbm_bo(int fd, struct _drm_buf gbm_buf[], int buffer_num, void *dis
       size[i] = gbm_bo[i].pitch[k] * gbm_bo[i].height[k];
     }
   }
+  if (gbm_bo[0].fd[0] == gbm_bo[0].fd[1])
+    handle_num = 1;
+  else
+    handle_num = planes;
 
   return planes;
 }
@@ -100,9 +106,9 @@ void* gbm_get_window(int fd, void * display, int width, int height, uint32_t for
 
 void* gbm_get_display(int *fd) {
   int gbm_fd = *fd;
-  bool has_fd = gbm_fd < 0 ? false : true;
+  out_fd = gbm_fd < 0 ? false : true;
 
-  if (!has_fd) {
+  if (!out_fd) {
     char drmNode[64] = {'\0'};
     gbm_fd = get_drm_render_fd(drmNode);
     if (gbm_fd < 0) {
@@ -112,37 +118,47 @@ void* gbm_get_display(int *fd) {
   }
   struct gbm_device *gbm_display = gbm_create_device(gbm_fd);
   if (!gbm_display) {
-    if (!has_fd)
+    if (!out_fd)
       close(gbm_fd);
     fprintf(stderr, "Could not create gbm display.\n");
     return NULL;
   }
-  if (!has_fd)
+  if (!out_fd)
     *fd = gbm_fd;
 
   return gbm_display;
 }
 
-void gbm_close_display (int gbm_fd, void *data, int buffer_num, void *display, void *window) {
+void gbm_close_display (int gbm_fd, void *data, int buffer_num, void **display, void **window) {
 
-  if (data) {
+  if (data && gbm_fd >= 0) {
     struct Gbm_Bo *gbm_bo = (struct Gbm_Bo *)data;
     for (int i = 0; i < buffer_num; i++) {
+      if (gbm_bo[i].fb_id != 0) {
+        drmModeRmFB(gbm_fd, gbm_bo[i].fb_id);
+      }
+      for (int j = 0; j < handle_num; j++) {
+        if (gbm_bo[i].fd[j] > 0)
+          close(gbm_bo[i].fd[j]);
+      }
       if (gbm_bo[i].bo != NULL) {
         gbm_bo_destroy(gbm_bo[i].bo);
-        gbm_bo[i].bo = NULL;
       }
+      memset(&gbm_bo[i], 0, sizeof(gbm_bo[i]));
     }
   }
-  if (window) {
-    struct gbm_surface *gbm_window = (struct gbm_surface *)window;
+
+  if (window && *window) {
+    struct gbm_surface *gbm_window = (struct gbm_surface *)(*window);
     gbm_surface_destroy(gbm_window);
+    *window = NULL;
   }
-  if (display) {
-    struct gbm_device *gbm_display = (struct gbm_device *)display;
+  if (display && *display) {
+    struct gbm_device *gbm_display = (struct gbm_device *)(*display);
     gbm_device_destroy(gbm_display);
+    *display = NULL;
   }
-  if (gbm_fd >= 0)
+  if (gbm_fd >= 0 && !out_fd)
     close(gbm_fd);
 
   return;

@@ -1049,7 +1049,7 @@ static void wl_render_destroy() {
   }
 
   if (wl_render_base.drm_fd >= 0 )
-    gbm_close_display (wl_render_base.drm_fd, wl_render_base.drm_buf, MAX_FB_NUM, wl_render_base.gbm_device, NULL);
+    gbm_close_display (wl_render_base.drm_fd, wl_render_base.drm_buf, MAX_FB_NUM, &wl_render_base.gbm_device, NULL);
 
   memset(&wl_render_base, 0, sizeof(wl_render_base));
   wl_render_base.drm_fd = -1;

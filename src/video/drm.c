@@ -344,8 +344,7 @@ static int drm_setup(int width, int height, int fps, int drFlags) {
   if (rotate) drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->plane_id, drmInfoPtr->plane_rotation_prop_id, (rotate >> 2));
 
   if (drFlags & DRM_RENDER) {
-    gbm_close_display (-1, NULL, MAX_FB_NUM, gbm_display, NULL);
-    gbm_display = NULL;
+    gbm_close_display (-1, NULL, MAX_FB_NUM, &gbm_display, NULL);
     if (drFlags & ENABLE_HARDWARE_ACCELERATION_2) {
       drm_draw_function = &drm_direct;
     } else {
@@ -356,7 +355,8 @@ static int drm_setup(int width, int height, int fps, int drFlags) {
     uint32_t format = wantHdr ? DEFAULT_FORMAT_10BIT : DEFAULT_FORMAT;
     format = DEFAULT_FORMAT;
     display_callback_drm.hdr_support = false;
-    if (generate_gbm_buffer(drmInfoPtr->fd, drm_buf, MAX_FB_NUM, gbm_display, drmInfoPtr->width, drmInfoPtr->height, AV_PIX_FMT_BGR0) < 0)
+    int planes = generate_gbm_buffer(drmInfoPtr->fd, drm_buf, MAX_FB_NUM, gbm_display, drmInfoPtr->width, drmInfoPtr->height, AV_PIX_FMT_BGR0);
+    if (planes < 0)
       return -1;
     gbm_window = gbm_get_window(drmInfoPtr->fd, gbm_display, drmInfoPtr->width, drmInfoPtr->height, format);
     if (gbm_window == NULL)
@@ -405,18 +405,20 @@ static void drm_clear_image_cache (int drm_fd, struct _drm_buf *drm_buf, int buf
     if (drm_buf[i].fb_id != 0) {
       drmModeRmFB(drm_fd, drm_buf[i].fb_id);
       for (int j = 0; j < drm_config.handle_num; j++) {
-        close(drm_buf[i].fd[j]);
-        if (gbm_display == NULL) {
+        if (drm_render.decoder_type == SOFTWARE) {
+          close(drm_buf[i].fd[j]);
           if (drm_buf_dataptr[i][j] != 0 && drm_config.size[i][j] > 0)
             munmap(drm_buf_dataptr[i][j], drm_config.size[i][j]);
           struct drm_mode_destroy_dumb destroyBuf = {0};
           destroyBuf.handle = drm_buf[i].handle[j];
           drmIoctl(drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroyBuf);
         }
+        else {
+          drmCloseBufferHandle(drm_fd, drm_buf[i].handle[j]);
+        }
       }
       memset(drm_buf_dataptr[i], 0, sizeof(drm_buf_dataptr[i]));
       memset(&drm_buf[i], 0, sizeof(drm_buf[i]));
-      memset(drm_buf[i].fd, -1, sizeof(drm_buf[i].fd));
     }
   }
 }
@@ -427,10 +429,10 @@ static void drm_cleanup (void *data) {
   hdr_blob = 0;
   if (!tty_stat.out)
     drm_restore_display();
-  drm_clear_image_cache(drmInfoPtr->fd, drm_buf, MAX_FB_NUM);
-  gbm_close_display (-1, drm_buf, MAX_FB_NUM, gbm_display, gbm_window);
-  gbm_display = NULL;
-  gbm_window = NULL;
+  if (gbm_display == NULL)
+    drm_clear_image_cache(drmInfoPtr->fd, drm_buf, MAX_FB_NUM);
+  else
+    gbm_close_display (drmInfoPtr->fd, drm_buf, MAX_FB_NUM, &gbm_display, &gbm_window);
   if (connPtr != NULL)
     drmModeFreeConnector(connPtr);
   drm_close();
@@ -710,7 +712,7 @@ int drm_import_hw_buffer (int fd, struct _drm_buf *drm_buf, struct Source_Buffer
   return index;
 }
 
-static inline void drm_free_hw_buffer (int fd, void* *image, int planes) {
+static inline void drm_free_hw_buffer (int fd, void* *image, int handles) {
   if (image[0] == NULL) return;
 
   uint32_t fb_id = *((uint32_t *)image[0]);
@@ -720,7 +722,7 @@ static inline void drm_free_hw_buffer (int fd, void* *image, int planes) {
     drmModeRmFB(fd, fb_id);
   }
   if (handle) {
-    for (int i = 0; i < planes; i++) {
+    for (int i = 0; i < handles; i++) {
       if (handle[i])
         drmCloseBufferHandle(fd, handle[i]);
     }
@@ -766,6 +768,8 @@ static int drm_import_buffer (struct Source_Buffer_Info *buffer, int planes, int
     return -1;
   }
 
+  drm_config.handle_num = handle_num;
+  drm_config.plane_num = planes;
   image[0] = &drm_buf[index].fb_id;
   image[1] = drm_buf[index].handle;
 
@@ -773,8 +777,8 @@ static int drm_import_buffer (struct Source_Buffer_Info *buffer, int planes, int
   return index;
 }
 
-static void drm_free_buffer (void* *image, int planes) {
-  drm_free_hw_buffer(drmInfoPtr->fd, image, planes);
+static void drm_free_buffer (void* *image, int handles) {
+  drm_free_hw_buffer(drmInfoPtr->fd, image, handles);
   return;
 }
 
