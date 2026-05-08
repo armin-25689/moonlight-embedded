@@ -172,7 +172,7 @@ int gbm_convert_image(struct Render_Image *image, struct _drm_buf *drm_buf, int 
     }
   }
 
-  convert_frame(sframe, data_buffer, drm_buf[image->index].pitch, dst_fmt);
+  int err = convert_frame(sframe, data_buffer, drm_buf[image->index].pitch, dst_fmt);
 
   if (handle_num == 1) {
     gbm_bo_unmap(bo, mapped_handle[0]);
@@ -180,6 +180,11 @@ int gbm_convert_image(struct Render_Image *image, struct _drm_buf *drm_buf, int 
     for (int m = 0; m < handle_num; m++) {
       gbm_bo_unmap(bo, mapped_handle[m]);
     }
+  }
+
+  if (err != 0) {
+    fprintf(stderr, "Convert frame failed.\n");
+    return -1;
   }
 
   return image->index;

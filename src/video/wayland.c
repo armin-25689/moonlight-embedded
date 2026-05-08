@@ -157,7 +157,7 @@ static int wl_commit_loop(void *data, int width, int height, int index);
 // render
 
 static int offset_x = 0, offset_y = 0;
-static int display_width = 0, display_height = 0, frame_width = 0, frame_height = 0;
+static int display_width = 0, display_height = 0;
 static int output_width = 0, output_height = 0;
 static int *window_op_fd_p = NULL;
 static int32_t outputScaleFactor = 0;
@@ -525,8 +525,6 @@ static int wayland_setup(int width, int height, int fps, int drFlags) {
     display_height = output_height;
     isFullscreen = true;
   }
-  frame_width = width;
-  frame_height = height;
   uint64_t fps_time = 1000000000 / fps;
   wl_render_base.presentation.fps_ntime = fps_time;
 
@@ -850,7 +848,7 @@ static int wl_render_create(struct Render_Init_Info *paras) {
   return 0;
 }
 
-static inline int commit_surface(int index) {
+static inline int commit_surface(int index, int width, int height) {
   struct wl_buffer *buffer = wl_render_base.frame_callback_object[index].buffer;
   if (buffer == NULL) {
     fprintf(stderr, "Invalid buffer.\n");
@@ -860,7 +858,7 @@ static inline int commit_surface(int index) {
   wl_render_base.wl_set_hdr_metadata(index);
 
   wl_surface_attach(wlsurface, buffer, 0, 0);
-  wl_surface_damage_buffer(wlsurface, 0, 0, frame_width, frame_height);
+  wl_surface_damage_buffer(wlsurface, 0, 0, width, height);
 
   wl_surface_commit(wlsurface);
 
@@ -971,7 +969,7 @@ static int wl_commit_loop(void *data, int width, int height, int index) {
 
   time++;
 
-  int ret = commit_surface(index);
+  int ret = commit_surface(index, wl_render_base.drm_buf[index].width[0], wl_render_base.drm_buf[index].height[0]);
   if (ret < 0)
     return -1;
 
@@ -1118,22 +1116,6 @@ static int wl_sync_frame_config(struct Render_Config *config) {
     dst_fmt = config->pix_fmt;
     break;
   }
-  if (wl_render_base.filter_action & FILTER_SCALE_FMT) {
-#ifdef HAVE_FFMPEGFILTER
-    if (ffmpeg_filters_args.pix_fmt > 0) {
-      dst_fmt = ffmpeg_filters_args.pix_fmt;
-    }
-    else
-#endif
-    {
-      if (useHdr)
-        dst_fmt = FILTER_DEFAULT_HDR_FMT;
-      else
-        dst_fmt = FILTER_DEFAULT_FMT;
-    }
-    need_change_color_config = false;
-  }
-
   wl_render_base.dst_fmt = dst_fmt;
   
   wl_render_base.lastcolorspace = -1;
@@ -1146,7 +1128,7 @@ static int wl_sync_frame_config(struct Render_Config *config) {
   }
 
   if (wayland_render.decoder_type == SOFTWARE) {
-    wl_render_base.plane_num = generate_gbm_bo(wl_render_base.drm_fd, wl_render_base.drm_buf, MAX_FB_NUM, wl_render_base.gbm_device, frame_width, frame_height, dst_fmt, wl_render_base.size);
+    wl_render_base.plane_num = generate_gbm_bo(wl_render_base.drm_fd, wl_render_base.drm_buf, MAX_FB_NUM, wl_render_base.gbm_device, config->width, config->height, dst_fmt, wl_render_base.size);
     if (wl_render_base.plane_num < 1) {
       fprintf(stderr, "Could not generate drm buf.\n");
       return -1;

@@ -337,11 +337,11 @@ static int convert_frame_another(AVFrame * src_frame, uint8_t *dst_buffer[4], ui
   for (int k = 0; k < MAX_DATA_BUFFER; k++) {
     dst_frames[i]->data[k] = buffer_ptr[i][k];
   }
-#else
-  yuv_convert(src_frame, dst_buffer, pitch);
-#endif
 
   return 0;
+#else
+  return yuv_convert(src_frame, dst_buffer, pitch);
+#endif
 }
 
 static int convert_frame_copy(AVFrame * src_frame, uint8_t *dst_buffer[4], uint32_t pitch[4], int dst_fmt) {

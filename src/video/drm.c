@@ -44,7 +44,6 @@ static bool isMaster = true;
 static uint32_t last_fbid = 0;
 static uint32_t hdr_blob = 0;
 
-static int frame_width,frame_height,display_width,display_height;
 static uint64_t fps_time;
 
 struct _drm_render_config {
@@ -341,11 +340,6 @@ static int drm_setup(int width, int height, int fps, int drFlags) {
     }
   }
 
-  frame_width = width;
-  frame_height = height;
-  display_width = drmInfoPtr->width;
-  display_height = drmInfoPtr->height;
-
   uint32_t rotate = drFlags & DISPLAY_ROTATE_MASK;
   if (rotate) drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->plane_id, drmInfoPtr->plane_rotation_prop_id, (rotate >> 2));
 
@@ -360,16 +354,14 @@ static int drm_setup(int width, int height, int fps, int drFlags) {
   } else {
     if ((drFlags & EGL_RENDER) == 0) return -1;
     uint32_t format = wantHdr ? DEFAULT_FORMAT_10BIT : DEFAULT_FORMAT;
-    frame_width = display_width;
-    frame_height = display_height;
     format = DEFAULT_FORMAT;
     display_callback_drm.hdr_support = false;
-    if (generate_gbm_buffer(drmInfoPtr->fd, drm_buf, MAX_FB_NUM, gbm_display, frame_width, frame_height, AV_PIX_FMT_BGR0) < 0)
+    if (generate_gbm_buffer(drmInfoPtr->fd, drm_buf, MAX_FB_NUM, gbm_display, drmInfoPtr->width, drmInfoPtr->height, AV_PIX_FMT_BGR0) < 0)
       return -1;
-    gbm_window = gbm_get_window(drmInfoPtr->fd, gbm_display, frame_width, frame_height, format);
+    gbm_window = gbm_get_window(drmInfoPtr->fd, gbm_display, drmInfoPtr->width, drmInfoPtr->height, format);
     if (gbm_window == NULL)
       return -1;
-    if (isMaster && drm_set_display(drmInfoPtr->fd, drmInfoPtr->crtc_id, frame_width, frame_height, display_width, display_height, &connPtr->connector_id, 1, connModePtr, drm_buf[0].fb_id) < 0) {
+    if (isMaster && drm_set_display(drmInfoPtr->fd, drmInfoPtr->crtc_id, drmInfoPtr->width, drmInfoPtr->height, drmInfoPtr->width, drmInfoPtr->height, &connPtr->connector_id, 1, connModePtr, drm_buf[0].fb_id) < 0) {
       fprintf(stderr, "Could not set fb to drm crtc.\n");
     }
   }
@@ -462,11 +454,10 @@ static void drm_get_resolution(int *width, int *height, bool isfullscreen) {
   return;
 }
 
-static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, AVFrame *frame, uint32_t *hdr_blob) {
-  struct hdr_output_metadata data = {0};
+static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, bool hdractive, uint32_t *hdr_blob) {
   bool hdrp = false;
 
-  if (!ffmpeg_has_hdr_metadata(frame)) {
+  if (!hdractive) {
     hdrp = false;
   }
   else 
@@ -478,6 +469,7 @@ static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, AVFrame *frame, u
     return 0;
   }
 
+  struct hdr_output_metadata data = {0};
   data.metadata_type = 0; // HDMI_STATIC_METADATA_TYPE1
   data.hdmi_metadata_type1.eotf = 2; // SMPTE ST 2084
   data.hdmi_metadata_type1.metadata_type = 0; // Static Metadata Type 1
@@ -512,7 +504,7 @@ static int drm_display_done(int width, int height, int index) {
 }
 
 static int drm_display_loop(void *data, int width, int height, int index) {
-  int ret = -1;
+  static int orig_colorspace = -1;
   uint32_t fb_id;
 
   if (tty_stat.out) {
@@ -521,16 +513,28 @@ static int drm_display_loop(void *data, int width, int height, int index) {
   }
 
   fb_id = drm_buf[index].fb_id;
-  if (fb_id <= 0)
-    return ret;
+  if (fb_id <= 0 || data == NULL)
+    return -1;
   if (last_fbid == fb_id && drmInfoPtr->have_atomic)
     fb_id = 0;
-  uint32_t dwidth = (uint32_t)frame_width;
-  uint32_t dheight = (uint32_t)frame_height;
 
-  ret = drm_flip_buffer(drmInfoPtr->fd, drmInfoPtr->crtc_id, fb_id, hdr_blob, dwidth, dheight);
+  struct Render_Image *image = (struct Render_Image *)data;
+  AVFrame *frame = image->sframe.frame;
+  int colorspace = frame->colorspace;
+  if (orig_colorspace != colorspace) {
+    orig_colorspace = colorspace;
+    drm_config.full_color_range = ffmpeg_is_frame_full_range(frame);
+    drm_config.colorspace = ffmpeg_get_frame_colorspace(frame);
+    if (drm_config.need_change_color) {
+      enum DrmColorSpace colorspace = drm_config.colorspace == COLORSPACE_REC_2020 ? DBT2020 : (drm_config.colorspace == COLORSPACE_REC_709 ? DBT709 : DBT601);
+      drm_choose_color_config(colorspace, drm_config.full_color_range);
+    }
+    drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, 
+                   !drm_config.need_change_color ? drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020RGB : DEFAULTCOLOR] : drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020YCC : (drm_config.colorspace == COLORSPACE_REC_709 ? D709YCC : D601YCC)]);
+    set_hdr_metadata_blob (drmInfoPtr, ffmpeg_has_hdr_metadata(frame), &hdr_blob);
+  }
 
-  return ret;
+  return drm_flip_buffer(drmInfoPtr->fd, drmInfoPtr->crtc_id, fb_id, hdr_blob, drm_buf[index].width[0], drm_buf[index].height[0]);
 }
 
 static void drm_export_buffer(struct Source_Buffer_Info buffers[MAX_FB_NUM], int *buffer_num, int *plane_num) {
@@ -599,13 +603,11 @@ static int drm_render_init(struct Render_Init_Info *paras) {
   if (paras->use_filter > 0) {
 #ifdef HAVE_FFMPEGFILTER
     if ((paras->use_filter & FILTER_SCALE_SIZE) && drm_render.decoder_type != SOFTWARE) {
-      frame_width = display_width;
-      frame_height = display_height;
-      ffmpeg_filters_args.video_size.width = display_width;
-      ffmpeg_filters_args.video_size.height = display_height;
+      ffmpeg_filters_args.video_size.width = drmInfoPtr->width;
+      ffmpeg_filters_args.video_size.height = drmInfoPtr->height;
     }
-    drm_config.filter_action = paras->use_filter;
 #endif
+    drm_config.filter_action = paras->use_filter;
   }
   return 0;
 }
@@ -645,7 +647,7 @@ static int get_config_from_frame(struct Render_Config *config) {
     drm_config.dst_fmt = config->pix_fmt;
     break;
   }
-  if (drm_config.filter_action & FILTER_SCALE_FMT) {
+  if (drm_config.filter_action & FILTER_SCALE_FMT && drm_render.decoder_type == SOFTWARE) {
     need_change_color_config = false;
 #ifdef HAVE_FFMPEGFILTER
     if (ffmpeg_filters_args.pix_fmt > 0) {
@@ -663,7 +665,7 @@ static int get_config_from_frame(struct Render_Config *config) {
   int flags = 0;
   if (drm_render.decoder_type == SOFTWARE) {
     drm_clear_image_cache(drmInfoPtr->fd, drm_buf, MAX_FB_NUM);
-    if (drm_generate_drm_buf(drmInfoPtr->fd, drm_config.dst_fmt, frame_width, frame_height, flags, drm_buf, MAX_FB_NUM) == 0) {
+    if (drm_generate_drm_buf(drmInfoPtr->fd, drm_config.dst_fmt, config->width, config->height, flags, drm_buf, MAX_FB_NUM) == 0) {
       fprintf(stderr, "Could not generate buf.\n");
       return -1;
     }
@@ -676,7 +678,7 @@ static int get_config_from_frame(struct Render_Config *config) {
 
   drm_config.need_change_color = need_change_color_config;
 
-  if (isMaster && drm_set_display(drmInfoPtr->fd, drmInfoPtr->crtc_id, frame_width, frame_height, display_width, display_height, &connPtr->connector_id, 1, connModePtr, drm_buf[0].fb_id) < 0) {
+  if (isMaster && drm_set_display(drmInfoPtr->fd, drmInfoPtr->crtc_id, config->width, config->height, drmInfoPtr->width, drmInfoPtr->height, &connPtr->connector_id, 1, connModePtr, drm_buf[0].fb_id) < 0) {
     fprintf(stderr, "Could not set fb to drm crtc.\n");
     return -1;
   }
@@ -686,7 +688,10 @@ static int get_config_from_frame(struct Render_Config *config) {
 
 static int drm_copy(struct Render_Image *image) { 
   AVFrame * sframe = (AVFrame *)image->sframe.frame;
-  convert_frame(sframe, drm_buf_dataptr[image->index], drm_buf[image->index].pitch, drm_config.dst_fmt);
+  if (convert_frame(sframe, drm_buf_dataptr[image->index], drm_buf[image->index].pitch, drm_config.dst_fmt) != 0) {
+    fprintf(stderr, "Convert frame failed.\n");
+    return -1;
+  }
   return image->index;
 }
 
@@ -774,19 +779,6 @@ static void drm_free_buffer (void* *image, int planes) {
 }
 
 static int drm_draw(struct Render_Image *image) { 
-  int colorspace = ffmpeg_get_frame_colorspace(image->sframe.frame);
-  if (drm_config.colorspace != colorspace) {
-    drm_config.full_color_range = ffmpeg_is_frame_full_range(image->sframe.frame);
-    drm_config.colorspace = colorspace;
-    if (drm_config.need_change_color) {
-      enum DrmColorSpace colorspace = drm_config.colorspace == COLORSPACE_REC_2020 ? DBT2020 : (drm_config.colorspace == COLORSPACE_REC_709 ? DBT709 : DBT601);
-      drm_choose_color_config(colorspace, drm_config.full_color_range);
-    }
-    drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, 
-                   !drm_config.need_change_color ? drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020RGB : DEFAULTCOLOR] : drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020YCC : (drm_config.colorspace == COLORSPACE_REC_709 ? D709YCC : D601YCC)]);
-    set_hdr_metadata_blob (drmInfoPtr, image->sframe.frame, &hdr_blob);
-  }
-
   return drm_draw_function(image);
 }
 

@@ -22,6 +22,8 @@
 #pragma once
 
 struct Render_Config {
+  int width;
+  int height;
   int color_space;
   int color_range;
   int pix_fmt;

@@ -69,7 +69,6 @@ static int pipefd[2];
 static int windowpipefd[2];
 
 static int display_width = 0, display_height = 0;
-static int frame_width, frame_height, screen_width, screen_height;
 
 static uint64_t fps_time;
 static uint64_t fps_time_10;
@@ -227,13 +226,15 @@ static inline void* draw_frame (struct Render_Image *images, AVFrame* frame, int
       return NULL;
     }
     if (ffmpeg_decoder == SOFTWARE && strcmp(disPtr->name, renderPtr->name) == 0) {
-      if (convert_init(frame, display_width, display_height) < 0) {
+      if (convert_init(frame, frame->width, frame->height) < 0) {
         *res = LOOP_RETURN;
         return NULL;
       }
     }
 
     struct Render_Config config = {0};
+    config.width = frame->width;
+    config.height = frame->height;
     config.color_space = ffmpeg_get_frame_colorspace(frame);
     config.full_color_range = ffmpeg_is_frame_full_range(frame);
     ffmpeg_get_plane_info(frame, &config.pix_fmt, &config.plane_nums, &config.yuv_order);
@@ -320,7 +321,7 @@ static int frame_handle (int pipefd, void *data) {
     mv_vlist_render_to_display();
 
     if (disPtr->display_vsync_loop) {
-      dis_res = disPtr->display_vsync_loop(&done, frame_width, frame_height, image->index);
+      dis_res = disPtr->display_vsync_loop(image, display_width, display_height, image->index);
     }
     else {
       dis_res = disPtr->display_put_to_screen(display_width, display_height, image->index);
@@ -441,7 +442,7 @@ static void* display_handler (void *data) {
       fprintf(stderr, "Error: Get NULL image data.\n");
       goto display_exit;
     }
-    if (disPtr->display_vsync_loop(&done, frame_width, frame_height, image_data->index) < 0) {
+    if (disPtr->display_vsync_loop(image_data, display_width, display_height, image_data->index) < 0) {
       fprintf(stderr, "Error: display loop failed.\n");
       goto display_exit;
     }
@@ -635,6 +636,7 @@ int x11_init(const char *displayName, bool vaapi) {
 }
 
 int x11_setup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
+  int screen_width, screen_height;
   ffmpegArgs.drFlags = drFlags;
   fps_time = ((int)(1000000 / (redrawRate)));
   fps_time_10 = (int) (fps_time / 10);
@@ -647,15 +649,13 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   window = disPtr->display_get_window();
   printf("Based %s window\n", disPtr->name);
 
-  if (drFlags & DISPLAY_FULLSCREEN) {
+  if (drFlags & DISPLAY_FULLSCREEN && renderPtr->render_type == EGL_RENDER) {
     display_width = screen_width;
     display_height = screen_height;
   } else {
     display_width = width;
     display_height = height;
   }
-  frame_width = width;
-  frame_height = height;
 
   int avc_flags;
   if (drFlags & X11_VDPAU_ACCELERATION) {
@@ -669,13 +669,13 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   }
   avc_flags |= renderPtr->render_type;
 
-  if (ffmpeg_init(videoFormat, frame_width, frame_height, avc_flags, MAX_FB_NUM, SLICES_PER_FRAME) < 0) {
+  if (ffmpeg_init(videoFormat, width, height, avc_flags, MAX_FB_NUM, SLICES_PER_FRAME) < 0) {
     fprintf(stderr, "Couldn't initialize video decoding\n");
     return -1;
   }
   ffmpegArgs.videoFormat = videoFormat;
-  ffmpegArgs.width = frame_width;
-  ffmpegArgs.height = frame_height;
+  ffmpegArgs.width = width;
+  ffmpegArgs.height = height;
   ffmpegArgs.avc_flags = avc_flags;
   ffmpegArgs.buffer_count = MAX_FB_NUM;
   ffmpegArgs.thread_count = SLICES_PER_FRAME;
@@ -688,8 +688,8 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
 
   struct Render_Init_Info renderParas = {0};
   renderParas.window = window;
-  renderParas.frame_width = frame_width;
-  renderParas.frame_height = frame_height;
+  renderParas.frame_width = width;
+  renderParas.frame_height = height;
   renderParas.screen_width = screen_width;
   renderParas.screen_height = screen_height;
   renderParas.is_full_screen = drFlags & DISPLAY_FULLSCREEN;
