@@ -353,9 +353,8 @@ static int drm_setup(int width, int height, int fps, int drFlags) {
   } else {
     if ((drFlags & EGL_RENDER) == 0) return -1;
     uint32_t format = wantHdr ? DEFAULT_FORMAT_10BIT : DEFAULT_FORMAT;
-    format = DEFAULT_FORMAT;
     display_callback_drm.hdr_support = false;
-    int planes = generate_gbm_buffer(drmInfoPtr->fd, drm_buf, MAX_FB_NUM, gbm_display, drmInfoPtr->width, drmInfoPtr->height, AV_PIX_FMT_BGR0);
+    int planes = generate_gbm_buffer(drmInfoPtr->fd, drm_buf, MAX_FB_NUM, gbm_display, drmInfoPtr->width, drmInfoPtr->height, wantHdr ? AV_PIX_FMT_X2RGB10LE : AV_PIX_FMT_BGR0);
     if (planes < 0)
       return -1;
     gbm_window = gbm_get_window(drmInfoPtr->fd, gbm_display, drmInfoPtr->width, drmInfoPtr->height, format);
@@ -379,6 +378,7 @@ static void* drm_get_display(const char* *device) {
     format = DEFAULT_FORMAT;
     drmInfoPtr = drm_init(NULL, format, false);
     if (drmInfoPtr) {
+      wantHdr = false;
       display_callback_drm.hdr_support = false;
     }
   }
