@@ -261,7 +261,8 @@ static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int
       }
       drm_buf[i].handle[j] = createBuf.handle;
       drm_buf[i].pitch[j] = createBuf.pitch;
-      drm_buf[i].width[j] = plane_width[j];
+      // use pixel width ,compitable with egl
+      drm_buf[i].width[j] = (int) (plane_width[0] / (plane_height[0] / ((float)(plane_height[j]))));
       drm_buf[i].height[j] = plane_height[j];
       drm_config.size[i][j] = createBuf.size;
     }
@@ -271,8 +272,8 @@ static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int
         get_aligned_width(drm_buf[i].width[0], (drm_buf[i].pitch[0] * 8 / drm_config.bpp), plane_width[k], &dstpitch);
         drm_buf[i].handle[k] = drm_buf[i].handle[0];
         drm_buf[i].pitch[k] = dstpitch > 0 ? (dstpitch * drm_config.bpp / 8) : drm_buf[i].pitch[0];
+        drm_buf[i].width[k] = (int) (plane_width[0] / (plane_height[0] / ((float)(plane_height[k]))));
         drm_buf[i].height[k] = plane_height[k];
-        drm_buf[i].width[k] = plane_width[k];
         drm_config.size[i][k] = drm_config.size[i][0];
       }
     }
@@ -647,6 +648,22 @@ static int get_config_from_frame(struct Render_Config *config) {
     break;
   default:
     drm_config.dst_fmt = config->pix_fmt;
+
+    int bpp, multi, planen;
+    bool found = false;
+    uint32_t dfmt = translate_format_to_drm(config->pix_fmt, &bpp, &multi, &planen);
+    if (dfmt) {
+      for (int i = 0; i < NEEDED_DRM_FORMAT_NUM; i++) {
+        if (drmInfoPtr->plane_formats[i] == dfmt) {
+          found = true;
+          break;
+        }
+      }
+    }
+    if (!found) {
+      fprintf(stderr, "DRM: ffmpeg pix format(%d) is not supported.\n", config->pix_fmt);
+      return -1;
+    }
     break;
   }
   if (drm_config.filter_action & FILTER_SCALE_FMT && drm_render.decoder_type == SOFTWARE) {
@@ -697,7 +714,7 @@ static int drm_copy(struct Render_Image *image) {
   return image->index;
 }
 
-int drm_import_hw_buffer (int fd, struct _drm_buf *drm_buf, struct Source_Buffer_Info *buffer, int planes, int composeOrSeperate, void* *image, int index) {
+int drm_import_hw_buffer (int fd, struct _drm_buf *drm_buf, struct Source_Buffer_Info *buffer, int planes, int layers, void* *image, int index) {
 
   for (int i = 0; i < planes; i++) {
     drm_buf[index].fd[i] = buffer->fd[i];
@@ -733,24 +750,23 @@ static inline void drm_free_hw_buffer (int fd, void* *image, int handles) {
   return;
 }
 
-static int drm_import_buffer (struct Source_Buffer_Info *buffer, int planes, int composeOrSeperate, void* *image, int index) {
-  if (drm_import_hw_buffer(drmInfoPtr->fd, drm_buf, buffer, planes, composeOrSeperate, image, index) < 0) {
+static int drm_import_buffer (struct Source_Buffer_Info *buffer, int planes, int layers, void* *image, int index) {
+  if (drm_import_hw_buffer(drmInfoPtr->fd, drm_buf, buffer, planes, layers, image, index) < 0) {
     drm_free_hw_buffer(drmInfoPtr->fd, image, planes);
     return -1;
   }
 
-  int handle_num = composeOrSeperate == COMPOSE_PLANE ?  1 : planes;
-
-  for (int i = 0; i < handle_num; i++) {
+  for (int i = 0; i < layers; i++) {
     if (drmPrimeFDToHandle(drmInfoPtr->fd, drm_buf[index].fd[i], &drm_buf[index].handle[i]) < 0) {
       for (int k = 0; k < i; k++) {
         drmCloseBufferHandle(drmInfoPtr->fd, drm_buf[index].handle[k]);
       }
+      memset(drm_buf[index].handle, 0, sizeof(drm_buf[index].handle));
       fprintf(stderr, "Could not success drmPrimeFDToHandle(%d, %d, %d)\n", drmInfoPtr->fd, drm_buf[index].fd[i], i);
       return -1;
     }
   }
-  if (handle_num == 1) {
+  if (layers == 1) {
     for (int k = 1; k < planes; k++) {
       drm_buf[index].handle[k] = drm_buf[index].handle[0];
     }
@@ -768,7 +784,7 @@ static int drm_import_buffer (struct Source_Buffer_Info *buffer, int planes, int
     return -1;
   }
 
-  drm_config.handle_num = handle_num;
+  drm_config.handle_num = layers;
   drm_config.plane_num = planes;
   image[0] = &drm_buf[index].fb_id;
   image[1] = drm_buf[index].handle;

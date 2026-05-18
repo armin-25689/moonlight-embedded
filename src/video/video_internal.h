@@ -22,7 +22,7 @@
 #include <stdbool.h>
 
 enum PixelFormatOrder { VUYX_ORDER = 0, XVYU_ORDER, YUVX_ORDER };
-enum decoders {SOFTWARE = 0, VDPAU, VAAPI};
+enum decoders {SOFTWARE = 0, VULKAN, VAAPI};
 #define EGL_RENDER 0x0100
 #define X11_RENDER 0x0200
 #define DRM_RENDER 0x0400
@@ -83,8 +83,9 @@ enum decoders {SOFTWARE = 0, VDPAU, VAAPI};
 #define VLIST_GET_FRAME(name) ((name##_vlist.last) > 0 ? (name##_vlist.frame[((name##_vlist.last) - 1)]) : NULL)
 #define VLIST_GET_DATA(name) ((name##_vlist.last) > 0 ? (name##_vlist.data[((name##_vlist.last) - 1)]) : NULL)
 
+// compitable with drm_buf struct
 struct Source_Buffer_Info {
-  int fd[4];
+  uint32_t fd[4];
   uint32_t width[4];
   uint32_t height[4];
   uint32_t format[4];
@@ -92,6 +93,23 @@ struct Source_Buffer_Info {
   uint32_t offset[4];
   uint64_t modifiers[4];
   void *data;
+};
+
+struct Render_Image {
+  struct {
+    void *image_data[MAX_PLANE_NUM];
+    void *descriptor;
+    struct Source_Buffer_Info buf_info;
+    int layers;
+    int planes;
+    void (*free) (void **data, int layers);
+    int (*create) (struct Source_Buffer_Info *buffer, int planes, int layers, void **data, int index);
+  } images;
+  struct {
+    uint8_t **frame_data;
+    void *frame;
+  } sframe;
+  int index;
 };
 
 extern bool isYUV444;

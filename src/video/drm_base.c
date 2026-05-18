@@ -419,8 +419,10 @@ static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
       case DRM_FORMAT_XVYU2101010:
       case DRM_FORMAT_YUV420:
       case DRM_FORMAT_YUV444:
+      case DRM_FORMAT_Q410:
       case DRM_FORMAT_NV12:
       case DRM_FORMAT_P010:
+      case DRM_FORMAT_ARGB8888:
       case DRM_FORMAT_XRGB8888:
       case DRM_FORMAT_XRGB2101010:
         drm_info->plane_formats[formats_index++] = plane->formats[j];
@@ -733,7 +735,13 @@ uint32_t translate_format_to_drm(int format, int *bpp, int *heightmulti, int *pl
     *heightmulti = 3;
     *planenum = 3;
     return DRM_FORMAT_YUV444;
+  case AV_PIX_FMT_YUV444P10:
+    *bpp = 16;
+    *heightmulti = 3;
+    *planenum = 3;
+    return DRM_FORMAT_Q410;
   case AV_PIX_FMT_VUYX:
+  case AV_PIX_FMT_VUYA:
     *bpp = 32;
     *heightmulti = 1;
     *planenum = 1;

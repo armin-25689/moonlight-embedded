@@ -28,7 +28,6 @@ struct Render_Config {
   int color_range;
   int pix_fmt;
   int plane_nums;
-  int image_nums;
   enum PixelFormatOrder yuv_order;
   bool full_color_range;
   bool use_hdr;
@@ -52,17 +51,6 @@ struct Render_Init_Info {
   int use_filter;
   void(*display_exported_buffer)(struct Source_Buffer_Info *buffer, int *buffersNum, int *planesNum);
 };
-struct Render_Image {
-  struct {
-    void *image_data[MAX_PLANE_NUM];
-    void *descriptor;
-  } images;
-  struct {
-    uint8_t **frame_data;
-    void *frame;
-  } sframe;
-  int index;
-};
 struct RENDER_CALLBACK {
   char *name;
   char *display_name;
@@ -76,7 +64,7 @@ struct RENDER_CALLBACK {
   int (*render_sync_config) (struct Render_Config *config);
   int (*render_draw) (struct Render_Image *image);
   void (*render_destroy) ();
-  int (*render_map_buffer) (struct Source_Buffer_Info *buffer, int planes, int composeOrSeperate, void* image[MAX_PLANE_NUM], int index);
+  int (*render_map_buffer) (struct Source_Buffer_Info *buffer, int planes, int layers, void* image[MAX_PLANE_NUM], int index);
   void (*render_unmap_buffer) (void* image[MAX_PLANE_NUM], int planes);
   void (*render_sync_window_size) (int width, int height, bool isFullScreen);
 };

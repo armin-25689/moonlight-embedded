@@ -51,7 +51,7 @@ static GLuint texture_id[4], texture_uniform[7];
 static const float *colorOffsets;
 static const float *colorspace;
 static int egl_max_planes = 4;
-static int planeNum = 4, imageNum = 0;
+static int planeNum = 4;
 static const int *yuvOrder;
 struct Window_Size {
   int frame_width;
@@ -82,13 +82,13 @@ static void egl_unmap_eglimage(EGLImage *eglImage, int bufferPlaneNum) {
   memset(eglImage, 0, sizeof(EGLImage) * bufferPlaneNum);
 }
 
-static int egl_map_buffer_to_eglimage(struct Source_Buffer_Info *buffer, int bufferPlaneNum, int composeOrSeperate, EGLImage *eglImage, int index) {
-  // layers
-  int planes = composeOrSeperate == COMPOSE_PLANE ? 1 : bufferPlaneNum;
+static int egl_map_buffer_to_eglimage(struct Source_Buffer_Info *buffer, int bufferPlaneNum, int layers, EGLImage *eglImage, int index) {
+  static int planesForLayer = 0;
   // planes in layers
-  int planesi = composeOrSeperate == COMPOSE_PLANE ? bufferPlaneNum : 1;
+  if (planesForLayer == 0) planesForLayer = bufferPlaneNum / layers;
 
-  for (int j = 0; j < planes; j++) {
+  int planes = 0;
+  for (int j = 0; j < layers; j++) {
     int attrsNum = 0;
     EGLAttrib attrs[MAX_EGL_ATTRS_NUM] = {0};
     attrs[attrsNum++] = EGL_WIDTH;
@@ -98,19 +98,20 @@ static int egl_map_buffer_to_eglimage(struct Source_Buffer_Info *buffer, int buf
     attrs[attrsNum++] = EGL_LINUX_DRM_FOURCC_EXT,
     attrs[attrsNum++] = buffer->format[j];
 
-    for (int k = 0; k < planesi; k++) {
+    for (int k = 0; k < planesForLayer; k++) {
       attrs[attrsNum++] = eglImageAttrsSlot.fd[k];
-      attrs[attrsNum++] = buffer->fd[j + k];
+      attrs[attrsNum++] = buffer->fd[planes];
       attrs[attrsNum++] = eglImageAttrsSlot.pitch[k];
-      attrs[attrsNum++] = buffer->stride[j + k];
+      attrs[attrsNum++] = buffer->stride[planes];
       attrs[attrsNum++] = eglImageAttrsSlot.offset[k];
-      attrs[attrsNum++] = buffer->offset[j + k];
+      attrs[attrsNum++] = buffer->offset[planes];
       if (ExtState.eglIsSupportExtDmaBufMod) {
         attrs[attrsNum++] = eglImageAttrsSlot.lo_modi[k];
-        attrs[attrsNum++] = (EGLint)(buffer->modifiers[j + k] & 0xFFFFFFFF);
+        attrs[attrsNum++] = (EGLint)(buffer->modifiers[planes] & 0xFFFFFFFF);
         attrs[attrsNum++] = eglImageAttrsSlot.hi_modi[k];
-        attrs[attrsNum++] = (EGLint)(buffer->modifiers[j + k] >> 32);
+        attrs[attrsNum++] = (EGLint)(buffer->modifiers[planes] >> 32);
       }
+      planes++;
     }
 
     attrs[attrsNum++] = EGL_NONE;
@@ -626,14 +627,14 @@ static inline void egl_draw_soft(uint8_t* image[3]) {
   draw_texture();
 }
 
-static inline void egl_draw_vaapi(EGLImage image[4]) {
-#ifdef HAVE_VAAPI
-  if (imageNum < 0) {
+static inline void egl_draw_vaapi(struct Render_Image *images) {
+  EGLImage *image = (EGLImage *)images->images.image_data;
+  if (images->images.layers < 1) {
       printf("Error in egl_drawing frame\n");
       return;
   }
   
-  for (int i = 0; i < imageNum; i++) {
+  for (int i = 0; i < images->images.layers; i++) {
      glActiveTexture(GL_TEXTURE0 + i);
      glBindTexture(GL_TEXTURE_2D, texture_id[i]);
      glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image[i]);
@@ -641,7 +642,6 @@ static inline void egl_draw_vaapi(EGLImage image[4]) {
   }
 
   draw_texture();
-#endif
 }
 
 static int egl_choose_config_from_frame(struct Render_Config *config) {
@@ -675,7 +675,6 @@ static int egl_choose_config_from_frame(struct Render_Config *config) {
   if (egl_render.decoder_type != SOFTWARE) {
     planeNum = config->plane_nums;
     yuvOrder = plane_order[config->yuv_order];
-    imageNum = config->image_nums == 0 ? planeNum : config->image_nums;
   }
   else {
     // only x11 platform
@@ -701,7 +700,7 @@ static int egl_draw(struct Render_Image *images) {
   glBindVertexArray(egl_base.VAO);
 
   if (egl_render.decoder_type != SOFTWARE) {
-    egl_draw_vaapi(images->images.image_data);
+    egl_draw_vaapi(images);
   }
   else {
     egl_draw_soft(images->sframe.frame_data);

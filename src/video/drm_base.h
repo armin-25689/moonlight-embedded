@@ -19,7 +19,7 @@
 
 #include <xf86drmMode.h>
 
-#define NEEDED_DRM_FORMAT_NUM 9
+#define NEEDED_DRM_FORMAT_NUM 20
 #define MAX_CONNECTOR 5
 
 enum DrmBroadcastRgb { AUTORGB = 0, FULLRGB, LIMITEDRGB };

@@ -185,7 +185,7 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
   platform_start(system);
   PDECODER_RENDERER_CALLBACKS videoCallback = platform_get_video(system);
 
-  if (!config->less_threads && (system == X11 || system == X11_VAAPI)) {
+  if (!config->less_threads && (system == X11 || system == X11_VAAPI || system == X11_VULKAN )) {
     videoCallback->capabilities &= ~CAPABILITY_DIRECT_SUBMIT;
     videoCallback->capabilities |= CAPABILITY_PULL_RENDERER;
     videoCallback->submitDecodeUnit = NULL;
@@ -250,7 +250,7 @@ static void help() {
   printf("\t-bitrate <bitrate>\tSpecify the bitrate in Kbps\n");
   printf("\t-packetsize <size>\tSpecify the maximum packetsize in bytes\n");
   printf("\t-codec <codec>\t\tSelect used codec: auto/h264/h265/av1 (default auto)\n");
-  printf("\t-hdr \t\t\tEnable hdr support for wayland_vaapi/drm_vaapi/drm/wayland platform\n");
+  printf("\t-hdr \t\t\tEnable hdr support for wayland_vaapi/drm_vaapi/drm/wayland/vulkan platform\n");
   printf("\t-yuv444\t\t\tTry to use yuv444 format\n");
   printf("\t-filters <filters>\tUse ffmpeg video filters to modify video\n");
   printf("\t-remote <yes/no/auto>\tEnable optimizations for WAN streaming (default auto)\n");
@@ -404,7 +404,7 @@ int main(int argc, char* argv[]) {
     if (!wantHdr) config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_10BIT;
     if (!wantYuv444) config.stream.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_YUV444;
     // set yuv444 depend on config
-    if (system == X11_VAAPI || system == X11) {
+    if (system == X11_VULKAN || system == X11_VAAPI || system == X11) {
       config.stream.supportedVideoFormats &= (supportedVideoFormat & 
                                               (VIDEO_FORMAT_MASK_H264 |
                                                VIDEO_FORMAT_MASK_H265 |

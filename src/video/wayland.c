@@ -1153,9 +1153,9 @@ static int wl_sync_frame_config(struct Render_Config *config) {
   return 0;
 }
 
-static int wl_import_image(struct Source_Buffer_Info *buffer, int planes, int composeOrSeperate, void* *image, int index) {
+static int wl_import_image(struct Source_Buffer_Info *buffer, int planes, int layers, void* *image, int index) {
   wl_render_base.plane_num = planes;
-  int geted_index = drm_import_hw_buffer (wl_render_base.drm_fd, wl_render_base.drm_buf, buffer, planes, composeOrSeperate, image, index);
+  int geted_index = drm_import_hw_buffer (wl_render_base.drm_fd, wl_render_base.drm_buf, buffer, planes, layers, image, index);
 
   if (wl_render_base.frame_callback_object[index].buffer)
     wl_buffer_destroy(wl_render_base.frame_callback_object[index].buffer);

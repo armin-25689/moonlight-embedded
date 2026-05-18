@@ -77,7 +77,8 @@ enum platform platform_check(char* name) {
   #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_DRM)
   const char *displayName = NULL;
   bool x11 = strcmp(name, "x11") == 0 || strcmp(name, "wayland") == 0 || strcmp(name, "gbm") == 0 || strcmp(name, "drm") == 0 || strcmp(name, "software") == 0 || strcmp(name, "X11") == 0 || strcmp(name, "wayland") == 0;
-  bool vaapi = strcmp(name, "x11_vaapi") == 0 || strcmp(name, "vaapi") == 0 || strcmp(name, "wayland_vaapi") == 0 || strcmp(name, "x11_vdpau") == 0 || strcmp(name, "drm_vaapi") == 0 || strcmp(name, "wayland_vaapi") == 0;
+  bool vaapi = strcmp(name, "x11_vaapi") == 0 || strcmp(name, "vaapi") == 0 || strcmp(name, "wayland_vaapi") == 0 || strcmp(name, "x11_vdpau") == 0 || strcmp(name, "drm_vaapi") == 0;
+  bool vulkan = strcmp(name, "x11_vulkan") == 0 || strcmp(name, "vulkan") == 0 || strcmp(name, "wayland_vulkan") == 0 || strcmp(name, "drm_vulkan") == 0;
   if (name != NULL) {
     switch (*name) {
     case 'w':
@@ -96,16 +97,20 @@ enum platform platform_check(char* name) {
       break;
     }
   }
-  if (std || x11 || vaapi) {
-    int init = x11_init(displayName, std || vaapi);
+  if (std || x11 || vaapi || vulkan) {
+    int init = x11_init(displayName, std ?
+                                            #ifdef HAVE_VAAPI
+                                            INIT_VAAPI
+                                            #else
+                                            INIT_VULKAN
+                                            #endif
+                                         : (vaapi ? INIT_VAAPI : (vulkan ? INIT_VULKAN : 0)));
     #ifdef HAVE_VAAPI
     if (init == INIT_VAAPI)
       return X11_VAAPI;
     #endif
-    #ifdef HAVE_VDPAU
-    if (init == INIT_VDPAU)
-      return X11_VDPAU;
-    #endif
+    if (init == INIT_VULKAN)
+      return X11_VULKAN;
     if (init > 0)
       return X11;
   }
@@ -159,10 +164,8 @@ DECODER_RENDERER_CALLBACKS* platform_get_video(enum platform system) {
   case X11_VAAPI:
     return &decoder_callbacks_x11_vaapi;
   #endif
-  #ifdef HAVE_VDPAU
-  case X11_VDPAU:
-    return &decoder_callbacks_x11_vdpau;
-  #endif
+  case X11_VULKAN:
+    return &decoder_callbacks_x11_vulkan;
   #endif
   #ifdef HAVE_IMX
   case IMX:
@@ -223,7 +226,7 @@ bool platform_prefers_codec(enum platform system, enum codecs codec) {
     case AML:
     case RK:
     case X11_VAAPI:
-    case X11_VDPAU:
+    case X11_VULKAN:
       return true;
     }
     return false;
@@ -231,6 +234,7 @@ bool platform_prefers_codec(enum platform system, enum codecs codec) {
     switch (system) {
     case X11:
     case X11_VAAPI:
+    case X11_VULKAN:
       return true;
     }
     return false;
@@ -254,8 +258,8 @@ char* platform_name(enum platform system) {
     return "X/Waylnd/GBM/DRM display System (software decoding)";
   case X11_VAAPI:
     return "X Window System (VAAPI)";
-  case X11_VDPAU:
-    return "X Window System (VDPAU)";
+  case X11_VULKAN:
+    return "X Window System (VULKAN)";
   case FAKE:
     return "Fake (no a/v output)";
   default:

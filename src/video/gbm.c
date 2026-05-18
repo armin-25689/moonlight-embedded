@@ -55,8 +55,10 @@ int generate_gbm_bo(int fd, struct _drm_buf gbm_buf[], int buffer_num, void *dis
       gbm_bo[i].handle[k] = gbm_bo_get_handle_for_plane(bo, k).u32;
       gbm_bo[i].pitch[k] = gbm_bo_get_stride_for_plane(bo, k);
       gbm_bo[i].offset[k] = gbm_bo_get_offset(bo, k);
-      gbm_bo[i].width[k] = (k != 0 && format == GBM_FORMAT_YUV420) ? (int)(width / 2) : width;
-      gbm_bo[i].height[k] = (k != 0 && (format == GBM_FORMAT_YUV420 || format == GBM_FORMAT_NV12)) ? (int)(height / 2) : height;
+      gbm_bo[i].width[k] = (k != 0 && (format == GBM_FORMAT_YUV420 ||
+                                       format == GBM_FORMAT_NV12)) ? (int)(width / 2) : width;
+      gbm_bo[i].height[k] = (k != 0 && (format == GBM_FORMAT_YUV420 ||
+                                        format == GBM_FORMAT_NV12)) ? (int)(height / 2) : height;
       gbm_bo[i].format[k] = format;
       gbm_bo[i].modifiers[k] = modifier;
       size[i] = gbm_bo[i].pitch[k] * gbm_bo[i].height[k];

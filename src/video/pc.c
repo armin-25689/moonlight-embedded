@@ -29,9 +29,6 @@
 
 #include "convert.h"
 #include "ffmpeg.h"
-#ifdef HAVE_VAAPI
-#include "ffmpeg_vaapi.h"
-#endif
 #include "display.h"
 #include "video.h"
 #include "render.h"
@@ -42,7 +39,7 @@
 #include "../loop.h"
 #include "../util.h"
 
-#define X11_VDPAU_ACCELERATION ENABLE_HARDWARE_ACCELERATION_1
+#define X11_VULKAN_ACCELERATION ENABLE_HARDWARE_ACCELERATION_1
 #define X11_VAAPI_ACCELERATION ENABLE_HARDWARE_ACCELERATION_2
 #define SLICES_PER_FRAME 4
 #define WAYLAND_WINDOW 0x20
@@ -67,6 +64,7 @@ static void *window = NULL;
 
 static int pipefd[2];
 static int windowpipefd[2];
+static const evwcode quitstate = QUITCODE;
 
 static int display_width = 0, display_height = 0;
 
@@ -120,14 +118,6 @@ typedef struct Setupargs {
   int drFlags;
 }SetupArgs;
 static SetupArgs ffmpegArgs;
-
-static ssize_t (*ffmpeg_export_images) (AVFrame *frame, struct Render_Image *image, void *descriptor, int render_type,
-                                        int(*render_map_buffer)(struct Source_Buffer_Info *buffer,
-                                                                int planes, int composeOrSeperate,
-                                                                void* *image, int index),
-                                        void(*render_unmap_buffer)(void **image, int planes));
-static void (*ffmpeg_free_images) (void* *renderImages, void *descriptor, void(*render_unmap_buffer)(void* *image, int planes));
-static void noop_void () {};
 
 static void clear_threads() {
   if (threads.created) {
@@ -204,24 +194,11 @@ static int window_op_handle (int pipefd, void *data) {
   return LOOP_OK;
 }
 
-static inline void clear_frame (void *image_data) {
-  struct Render_Image *image = (struct Render_Image *)image_data;
-  ffmpeg_free_images(image->images.image_data, image->images.descriptor, renderPtr->render_unmap_buffer);
-}
-
 static inline void* draw_frame (struct Render_Image *images, AVFrame* frame, int *res) {
-  int imageNum = 0;
-  imageNum = ffmpeg_export_images(frame, images, images->images.descriptor, renderPtr->render_type, renderPtr->render_map_buffer, renderPtr->render_unmap_buffer);
-  if (imageNum < 1) {
-    *res = LOOP_RETURN;
-    return NULL;
-  }
-
   if (firstDraw) {
     firstDraw = false;
     if (isYUV444 && (!(frame->linesize[0] == frame->linesize[2] && frame->linesize[1] == frame->linesize[0]))) {
       fprintf(stderr, "There is not yuv444 format. Please try remove -yuv444 option to draw video!\n");
-      ffmpeg_free_images(images->images.image_data, images->images.descriptor, renderPtr->render_unmap_buffer);
       *res = LOOP_RETURN;
       return NULL;
     }
@@ -238,7 +215,6 @@ static inline void* draw_frame (struct Render_Image *images, AVFrame* frame, int
     config.color_space = ffmpeg_get_frame_colorspace(frame);
     config.full_color_range = ffmpeg_is_frame_full_range(frame);
     ffmpeg_get_plane_info(frame, &config.pix_fmt, &config.plane_nums, &config.yuv_order);
-    config.image_nums = imageNum;
     for (int i = 0; i < config.plane_nums; i++) {
       config.linesize[i] = frame->linesize[i];
     }
@@ -265,7 +241,6 @@ static inline void* draw_frame (struct Render_Image *images, AVFrame* frame, int
 static inline void mv_vlist_display_to_decoder() {
   pthread_mutex_lock(&threads.mutex);
   void *image = VLIST_GET_DATA(display);
-  clear_frame(image);
   VLIST_ADD(decoder, VLIST_GET_FRAME(display), image);
   VLIST_DEL(display);
   if (threads.created)
@@ -396,6 +371,8 @@ static void* frame_handler (void *data) {
 
   done = true;
   sem_post(&threads.decoder_sem);
+  write(windowpipefd[1], &quitstate, sizeof(quitstate));
+
   return NULL;
 }
 
@@ -421,7 +398,6 @@ static void* display_handler (void *data) {
       while (VLIST_NUM(display) > 0) {
         AVFrame *middle_frame = VLIST_GET_FRAME(display);
         struct Render_Image *middle_image_data = (struct Render_Image *)VLIST_GET_DATA(display);
-        clear_frame(middle_image_data);
         VLIST_DEL(display);
         VLIST_ADD(decoder, middle_frame, middle_image_data);
         sem_post(&threads.decoder_sem);
@@ -448,7 +424,6 @@ static void* display_handler (void *data) {
     }
     if (last_image_data != image_data) {
       pthread_mutex_lock(&threads.mutex);
-      clear_frame(last_image_data);
       VLIST_ADD(decoder, last_frame, last_image_data);
       pthread_mutex_unlock(&threads.mutex);
       sem_post(&threads.decoder_sem);
@@ -463,6 +438,7 @@ static void* display_handler (void *data) {
 display_exit:
   done = true;
   sem_post(&threads.decoder_sem);
+  write(windowpipefd[1], &quitstate, sizeof(quitstate));
 
   return NULL;
 }
@@ -471,6 +447,8 @@ display_exit:
 int x11_submit_decode_unit(PDECODE_UNIT decodeUnit);
 static void* decoder_thread(void *data) {
   pthread_setname_np(threads.decoder_id, "m_decoder_t");
+  int laststatus = -3;
+  int times = 0;
 
   while (!done) {
 
@@ -479,9 +457,9 @@ static void* decoder_thread(void *data) {
       break;
 
     pthread_mutex_lock(&threads.mutex);
-    AVFrame *frame = VLIST_GET_FRAME(decoder);
+    struct Render_Image *image = (struct Render_Image *)VLIST_GET_DATA(decoder);
     pthread_mutex_unlock(&threads.mutex);
-    int err = ffmpeg_get_frame(frame, true);
+    int err = ffmpeg_get_frame(image, true);
     if (err == 0) {
       mv_vlist_decoder_to_render();
       continue;
@@ -502,15 +480,27 @@ static void* decoder_thread(void *data) {
     // blocking in x11_submit_decode_unit();
     int status = x11_submit_decode_unit(du);
     LiCompleteVideoFrame(handle, status);
+    if (status == DR_NEED_IDR) {
+      if (laststatus == status)
+        times++;
+      else
+        times = 0;
+      if (times > 3) {
+        fprintf(stderr, "Decode failed much times. Try specify -platform.\n");
+        break;
+      }
+    }
+    laststatus = status;
   }
 
   done = true;
   sem_post(&threads.render_sem);
+  write(windowpipefd[1], &quitstate, sizeof(quitstate));
 
   return NULL;
 }
 
-int x11_init(const char *displayName, bool vaapi) {
+int x11_init(const char *displayName, int hwType) {
   int res = 0;
   const char *displayDevice;
   // display and decoder may modify supportedVideoFormat
@@ -563,25 +553,9 @@ int x11_init(const char *displayName, bool vaapi) {
         continue;
       }
 
-      if (vaapi) {
-        if (renderPtr->is_hardaccel_support) {
-    #ifdef HAVE_VAAPI
-          int drm_fd = -1;
-          void *dis;
-          char drmNode[64] = {'\0'};
-          drm_fd = get_drm_render_fd(drmNode);
-          dis = (void *)&drm_fd;
-
-          if (!vaapi_validate_test(disPtr->name, renderPtr->name, dis)) {
-            renderPtr->is_hardaccel_support = false;
-          }
-          close(drm_fd);
-    #endif
-        }
-
-        if (renderPtr->is_hardaccel_support) {
+      if (hwType) {
+        if (renderPtr->is_hardaccel_support)
           break;
-        }
 
         renderPtr->render_destroy();
         renderPtr = NULL;
@@ -615,20 +589,18 @@ int x11_init(const char *displayName, bool vaapi) {
   // display must report useHdr to decide is support hdr display
   supportedHDR = disPtr->hdr_support;
 
-  if (renderPtr->is_hardaccel_support && vaapi) {
-  #ifdef HAVE_VAAPI
-    if (vaapi_init_lib(NULL) != -1) {
-      supportedVideoFormat &= vaapi_supported_video_format();
-      res = INIT_VAAPI;
+  if (renderPtr->is_hardaccel_support && hwType) {
+    if (ffmpeg_hw_init_lib(NULL, hwType) != -1) {
+      supportedVideoFormat &= ffmpeg_supported_video_format();
+      res = hwType;
       return res;
     }
-  #endif
   } else if (strcmp(disPtr->name, "drm") == 0) {
   // yuv444 is always supported by software decoder
     res = INIT_DRM;
   }
 
-  supportedVideoFormat &= software_supported_video_format();
+  supportedVideoFormat &= ffmpeg_supported_video_format();
 
   res = res != 0 ? res : INIT_EGL;
 
@@ -658,8 +630,8 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   }
 
   int avc_flags;
-  if (drFlags & X11_VDPAU_ACCELERATION) {
-    avc_flags = VDPAU_ACCELERATION;
+  if (drFlags & X11_VULKAN_ACCELERATION) {
+    avc_flags = VULKAN_ACCELERATION;
   }
   else if (drFlags & X11_VAAPI_ACCELERATION) {
     avc_flags = VAAPI_ACCELERATION;
@@ -683,7 +655,7 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   isTenBit = videoFormat & VIDEO_FORMAT_MASK_10BIT;
 
   // egl not need filter
-  if (renderPtr->render_type == EGL_RENDER)
+  if (renderPtr->render_type == EGL_RENDER || ffmpeg_decoder == VULKAN)
     ffmpeg_remove_filter(FILTER_FLAGS);
 
   struct Render_Init_Info renderParas = {0};
@@ -718,13 +690,35 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   loop_add_fd(windowpipefd[0], &window_op_handle, EPOLLIN);
   fcntl(windowpipefd[0], F_SETFL, O_NONBLOCK);
 
+  memset(renderPtr->images, 0, sizeof(struct Render_Image) * MAX_FB_NUM);
+
+  // file vlist quene
+  AVFrame **frames = ffmpeg_get_frames();
+  for (int i = 0; i < MAX_FB_NUM; i++) {
+    VLIST_ADD(decoder, frames[i], &renderPtr->images[i]);
+    renderPtr->images[i].images.free = renderPtr->render_unmap_buffer;
+    renderPtr->images[i].images.create = renderPtr->render_map_buffer;
+    renderPtr->images[i].sframe.frame = frames[i];
+    renderPtr->images[i].index = i;
+  }
+
+  evdev_trans_op_fd(windowpipefd[1]);
+  if (strcmp(disPtr->name, "x11") == 0 || strcmp(disPtr->name, "wayland") == 0)
+    evdev_pass_mouse_mode(true);
+
+  struct _WINDOW_PROPERTIES window_properties = {0};
+  window_properties.fd_p = &windowpipefd[1];
+  window_properties.configure = &window_configure;
+  disPtr->display_setup_post((void *)&window_properties);
+
   pthread_mutexattr_t mattr;
   pthread_mutexattr_init(&mattr);
   pthread_mutexattr_setprotocol(&mattr, PTHREAD_PRIO_INHERIT);
   pthread_mutex_init(&threads.mutex, &mattr);
   pthread_mutexattr_destroy(&mattr);
   if (!(CAPABILITY_DIRECT_SUBMIT & decoder_callbacks_x11.capabilities) ||
-      !(CAPABILITY_DIRECT_SUBMIT & decoder_callbacks_x11_vaapi.capabilities)) {
+      !(CAPABILITY_DIRECT_SUBMIT & decoder_callbacks_x11_vaapi.capabilities) ||
+      !(CAPABILITY_DIRECT_SUBMIT & decoder_callbacks_x11_vulkan.capabilities)) {
     threads.created = true;
     threads.frame_handler = frame_handler;
     threads.decoder_handler = decoder_thread;
@@ -756,43 +750,13 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
     fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
   }
 
-  evdev_trans_op_fd(windowpipefd[1]);
-  if (strcmp(disPtr->name, "x11") == 0 || strcmp(disPtr->name, "wayland") == 0)
-    evdev_pass_mouse_mode(true);
-
-  struct _WINDOW_PROPERTIES window_properties = {0};
-  window_properties.fd_p = &windowpipefd[1];
-  window_properties.configure = &window_configure;
- 
-  disPtr->display_setup_post((void *)&window_properties);
-
-  if (ffmpeg_decoder != SOFTWARE) {
-    ffmpeg_export_images = &vaapi_export_render_images;
-    ffmpeg_free_images = &vaapi_free_render_images;
-  } else {
-    ffmpeg_export_images = &software_store_frame;
-    ffmpeg_free_images = &noop_void;
-  }
-
-  memset(renderPtr->images, 0, sizeof(struct Render_Image) * MAX_FB_NUM);
-
-  // file vlist quene
-  void **vaapi_descriptors = vaapi_get_descriptors_ptr();
-  AVFrame **frames = ffmpeg_get_frames();
-  for (int i = 0; i < MAX_FB_NUM; i++) {
-    VLIST_ADD(decoder, frames[i], &renderPtr->images[i]);
-    renderPtr->images[i].images.descriptor = vaapi_descriptors[i];
-    renderPtr->images[i].sframe.frame = frames[i];
-    renderPtr->images[i].index = i;
-  }
-
   firstDraw = true;
 
   return 0;
 }
 
-int x11_setup_vdpau(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
-  return x11_setup(videoFormat, width, height, redrawRate, context, drFlags | X11_VDPAU_ACCELERATION);
+int x11_setup_vulkan(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
+  return x11_setup(videoFormat, width, height, redrawRate, context, drFlags | X11_VULKAN_ACCELERATION);
 }
 
 int x11_setup_vaapi(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
@@ -817,17 +781,26 @@ void x11_cleanup() {
     pipefd[0] = -1;
   }
 
-  for (int i = 0; i < MAX_FB_NUM; i++) {
-    ffmpeg_free_images(renderPtr->images[i].images.image_data, renderPtr->images[i].images.descriptor, renderPtr->render_unmap_buffer);
+  if (renderPtr) {
+    for (int i = 0; i < MAX_FB_NUM; i++) {
+      struct Render_Image *image = &renderPtr->images[i];
+      if (image->images.free && image->images.layers > 0) {
+        image->images.free(image->images.image_data, image->images.layers);
+      }
+    }
+    renderPtr->render_destroy();
   }
-  renderPtr->render_destroy();
 
-  struct _WINDOW_PROPERTIES window_properties = {0};
-  window_properties.configure = &window_configure;
-  disPtr->display_close_display((void *)&window_properties);
+  if (disPtr) {
+    struct _WINDOW_PROPERTIES window_properties = {0};
+    window_properties.configure = &window_configure;
+    disPtr->display_close_display((void *)&window_properties);
+  }
 
-  if (ffmpeg_decoder == SOFTWARE && strcmp(disPtr->name, renderPtr->name) == 0) {
-    convert_destroy();
+  if (disPtr && renderPtr) {
+    if (ffmpeg_decoder == SOFTWARE && strcmp(disPtr->name, renderPtr->name) == 0) {
+      convert_destroy();
+    }
   }
   ffmpeg_destroy();
 
@@ -850,16 +823,17 @@ int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   int err = ffmpeg_decode2(ffmpeg_buffer, length, decodeUnit->frameType == FRAME_TYPE_IDR ? AV_PKT_FLAG_KEY : 0);
   if (done)
     return DR_OK;
-  if (err < 0)
+  if (err < 0) {
     goto next_handle;
+  }
   
   pthread_mutex_lock(&threads.mutex);
-  AVFrame *frame = VLIST_GET_FRAME(decoder);
+  struct Render_Image *image = (struct Render_Image *)VLIST_GET_DATA(decoder);
   pthread_mutex_unlock(&threads.mutex);
-  if (frame == NULL)
+  if (image == NULL)
     goto decode_exit;
 
-  err = ffmpeg_get_frame(frame, true);
+  err = ffmpeg_get_frame(image, true);
   if (err < 0)
     goto decode_exit;
   else if (err > 0) {
@@ -890,8 +864,8 @@ DECODER_RENDERER_CALLBACKS decoder_callbacks_x11 = {
   .capabilities = CAPABILITY_SLICES_PER_FRAME(SLICES_PER_FRAME) | CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC | CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1 | CAPABILITY_DIRECT_SUBMIT,
 };
 
-DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vdpau = {
-  .setup = x11_setup_vdpau,
+DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vulkan = {
+  .setup = x11_setup_vulkan,
   .cleanup = x11_cleanup,
   .submitDecodeUnit = x11_submit_decode_unit,
   .capabilities = CAPABILITY_DIRECT_SUBMIT,

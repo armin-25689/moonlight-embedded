@@ -29,9 +29,7 @@
 #include <Limelight.h>
 #include "video_internal.h"
 #include "ffmpeg.h"
-#ifdef HAVE_VAAPI
-#include "ffmpeg_vaapi.h"
-#endif
+#include "ffmpeg_hw.h"
 #ifdef HAVE_FFMPEGFILTER
 #include "ffmpeg_filter.h"
 #endif
@@ -42,6 +40,7 @@ static const AVCodec* decoder;
 static AVCodecContext* decoder_ctx;
 static AVFrame** dec_frames;
 static int dec_frames_cnt;
+static int render_type;
 
 int supportedVideoFormat = 0;
 bool supportedHDR = false;
@@ -210,8 +209,8 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
     return -1;
   }
 
-  int render = perf_lvl & RENDER_MASK;
-  ffmpeg_decoder = perf_lvl & VAAPI_ACCELERATION ? VAAPI : SOFTWARE;
+  render_type = perf_lvl & RENDER_MASK;
+  ffmpeg_decoder = perf_lvl & VAAPI_ACCELERATION ? VAAPI : (perf_lvl & VULKAN_ACCELERATION ? VULKAN : SOFTWARE);
   if (wantYuv444 && !(videoFormat & VIDEO_FORMAT_MASK_YUV444)) {
     if (supportedVideoFormat) {
       printf("WARENING: Could not start yuv444 stream because of server support, fallback to yuv420 format,please try '-codec hevc -yuv444' option\n");
@@ -304,11 +303,14 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
         decoder_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
     }
 
-    #ifdef HAVE_VAAPI
-    if (ffmpeg_decoder == VAAPI) {
-      vaapi_init(decoder_ctx);
+    if (ffmpeg_decoder != SOFTWARE) {
+      if (hw_init(decoder_ctx) < 0) {
+        printf("Hardware accel decoder init failed,use software decoder instead.\n");
+        ffmpeg_decoder = SOFTWARE;
+        try = -1;
+        continue;
+      }
     }
-    #endif
 
     AVDictionary* *dictPtr = NULL;
     int err = avcodec_open2(decoder_ctx, decoder, dictPtr);
@@ -333,7 +335,7 @@ int ffmpeg_init(int videoFormat, int width, int height, int perf_lvl, int buffer
 
   // glteximage2d need 64 type align to render.just for egl with cpu render
   int widthMulti = 1;
-  if (ffmpeg_decoder == SOFTWARE && render == EGL_RENDER) {
+  if (ffmpeg_decoder == SOFTWARE && render_type == EGL_RENDER) {
     widthMulti = isYUV444 ? 64 : 128;
   }
   dec_frames_cnt = buffer_count;
@@ -352,7 +354,6 @@ void ffmpeg_free_frames(AVFrame **frames, int frame_count) {
     if (frames[i]) {
       av_frame_unref(frames[i]);
       av_frame_free(&frames[i]);
-      frames[i] = NULL;
     }
   }
   free(frames);
@@ -387,11 +388,11 @@ AVFrame **ffmpeg_alloc_frames(int dec_frames_cnt, enum AVPixelFormat pix_fmt, in
   return dec_frames;
 }
 
-
 void ffmpeg_stop_decoder () {
   AVFrame *frame = av_frame_alloc();
   avcodec_send_packet(decoder_ctx, NULL);
   while (avcodec_receive_frame(decoder_ctx, frame) != AVERROR_EOF);
+  av_frame_unref(frame);
   av_frame_free(&frame);
 #ifdef HAVE_FFMPEGFILTER
   ffmpeg_filter_stop_filte();
@@ -414,15 +415,21 @@ void ffmpeg_destroy(void) {
     ffmpeg_free_frames(dec_frames, dec_frames_cnt);
     dec_frames = NULL;
   }
-#ifdef HAVE_VAAPI
-  vaapi_destroy();
-#endif
+  hw_destroy();
   decoder_ctx = NULL;
   decoder = NULL;
 }
 
-int ffmpeg_get_frame(AVFrame *frame, bool native_frame) {
-  return ffmpeg_get_frame_function(frame, native_frame);
+int ffmpeg_get_frame(struct Render_Image* image, bool native_frame) {
+  AVFrame* frame = (AVFrame *)image->sframe.frame;
+  int ret = ffmpeg_get_frame_function(frame, native_frame);
+  if (ret == 0) {
+    if (ffmpeg_decoder == SOFTWARE)
+      image->sframe.frame_data = frame->data;
+    else
+      ret = hw_export_render_images(frame, image, render_type);
+  }
+  return ret;
 }
 
 // packets must be decoded in order
@@ -515,7 +522,7 @@ void ffmpeg_get_plane_info (const AVFrame *frame, enum AVPixelFormat *pix_fmt, i
   return;
 }
 
-int software_supported_video_format() {
+static inline int software_supported_video_format() {
   int format = 0;
   format |= VIDEO_FORMAT_MASK_H264;
   format |= VIDEO_FORMAT_MASK_H265;
@@ -523,6 +530,17 @@ int software_supported_video_format() {
   format |= VIDEO_FORMAT_MASK_10BIT;
   format |= VIDEO_FORMAT_MASK_YUV444;
   return format;
+}
+
+int ffmpeg_supported_video_format() {
+  if (ffmpeg_decoder == SOFTWARE)
+    return software_supported_video_format();
+  else
+    return hw_supported_video_format();
+}
+
+int ffmpeg_hw_init_lib(const char *device, int device_type) {
+  return hw_init_lib(device, device_type);
 }
 
 AVFrame ** ffmpeg_get_frames() {

@@ -135,7 +135,7 @@ platform.
 =item B<-render_style> [I<fixed/fill/fixed_fill>]
 
 Change video render style to selected option. Only platform 
-'software or vaapi' and not -hdr can work.
+'software or vaapi' and no -hdr can work.
 
 =item B<-rotate> [I<0/90/180/270>]
 
@@ -193,13 +193,14 @@ By default the gamecontrollerdb.txt provided by Moonlight Embedded is used.
 
 Select platform for audio and video output and input.
 <PLATFORM> can be vaapi, drm_vaapi, wayland_vaapi, x11_vaapi, software, drm, wayland, x11,
- rk or fake etc.
+vulkan, drm_vulkan, x11_vulkan, wayland_vulkan, rk or fake etc.
 
-Platform 'software/vaapi' will choose x11/wayland/gbm display automatically.
+Platform 'software/vaapi/vulkan' will choose x11/wayland/gbm display automatically.
 Platform 'x11[_vaapi]/wayland[_vaapi]/drm[_vaapi]' will force to use relative server.
 Platform 'drm_vaapi and wayland_vaapi' support hdr display with vaapi decoder.
 Platform 'drm and wayland' use libyuv or libswscale to complete color convert,
 and support hdr also.
+Platform 'vulkan' is experimental.
 
 =item B<-nounsupported>
 

@@ -148,8 +148,8 @@ static inline struct Filter_Desc* generate_vaapi_desc (AVFrame *frame, struct Ff
     gbrw = bt2020_gbrw;
   }
   if ((args->action & FILTER_TONEMAP_LIGHT) &&
-      (args->light.maxlight >= 100 &&
-       args->light.middlelight >= 50)) {
+      (args->light.maxlight > 0 &&
+       args->light.middlelight > 0)) {
     maxlight = args->light.maxlight;
     minlight = args->light.minlight;
     if (hdr_metadata_ref[10] == 0) {
@@ -427,9 +427,10 @@ static inline int ffmpeg_get_filte_frame(AVFrame *frame, AVCodecContext *decoder
 
 void ffmpeg_filter_destroy () {
   destroy_filter_graphs();
-  if (filter_frame)
+  if (filter_frame) {
+    av_frame_unref(filter_frame);
     av_frame_free(&filter_frame);
-  filter_frame = NULL;
+  }
   return;
 }
 
