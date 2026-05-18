@@ -170,7 +170,7 @@ static bool vulkan_validate_test(void *nativeDisplay) {
   if (av_hwdevice_ctx_create(&device_ref, AV_HWDEVICE_TYPE_VULKAN, NULL, NULL, 0) < 0)
     return false;
 
-  hwSupportedFormat = vulkan_get_format(device_ref);
+  vulkan_get_format(device_ref);
   int selected_fmt = get_format_from_slot(wantHdr, wantYuv444);
   if (selected_fmt != AV_PIX_FMT_NONE) {
       support = true;
