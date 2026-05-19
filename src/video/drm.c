@@ -58,7 +58,6 @@ struct _drm_render_config {
   int colorspace;
   int filter_action;
   AVFrame *frame;
-  uint32_t plane_format;
   uint64_t size[MAX_FB_NUM][MAX_PLANE_NUM];
 } static drm_config = {0};
 
@@ -232,7 +231,6 @@ static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int
     fprintf(stderr, "drm: not support pix format.\n");
     return 0;
   }
-  drm_config.plane_format = format;
   
   int handle_num;
   for (int i = 0; i < buffer_num; i++) {
@@ -618,80 +616,71 @@ static int drm_render_init(struct Render_Init_Info *paras) {
 static void drm_render_destroy() {};
 
 static int get_config_from_frame(struct Render_Config *config) {
+  uint32_t format = 0;
   bool need_change_color_config = false;
   drm_config.src_fmt = config->pix_fmt;
   drm_config.colorspace = -1;
 
-  switch (config->pix_fmt) {
-  case AV_PIX_FMT_YUV444P:
-  case AV_PIX_FMT_YUVJ444P:
-    drm_config.dst_fmt = AV_PIX_FMT_BGR0;
-    break;
-  case AV_PIX_FMT_YUV420P:
-  case AV_PIX_FMT_YUVJ420P:
-    drm_config.dst_fmt = AV_PIX_FMT_NV12;
-    need_change_color_config = true;
-    break;
-  case AV_PIX_FMT_VUYX:
-  case AV_PIX_FMT_XV30:
-  case AV_PIX_FMT_NV12:
-  case AV_PIX_FMT_P010:
-    drm_config.dst_fmt = config->pix_fmt;
-    need_change_color_config = true;
-    break;
-  case AV_PIX_FMT_YUV444P10:
-    drm_config.dst_fmt = AV_PIX_FMT_X2RGB10LE;
-    break;
-  case AV_PIX_FMT_YUV420P10:
-    need_change_color_config = true;
-    drm_config.dst_fmt = AV_PIX_FMT_P010;
-    break;
-  default:
-    drm_config.dst_fmt = config->pix_fmt;
-
-    int bpp, multi, planen;
-    bool found = false;
-    uint32_t dfmt = translate_format_to_drm(config->pix_fmt, &bpp, &multi, &planen);
-    if (dfmt) {
-      for (int i = 0; i < NEEDED_DRM_FORMAT_NUM; i++) {
-        if (drmInfoPtr->plane_formats[i] == dfmt) {
-          found = true;
-          break;
-        }
-      }
-    }
-    if (!found) {
+  if (drm_render.decoder_type == SOFTWARE) {
+    switch (config->pix_fmt) {
+    case AV_PIX_FMT_YUV444P:
+    case AV_PIX_FMT_YUVJ444P:
+      drm_config.dst_fmt = AV_PIX_FMT_BGR0;
+      break;
+    case AV_PIX_FMT_YUV420P:
+    case AV_PIX_FMT_YUVJ420P:
+      drm_config.dst_fmt = AV_PIX_FMT_NV12;
+      need_change_color_config = true;
+      break;
+    case AV_PIX_FMT_YUV444P10:
+      drm_config.dst_fmt = AV_PIX_FMT_X2RGB10LE;
+      break;
+    case AV_PIX_FMT_YUV420P10:
+      need_change_color_config = true;
+      drm_config.dst_fmt = AV_PIX_FMT_P010;
+      break;
+    default:
       fprintf(stderr, "DRM: ffmpeg pix format(%d) is not supported.\n", config->pix_fmt);
       return -1;
     }
-    break;
-  }
-  if (drm_config.filter_action & FILTER_SCALE_FMT && drm_render.decoder_type == SOFTWARE) {
-    need_change_color_config = false;
-#ifdef HAVE_FFMPEGFILTER
-    if (ffmpeg_filters_args.pix_fmt > 0) {
-      drm_config.dst_fmt = ffmpeg_filters_args.pix_fmt;
-    }
-    else
-#endif
-    {
-      if (useHdr)
-        drm_config.dst_fmt = FILTER_DEFAULT_HDR_FMT;
+
+    if (drm_config.filter_action & FILTER_SCALE_FMT) {
+      need_change_color_config = false;
+  #ifdef HAVE_FFMPEGFILTER
+      if (ffmpeg_filters_args.pix_fmt > 0) {
+        drm_config.dst_fmt = ffmpeg_filters_args.pix_fmt;
+      }
       else
-        drm_config.dst_fmt = FILTER_DEFAULT_FMT;
+  #endif
+      {
+        if (useHdr)
+          drm_config.dst_fmt = FILTER_DEFAULT_HDR_FMT;
+        else
+          drm_config.dst_fmt = FILTER_DEFAULT_FMT;
+      }
     }
-  }
-  int flags = 0;
-  if (drm_render.decoder_type == SOFTWARE) {
+
+    int flags = 0;
     drm_clear_image_cache(drmInfoPtr->fd, drm_buf, MAX_FB_NUM);
-    if (drm_generate_drm_buf(drmInfoPtr->fd, drm_config.dst_fmt, config->width, config->height, flags, drm_buf, MAX_FB_NUM) == 0) {
-      fprintf(stderr, "Could not generate buf.\n");
-      return -1;
+    format = drm_generate_drm_buf(drmInfoPtr->fd, drm_config.dst_fmt, config->width, config->height, flags, drm_buf, MAX_FB_NUM);
+  }
+  else {
+    switch (config->pix_fmt) {
+    case AV_PIX_FMT_X2RGB10LE:
+    case AV_PIX_FMT_BGR0:
+    case AV_PIX_FMT_BGRA:
+      break;
+    default:
+      need_change_color_config = true;
+      break;
     }
+
+    drm_config.dst_fmt = config->pix_fmt;
+    format = translate_format_to_drm(drm_config.dst_fmt, &drm_config.bpp, &drm_config.buffer_multi, &drm_config.plane_num);
   }
 
-  if (drm_get_plane_info(drmInfoPtr, drm_config.plane_format) < 0) {
-    fprintf(stderr, "Could not find supported format with planes.\n");
+  if (format == 0 || drm_get_plane_info(drmInfoPtr, format) < 0) {
+    fprintf(stderr, "DRM: could not find supported format with ffmpeg pix format(%d).\n", drm_config.dst_fmt);
     return -1;
   }
 
