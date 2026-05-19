@@ -1090,44 +1090,31 @@ static inline int store_objects(int index) {
 
 static int wl_sync_frame_config(struct Render_Config *config) {
   int dst_fmt = -1;
-  bool need_change_color_config = false;
   bool full_color_range = config->full_color_range;
   int colorspace = config->color_space;
-
-  switch (config->pix_fmt) {
-  case AV_PIX_FMT_YUV444P:
-  case AV_PIX_FMT_YUVJ444P:
-  case AV_PIX_FMT_YUV420P:
-  case AV_PIX_FMT_YUVJ420P:
-    dst_fmt = AV_PIX_FMT_BGR0;
-    break;
-  case AV_PIX_FMT_YUV444P10:
-  case AV_PIX_FMT_YUV420P10:
-    dst_fmt = AV_PIX_FMT_X2RGB10LE;
-    break;
-  case AV_PIX_FMT_VUYX:
-  case AV_PIX_FMT_XV30:
-  case AV_PIX_FMT_NV12:
-  case AV_PIX_FMT_P010:
-    dst_fmt = config->pix_fmt;
-    need_change_color_config = true;
-    break;
-  default:
-    dst_fmt = config->pix_fmt;
-    break;
-  }
-  wl_render_base.dst_fmt = dst_fmt;
-  
   wl_render_base.lastcolorspace = -1;
-  if (need_change_color_config) {
-    uint32_t color_space = colorspace == COLORSPACE_REC_2020 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT2020 : (colorspace == COLORSPACE_REC_709 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT709 : WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT601);
-    uint32_t range = full_color_range ? WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_FULL : WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_LIMITED;
-    wl_render_base.lastrange = range;
-    wl_render_base.lastcolorspace = colorspace;
-    wp_color_representation_surface_v1_set_coefficients_and_range(wl_render_base.wp_representation_surface, color_space, range);
-  }
 
-  if (wayland_render.decoder_type == SOFTWARE) {
+  if (wayland_render.decoder_type != SOFTWARE) {
+    switch (config->pix_fmt) {
+    case AV_PIX_FMT_X2RGB10LE:
+    case AV_PIX_FMT_BGR0:
+    case AV_PIX_FMT_BGRA:
+      break;
+    default:;
+      uint32_t color_space = colorspace == COLORSPACE_REC_2020 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT2020 : (colorspace == COLORSPACE_REC_709 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT709 : WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT601);
+      uint32_t range = full_color_range ? WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_FULL : WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_LIMITED;
+      wl_render_base.lastrange = range;
+      wl_render_base.lastcolorspace = colorspace;
+      wp_color_representation_surface_v1_set_coefficients_and_range(wl_render_base.wp_representation_surface, color_space, range);
+      break;
+    }
+    dst_fmt = config->pix_fmt;
+  } else {
+    if (useHdr)
+      dst_fmt = AV_PIX_FMT_X2RGB10LE;
+    else
+      dst_fmt = AV_PIX_FMT_BGR0;
+
     wl_render_base.plane_num = generate_gbm_bo(wl_render_base.drm_fd, wl_render_base.drm_buf, MAX_FB_NUM, wl_render_base.gbm_device, config->width, config->height, dst_fmt, wl_render_base.size);
     if (wl_render_base.plane_num < 1) {
       fprintf(stderr, "Could not generate drm buf.\n");
@@ -1138,6 +1125,7 @@ static int wl_sync_frame_config(struct Render_Config *config) {
         return -1;
     }
   }
+  wl_render_base.dst_fmt = dst_fmt;
 
   if (wl_render_base.supported_format) {
     int found = -1;
