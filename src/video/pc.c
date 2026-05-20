@@ -58,6 +58,7 @@ static bool firstDraw = true;
 
 static void* ffmpeg_buffer = NULL;
 static size_t ffmpeg_buffer_size = 0;
+static struct Image_Pool image_pools = {0};
 
 static void *display = NULL;
 static void *window = NULL;
@@ -692,10 +693,18 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
 
   memset(renderPtr->images, 0, sizeof(struct Render_Image) * MAX_FB_NUM);
 
+  image_pools.image_bufs = calloc(MAX_POOLS_COUNT, sizeof(void *) * MAX_PLANE_NUM);
+  image_pools.frame_bufs = calloc(MAX_POOLS_COUNT, sizeof(uint8_t *));
+  if (image_pools.image_bufs == NULL || image_pools.frame_bufs == NULL) {
+    fprintf(stderr, "Alloc pools for image pools failed.\n");
+    return -1;
+  }
   // file vlist quene
   AVFrame **frames = ffmpeg_get_frames();
   for (int i = 0; i < MAX_FB_NUM; i++) {
     VLIST_ADD(decoder, frames[i], &renderPtr->images[i]);
+    renderPtr->images[i].images.pools = &image_pools;
+    renderPtr->images[i].images.image_data = image_pools.image_bufs[i];
     renderPtr->images[i].images.free = renderPtr->render_unmap_buffer;
     renderPtr->images[i].images.create = renderPtr->render_map_buffer;
     renderPtr->images[i].sframe.frame = frames[i];
@@ -782,10 +791,11 @@ void x11_cleanup() {
   }
 
   if (renderPtr) {
-    for (int i = 0; i < MAX_FB_NUM; i++) {
-      struct Render_Image *image = &renderPtr->images[i];
-      if (image->images.free && image->images.layers > 0) {
-        image->images.free(image->images.image_data, image->images.layers);
+    struct Render_Image *image = &renderPtr->images[0];
+    int count = image_pools.count > MAX_FB_NUM ? image_pools.count : MAX_FB_NUM;
+    if (image->images.free && image->images.layers > 0) {
+      for (int i = 0; i < count; i++) {
+          image->images.free(image_pools.image_bufs[i], image->images.layers);
       }
     }
     renderPtr->render_destroy();
@@ -803,6 +813,14 @@ void x11_cleanup() {
     }
   }
   ffmpeg_destroy();
+
+  if (image_pools.image_bufs)
+    free(image_pools.image_bufs);
+  if (image_pools.frame_bufs)
+    free(image_pools.frame_bufs);
+  memset(&image_pools, 0, sizeof(image_pools));
+  if (renderPtr)
+    memset(renderPtr->images, 0, sizeof(struct Render_Image) * MAX_FB_NUM);
 
   disPtr = NULL;
   renderPtr = NULL;

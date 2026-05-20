@@ -105,11 +105,6 @@ static struct zwp_relative_pointer_manager_v1 *zwp_relative_pointer_manager = NU
 static struct zwp_relative_pointer_v1 *zwp_relative_pointer = NULL;
 // for render
 #define COMMIT_TIME 2000000
-struct _frame_callback_object {
-  AVFrame *frame;
-  struct Render_Image *image;
-  struct wl_buffer *buffer;
-};
 struct _wl_render {
   struct wp_presentation *wp_presentation;
   struct wp_color_representation_manager_v1 *wp_color_representation;
@@ -122,7 +117,7 @@ struct _wl_render {
   struct _drm_buf drm_buf[MAX_FB_NUM];
   bool is_wl_render;
   void *gbm_device;
-  struct _frame_callback_object frame_callback_object[MAX_FB_NUM];
+  struct wl_buffer *buffers[MAX_FB_NUM];
   struct {
     bool output_primaries_bt2020;
     bool set_luminances;
@@ -146,7 +141,7 @@ struct _wl_render {
   int lastrange;
   int lastcolorspace;
   int filter_action;
-  int (*wl_set_hdr_metadata) (int index);
+  int (*wl_set_hdr_metadata) (int index, AVFrame *frame);
 } static wl_render_base = {0};
 struct _dm_table {
   uint32_t format;
@@ -774,11 +769,11 @@ struct DISPLAY_CALLBACK display_callback_wayland = {
 };
 
 #if defined(HAVE_DRM)
-static int set_hdr_static(int index) {
+static int set_hdr_static(int index, AVFrame* frame) {
 
   static bool hdr_active = false;
   bool last_stat = hdr_active;
-  if (!ffmpeg_has_hdr_metadata(wl_render_base.frame_callback_object[index].image->sframe.frame)) {
+  if (!ffmpeg_has_hdr_metadata(frame)) {
     hdr_active = false;
   }
   else {
@@ -786,7 +781,7 @@ static int set_hdr_static(int index) {
   }
 
   if (wl_render_base.lastcolorspace >= 0) {
-    int colorspace = ffmpeg_get_frame_colorspace(wl_render_base.frame_callback_object[index].image->sframe.frame);
+    int colorspace = ffmpeg_get_frame_colorspace(frame);
     if (colorspace != wl_render_base.lastcolorspace) {
       uint32_t color_space = colorspace == COLORSPACE_REC_2020 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT2020 : (colorspace == COLORSPACE_REC_709 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT709 : WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT601);
       wp_color_representation_surface_v1_set_coefficients_and_range(wl_render_base.wp_representation_surface, color_space, wl_render_base.lastrange);
@@ -848,14 +843,14 @@ static int wl_render_create(struct Render_Init_Info *paras) {
   return 0;
 }
 
-static inline int commit_surface(int index, int width, int height) {
-  struct wl_buffer *buffer = wl_render_base.frame_callback_object[index].buffer;
+static inline int commit_surface(int index, int width, int height, AVFrame* frame) {
+  struct wl_buffer *buffer = wl_render_base.buffers[index];
   if (buffer == NULL) {
     fprintf(stderr, "Invalid buffer.\n");
     return -1;
   }
 
-  wl_render_base.wl_set_hdr_metadata(index);
+  wl_render_base.wl_set_hdr_metadata(index, frame);
 
   wl_surface_attach(wlsurface, buffer, 0, 0);
   wl_surface_damage_buffer(wlsurface, 0, 0, width, height);
@@ -964,12 +959,16 @@ static void inline wait_to_commit() {
 }
 
 static int wl_commit_loop(void *data, int width, int height, int index) {
+  struct Render_Image *image = (struct Render_Image *)data;
   static uint32_t time = 0;
   struct wp_presentation_feedback *pr = NULL;
 
+  if (image == NULL)
+    return -1;
+
   time++;
 
-  int ret = commit_surface(index, wl_render_base.drm_buf[index].width[0], wl_render_base.drm_buf[index].height[0]);
+  int ret = commit_surface(index, wl_render_base.drm_buf[index].width[0], wl_render_base.drm_buf[index].height[0], image->sframe.frame);
   if (ret < 0)
     return -1;
 
@@ -1041,10 +1040,10 @@ static void wl_render_destroy() {
   if (wl_render_base.supported_format)
     free(wl_render_base.supported_format);
 
-  for (int i = 0; i < MAX_FB_NUM; i++) {
-    if (wl_render_base.frame_callback_object[i].buffer) {
-      wl_buffer_destroy(wl_render_base.frame_callback_object[i].buffer);
-      wl_render_base.frame_callback_object[i].buffer = NULL;
+  if (wayland_render.decoder_type == SOFTWARE) {
+    for (int i = 0; i < MAX_FB_NUM; i++) {
+      if (wl_render_base.buffers[i])
+        wl_buffer_destroy(wl_render_base.buffers[i]);
     }
   }
 
@@ -1075,17 +1074,6 @@ static inline struct wl_buffer *wl_import_dmabuf(struct _drm_buf *drm_buf) {
   }
 
   return buffer;
-}
-
-static inline int store_objects(int index) {
-  struct wl_buffer *buffer = wl_import_dmabuf(&wl_render_base.drm_buf[index]);
-  if (buffer == NULL) {
-    fprintf(stderr, "Create wayland linux dmabuf failed.\n");
-    return -1;
-  }
-  wl_render_base.frame_callback_object[index].buffer = buffer;
-
-  return 0;
 }
 
 static int wl_sync_frame_config(struct Render_Config *config) {
@@ -1120,9 +1108,13 @@ static int wl_sync_frame_config(struct Render_Config *config) {
       fprintf(stderr, "Could not generate drm buf.\n");
       return -1;
     }
-    for (int buffer = 0; buffer < MAX_FB_NUM; buffer++) {
-      if (store_objects(buffer) < 0)
+    for (int bufferc = 0; bufferc < MAX_FB_NUM; bufferc++) {
+      struct wl_buffer *buffer = wl_import_dmabuf(&wl_render_base.drm_buf[bufferc]);
+      if (buffer == NULL) {
+        fprintf(stderr, "Create wayland linux dmabuf failed.\n");
         return -1;
+      }
+      wl_render_base.buffers[bufferc] = buffer;
     }
   }
   wl_render_base.dst_fmt = dst_fmt;
@@ -1143,39 +1135,45 @@ static int wl_sync_frame_config(struct Render_Config *config) {
 
 static int wl_import_image(struct Source_Buffer_Info *buffer, int planes, int layers, void* *image, int index) {
   wl_render_base.plane_num = planes;
-  int geted_index = drm_import_hw_buffer (wl_render_base.drm_fd, wl_render_base.drm_buf, buffer, planes, layers, image, index);
+  drm_import_hw_buffer (wl_render_base.drm_fd, wl_render_base.drm_buf, buffer, planes, layers, image, index);
 
-  if (wl_render_base.frame_callback_object[index].buffer)
-    wl_buffer_destroy(wl_render_base.frame_callback_object[index].buffer);
-  wl_render_base.frame_callback_object[index].buffer = NULL;
-  if (store_objects(index) < 0)
+  struct wl_buffer *wlbuffer = wl_import_dmabuf(&wl_render_base.drm_buf[index]);
+  if (wlbuffer == NULL) {
+    fprintf(stderr, "Create wayland linux dmabuf failed.\n");
     return -1;
+  }
 
-  return geted_index;
+  image[0] = (void *) wlbuffer;
+
+  return index;
 }
 
-static void wl_free_image(void* *image, int planes) {};
+static void wl_free_image(void* *image, int planes) {
+  if (image[0]) {
+    struct wl_buffer *buffer = (struct wl_buffer *) image[0];
+    wl_buffer_destroy(buffer);
+    image[0] = NULL;
+  }
+
+  return;
+}
 
 static int wl_draw(struct Render_Image *image) {
   int ret = -1;
   const int handle_num = 1;
   uint64_t map_offset[MAX_PLANE_NUM] = {0};
 
-  if (ffmpeg_decoder == SOFTWARE) {
+  if (wayland_render.decoder_type == SOFTWARE) {
     ret = gbm_convert_image(image, wl_render_base.drm_buf, wl_render_base.drm_buf[image->index].fd[0], handle_num, wl_render_base.plane_num, wl_render_base.dst_fmt, wl_render_base.size, map_offset);
   } else {
     ret = image->index;
+    wl_render_base.buffers[ret] = (struct wl_buffer *)image->images.image_data[0];
+    if (wl_render_base.buffers[ret] == NULL)
+      ret = -1;
   }
 
-  if (ret < 0) {
+  if (ret < 0)
     fprintf(stderr, "wl draw failed.");
-    return ret;
-  }
-
-  if (wl_render_base.frame_callback_object[ret].image != image) {
-    wl_render_base.frame_callback_object[ret].frame = image->sframe.frame;
-    wl_render_base.frame_callback_object[ret].image = image;
-  }
 
   return ret;
 }

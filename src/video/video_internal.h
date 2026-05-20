@@ -34,6 +34,7 @@ enum decoders {SOFTWARE = 0, VULKAN, VAAPI};
 
 #define MAX_FB_NUM 3
 #define MAX_PLANE_NUM 4
+#define MAX_POOLS_COUNT 30
 
 #define GET_FB_NEXT(nowindex, maxnum) ((nowindex) >= (maxnum - 1) ? 0 : (nowindex + 1))
 #define MV_FB_MEM_SIMPLE(object, size) \
@@ -95,10 +96,17 @@ struct Source_Buffer_Info {
   void *data;
 };
 
+struct Image_Pool {
+  void *(*image_bufs)[MAX_PLANE_NUM];
+  uint8_t **frame_bufs;
+  int next;
+  int count;
+};
+
 struct Render_Image {
   struct {
-    void *image_data[MAX_PLANE_NUM];
-    void *descriptor;
+    struct Image_Pool *pools;
+    void **image_data;
     struct Source_Buffer_Info buf_info;
     int layers;
     int planes;

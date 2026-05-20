@@ -60,10 +60,6 @@ struct _drm_render_config {
   AVFrame *frame;
   uint64_t size[MAX_FB_NUM][MAX_PLANE_NUM];
 } static drm_config = {0};
-
-static int (*drm_draw_function) (struct Render_Image *image);
-static int drm_copy (struct Render_Image *image);
-static int drm_direct(struct Render_Image *image) { return image->index; };
 // render
 
 struct Tty_Stat {
@@ -344,11 +340,6 @@ static int drm_setup(int width, int height, int fps, int drFlags) {
 
   if (drFlags & DRM_RENDER) {
     gbm_close_display (-1, NULL, MAX_FB_NUM, &gbm_display, NULL);
-    if (drFlags & ENABLE_HARDWARE_ACCELERATION_2) {
-      drm_draw_function = &drm_direct;
-    } else {
-      drm_draw_function = &drm_copy;
-    }
   } else {
     if ((drFlags & EGL_RENDER) == 0) return -1;
     uint32_t format = wantHdr ? DEFAULT_FORMAT_10BIT : DEFAULT_FORMAT;
@@ -404,17 +395,12 @@ static void drm_clear_image_cache (int drm_fd, struct _drm_buf *drm_buf, int buf
     if (drm_buf[i].fb_id != 0) {
       drmModeRmFB(drm_fd, drm_buf[i].fb_id);
       for (int j = 0; j < drm_config.handle_num; j++) {
-        if (drm_render.decoder_type == SOFTWARE) {
-          close(drm_buf[i].fd[j]);
-          if (drm_buf_dataptr[i][j] != 0 && drm_config.size[i][j] > 0)
-            munmap(drm_buf_dataptr[i][j], drm_config.size[i][j]);
-          struct drm_mode_destroy_dumb destroyBuf = {0};
-          destroyBuf.handle = drm_buf[i].handle[j];
-          drmIoctl(drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroyBuf);
-        }
-        else {
-          drmCloseBufferHandle(drm_fd, drm_buf[i].handle[j]);
-        }
+        close(drm_buf[i].fd[j]);
+        if (drm_buf_dataptr[i][j] != 0 && drm_config.size[i][j] > 0)
+          munmap(drm_buf_dataptr[i][j], drm_config.size[i][j]);
+        struct drm_mode_destroy_dumb destroyBuf = {0};
+        destroyBuf.handle = drm_buf[i].handle[j];
+        drmIoctl(drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroyBuf);
       }
       memset(drm_buf_dataptr[i], 0, sizeof(drm_buf_dataptr[i]));
       memset(&drm_buf[i], 0, sizeof(drm_buf[i]));
@@ -428,8 +414,10 @@ static void drm_cleanup (void *data) {
   hdr_blob = 0;
   if (!tty_stat.out)
     drm_restore_display();
-  if (gbm_display == NULL)
-    drm_clear_image_cache(drmInfoPtr->fd, drm_buf, MAX_FB_NUM);
+  if (gbm_display == NULL) {
+    if (drm_render.decoder_type == SOFTWARE)
+      drm_clear_image_cache(drmInfoPtr->fd, drm_buf, MAX_FB_NUM);
+  }
   else
     gbm_close_display (drmInfoPtr->fd, drm_buf, MAX_FB_NUM, &gbm_display, &gbm_window);
   if (connPtr != NULL)
@@ -598,23 +586,6 @@ struct DISPLAY_CALLBACK display_callback_drm = {
   .renders = DRM_RENDER | EGL_RENDER,
 };
 
-static int drm_render_create(struct Render_Init_Info *paras) { return 0; };
-
-static int drm_render_init(struct Render_Init_Info *paras) {
-  if (paras->use_filter > 0) {
-#ifdef HAVE_FFMPEGFILTER
-    if ((paras->use_filter & FILTER_SCALE_SIZE) && drm_render.decoder_type != SOFTWARE) {
-      ffmpeg_filters_args.video_size.width = drmInfoPtr->width;
-      ffmpeg_filters_args.video_size.height = drmInfoPtr->height;
-    }
-#endif
-    drm_config.filter_action = paras->use_filter;
-  }
-  return 0;
-}
-
-static void drm_render_destroy() {};
-
 static int get_config_from_frame(struct Render_Config *config) {
   uint32_t format = 0;
   bool need_change_color_config = false;
@@ -721,63 +692,63 @@ int drm_import_hw_buffer (int fd, struct _drm_buf *drm_buf, struct Source_Buffer
 static inline void drm_free_hw_buffer (int fd, void* *image, int handles) {
   if (image[0] == NULL) return;
 
-  uint32_t fb_id = *((uint32_t *)image[0]);
-  uint32_t *handle = ((uint32_t *)image[1]);
+  uint32_t fb_id = (uint32_t)(uintptr_t)image[3];
 
   if (fb_id != 0) {
     drmModeRmFB(fd, fb_id);
+    image[3] = NULL;
   }
-  if (handle) {
-    for (int i = 0; i < handles; i++) {
-      if (handle[i])
-        drmCloseBufferHandle(fd, handle[i]);
+  for (int i = 0; i < 3; i++) {
+    if (image[i]) {
+      drmCloseBufferHandle(fd, (uint32_t)(uintptr_t)image[i]);
+      image[i] = NULL;
     }
   }
-  *((uint32_t *)image[0]) = 0;
-  memset(image[1], 0, sizeof(drm_buf[0].handle));
 
   return;
 }
 
 static int drm_import_buffer (struct Source_Buffer_Info *buffer, int planes, int layers, void* *image, int index) {
-  if (drm_import_hw_buffer(drmInfoPtr->fd, drm_buf, buffer, planes, layers, image, index) < 0) {
-    drm_free_hw_buffer(drmInfoPtr->fd, image, planes);
+  if (layers > 3) {
+    fprintf(stderr, "So many layers(%d) for drm.\n", layers);
     return -1;
   }
+  drm_import_hw_buffer (-1, drm_buf, buffer, planes, layers, NULL, index);
 
+  uint32_t fb_id = 0;
+  uint32_t handle[MAX_PLANE_NUM] = {0};
   for (int i = 0; i < layers; i++) {
-    if (drmPrimeFDToHandle(drmInfoPtr->fd, drm_buf[index].fd[i], &drm_buf[index].handle[i]) < 0) {
+    if (drmPrimeFDToHandle(drmInfoPtr->fd, buffer->fd[i], &handle[i]) < 0) {
       for (int k = 0; k < i; k++) {
-        drmCloseBufferHandle(drmInfoPtr->fd, drm_buf[index].handle[k]);
+        drmCloseBufferHandle(drmInfoPtr->fd, handle[k]);
       }
-      memset(drm_buf[index].handle, 0, sizeof(drm_buf[index].handle));
-      fprintf(stderr, "Could not success drmPrimeFDToHandle(%d, %d, %d)\n", drmInfoPtr->fd, drm_buf[index].fd[i], i);
+      fprintf(stderr, "Could not success drmPrimeFDToHandle(%d, %d, %d)\n", drmInfoPtr->fd, buffer->fd[i], i);
       return -1;
     }
   }
   if (layers == 1) {
     for (int k = 1; k < planes; k++) {
-      drm_buf[index].handle[k] = drm_buf[index].handle[0];
+      handle[k] = handle[0];
     }
   }
-  uint32_t dformat = drm_buf[index].format[0] == DRM_FORMAT_Y410 ? DRM_FORMAT_XVYU2101010 : drm_buf[index].format[0];
-  int flags = drm_buf[index].modifiers[0] != DRM_FORMAT_MOD_INVALID ? DRM_MODE_FB_MODIFIERS : 0;
-  drmModeAddFB2WithModifiers(drmInfoPtr->fd, drm_buf[index].width[0], drm_buf[index].height[0], dformat, drm_buf[index].handle, drm_buf[index].pitch, drm_buf[index].offset, drm_buf[index].modifiers, &drm_buf[index].fb_id, flags);
-  if (drm_buf[index].fb_id == 0) {
+  uint32_t dformat = buffer->format[0] == DRM_FORMAT_Y410 ? DRM_FORMAT_XVYU2101010 : buffer->format[0];
+  int flags = buffer->modifiers[0] != DRM_FORMAT_MOD_INVALID ? DRM_MODE_FB_MODIFIERS : 0;
+  drmModeAddFB2WithModifiers(drmInfoPtr->fd, buffer->width[0], buffer->height[0], dformat, handle, buffer->stride, buffer->offset, buffer->modifiers, &fb_id, flags);
+  if (fb_id == 0) {
     perror("Failed to create framebuffer from drm buffer object: ");
-    for (int i = 0; i < 4; i++) {
-      if (drm_buf[index].handle[i] > 0)
-        drmCloseBufferHandle(drmInfoPtr->fd, drm_buf[index].handle[i]);
+    for (int i = 0; i < layers; i++) {
+      if (handle[i] > 0)
+        drmCloseBufferHandle(drmInfoPtr->fd, handle[i]);
     }
-    memset(drm_buf[index].handle, 0, sizeof(drm_buf[index].handle));
     return -1;
   }
 
   drm_config.handle_num = layers;
   drm_config.plane_num = planes;
-  image[0] = &drm_buf[index].fb_id;
-  image[1] = drm_buf[index].handle;
-
+  image[3] = (void *)(uintptr_t)fb_id;
+  for (int i = 0; i < layers; i++) {
+    image[i] = (void *)(uintptr_t)handle[i];
+  }
 
   return index;
 }
@@ -787,9 +758,39 @@ static void drm_free_buffer (void* *image, int handles) {
   return;
 }
 
+static int (*drm_draw_function) (struct Render_Image *image);
+
+static int drm_direct(struct Render_Image *image) {
+  uint32_t fb_id = (uint32_t)(uintptr_t)image->images.image_data[3];
+  drm_buf[image->index].fb_id = fb_id;
+  return image->index;
+}
 static int drm_draw(struct Render_Image *image) { 
   return drm_draw_function(image);
 }
+
+static int drm_render_create(struct Render_Init_Info *paras) { return 0; };
+
+static int drm_render_init(struct Render_Init_Info *paras) {
+  if (paras->use_filter > 0) {
+#ifdef HAVE_FFMPEGFILTER
+    if ((paras->use_filter & FILTER_SCALE_SIZE) && drm_render.decoder_type != SOFTWARE) {
+      ffmpeg_filters_args.video_size.width = drmInfoPtr->width;
+      ffmpeg_filters_args.video_size.height = drmInfoPtr->height;
+    }
+#endif
+    drm_config.filter_action = paras->use_filter;
+  }
+
+  if (drm_render.decoder_type != SOFTWARE)
+    drm_draw_function = &drm_direct;
+  else
+    drm_draw_function = &drm_copy;
+
+  return 0;
+}
+
+static void drm_render_destroy() {};
 
 struct RENDER_CALLBACK drm_render = {
   .name = "drm",

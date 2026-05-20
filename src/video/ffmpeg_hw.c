@@ -58,8 +58,11 @@ struct Decoder_Context {
   int (*get_supported_format) (AVBufferRef* ref);
   bool (*validate_test) (void *nativeDisplay);
   void (*unexport_frame) (void *data);
+  // if failed,export_frame must unexport immediately
   int (*export_frame) (AVBufferRef *device_ref, AVFrame *frame, void *descriptor, int render_type, struct Source_Buffer_Info *buffer_info, int *layers, int *planes);
   void (*clear_resource) (void);
+  int (*sync) (AVFrame *frame);
+  uint8_t* (*get_buf_id) (AVFrame *frame);
 };
 
 #define sw_format_slot 9
@@ -257,6 +260,8 @@ static struct Decoder_Context vulkan_backend = {
   .unexport_frame = &vulkan_free_render_images,
   .export_frame = &vulkan_export_render_images,
   .clear_resource = &vulkan_clear,
+  .sync = NULL,
+  .get_buf_id = NULL,
 };
 
 #ifdef HAVE_VAAPI
@@ -481,6 +486,23 @@ static void vaapi_clear() { return; };
 
 static int vaapi_set_opts (AVDictionary **opts) { return 0; };
 
+static int vaapi_sync (AVFrame *frame) {
+  AVHWDeviceContext* device = (AVHWDeviceContext*) device_ref->data;
+  AVVAAPIDeviceContext *va_ctx = device->hwctx;
+  VASurfaceID surface_id = (VASurfaceID)(uintptr_t)frame->data[3];
+  VAStatus st = vaSyncSurface2(va_ctx->display, surface_id, 6000000000);
+  if (st != VA_STATUS_SUCCESS) {
+    fprintf(stderr, "Ffmpeg_vaapi: vaSyncSurface2() Failed: %d\n", st);
+    return -1;
+  }
+
+  return 0;
+}
+
+static uint8_t* vaapi_get_surface_id (AVFrame *frame) {
+  return (uint8_t *)(uintptr_t)frame->data[3];
+}
+
 static struct Decoder_Context vaapi_backend = {
   .ffmpeg_type = AV_HWDEVICE_TYPE_VAAPI,
   .ffmpeg_fmt = AV_PIX_FMT_VAAPI,
@@ -494,8 +516,29 @@ static struct Decoder_Context vaapi_backend = {
   .unexport_frame = &vaapi_free_render_images,
   .export_frame = &vaapi_export_render_images,
   .clear_resource = &vaapi_clear,
+  .sync = &vaapi_sync,
+  .get_buf_id = &vaapi_get_surface_id,
 };
 #endif
+
+static int look_pools (struct Image_Pool *pools, uint8_t *frame_buf) {
+  int found = -1;
+  if (frame_buf == NULL)
+    return -1;
+
+  if (pools->frame_bufs[pools->next] != frame_buf) {
+    for (int i = 0; i < pools->count; i++) {
+      if (pools->frame_bufs[i] == frame_buf) {
+        found = i;
+        break;
+      }
+    }
+  }
+  else
+    found = pools->next;
+
+  return found;
+}
 
 static int is_support_yuv444(AVBufferRef* device_ref) {
   if (hwSupportedFormat)
@@ -720,54 +763,101 @@ void hw_destroy() {
 
 static void hw_free_render_images(void *opaque, uint8_t *data) {
   struct Render_Image *image = (struct Render_Image *) opaque;
-  void *descriptor = image->images.descriptor;
 
-  if (image->images.free != NULL) {
+  if (image->images.free != NULL && image->images.layers > 0) {
     image->images.free(image->images.image_data, image->images.layers);
   }
-  if (!descriptor)
-    return;
-  decontext->unexport_frame(descriptor);
   return;
 }
 
 int hw_export_render_images(AVFrame *frame, struct Render_Image *image, int render_type) {
+  static void *descriptor = NULL;
   int layers;
   int planes;
+  void **image_data = image->images.image_data;
 
-  if (!image->images.descriptor) {
+  if (descriptor == NULL) {
     if (!primeDescriptors[image->index]) {
       fprintf(stderr, "Ffmpeg_vaapi: Has no descriptors.\n");
       return -1;
     }
-    image->images.descriptor = primeDescriptors[image->index];
+    descriptor = primeDescriptors[image->index];
   }
   if (image->images.create == NULL || image->images.free == NULL) {
     fprintf(stderr, "Ffmpeg_vaapi: Has no export images function implement.\n");
     return -1;
   }
 
-  AVBufferRef *ref = av_buffer_create(NULL, 0, &hw_free_render_images, image, 0);
-  if (ref == NULL) {
-    fprintf(stderr, "Ffmpeg_vaapi: Could not create buffer ref.\n");
-    return -1;
+  int next = -1;
+  bool new_frame = false;
+  if (decontext->sync) {
+    int index = look_pools(image->images.pools, decontext->get_buf_id(frame));
+    if (index < 0) {
+      if ((image->images.pools->count + 1) > MAX_POOLS_COUNT) {
+        if (image->images.free && image->images.layers > 0) {
+          for (int i = 0; i < image->images.pools->count; i++) {
+              image->images.free(image->images.pools->image_bufs[i], image->images.layers);
+          }
+        }
+        else {
+          fprintf(stderr, "Ffmpeg_vaapi: image free error.\n");
+          return -1;
+        }
+        memset(image->images.pools->image_bufs, 0, sizeof(void *) * MAX_PLANE_NUM * MAX_POOLS_COUNT);
+        memset(image->images.pools->frame_bufs, 0, sizeof(uint8_t *) * MAX_POOLS_COUNT);
+        image->images.pools->count = 0;
+        image->images.pools->next = 0;
+        next = 0;
+      }
+      else
+        next = image->images.pools->count;
+      new_frame = true;
+    } else {
+      next = index;
+      if (image->images.layers > 0) {
+        if (decontext->sync(frame) < 0)
+          return -1;
+        image->images.image_data = image->images.pools->image_bufs[index];
+        image->images.pools->next = index >= (image->images.pools->count - 1) ? 0 : (index + 1);
+        return 0;
+      }
+      image->images.free(image->images.pools->image_bufs[next], MAX_PLANE_NUM);
+    }
+    image_data = image->images.pools->image_bufs[next];
+  } else {
+    AVBufferRef *ref = av_buffer_create(NULL, 0, &hw_free_render_images, image, 0);
+    if (ref == NULL) {
+      fprintf(stderr, "Ffmpeg_vaapi: Could not create buffer ref.\n");
+      return -1;
+    }
+    if (frame->opaque_ref)
+      av_buffer_unref(&frame->opaque_ref);
+    frame->opaque_ref = ref;
   }
-  if (frame->opaque_ref)
-    av_buffer_unref(&frame->opaque_ref);
-  frame->opaque_ref = ref;
 
-  if (decontext->export_frame(device_ref, frame, image->images.descriptor, render_type, &image->images.buf_info, &layers, &planes) < 1) {
+  if (decontext->export_frame(device_ref, frame, descriptor, render_type, &image->images.buf_info, &layers, &planes) < 1) {
     fprintf(stderr, "Ffmpeg_vaapi: Could not export frame.\n");
     return -1;
   }
 
-  if (image->images.create(&image->images.buf_info, planes, layers, image->images.image_data, image->index) < 0) {
-    decontext->unexport_frame(image->images.descriptor);
+  if (image->images.create(&image->images.buf_info, planes, layers, image_data, image->index) < 0) {
+    decontext->unexport_frame(descriptor);
     return -1;
   }
 
+  decontext->unexport_frame(descriptor);
+
   image->images.layers = layers;
   image->images.planes = planes;
+
+  if (decontext->sync) {
+    image->images.image_data = image->images.pools->image_bufs[next];
+    image->images.pools->frame_bufs[next] = decontext->get_buf_id(frame);
+    if (new_frame)
+      image->images.pools->count++;
+    image->images.pools->next = next >= (image->images.pools->count - 1) ? 0 : (next + 1);
+  }
+
   return 0;
 }
 
