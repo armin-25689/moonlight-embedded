@@ -2237,8 +2237,11 @@ static void send_controller_arrival_sdl(PGAMEPAD_STATE state) {
     capabilities |= LI_CCAP_RUMBLE;
   if (SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_TRIGGER_RUMBLE_BOOLEAN, false))
     capabilities |= LI_CCAP_TRIGGER_RUMBLE;
-  if (SDL_GetNumGamepadTouchpads(state->controller) > 0)
+  if (SDL_GetNumGamepadTouchpads(state->controller) > 0) {
     capabilities |= LI_CCAP_TOUCHPAD;
+    if (SDL_GetNumGamepadTouchpads(state->controller) > 1)
+      capabilities |= LI_CCAP_DUAL_TOUCHPAD;
+  }
   if (SDL_GamepadHasSensor(state->controller, SDL_SENSOR_ACCEL))
     capabilities |= LI_CCAP_ACCEL;
   if (SDL_GamepadHasSensor(state->controller, SDL_SENSOR_GYRO))
@@ -2460,7 +2463,7 @@ static int x11_sdlinput_handle_event(SDL_Event* event) {
     default:
       return SDL_NOTHING;
     }
-    LiSendControllerTouchEvent(gamepad->id, touchEventType, event->gtouchpad.finger,
+    LiSendControllerTouchEvent2(gamepad->id, touchEventType, event->gtouchpad.touchpad, event->gtouchpad.finger,
                                event->gtouchpad.x, event->gtouchpad.y, event->gtouchpad.pressure);
     break;
   }
