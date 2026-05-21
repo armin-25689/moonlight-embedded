@@ -20,9 +20,8 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_drm.h>
-#include <libavutil/hwcontext_vaapi.h>
-#include <libavutil/hwcontext_vulkan.h>
 #ifdef HAVE_VAAPI
+#include <libavutil/hwcontext_vaapi.h>
 #include <va/va.h>
 #include <va/va_drm.h>
 #include <va/va_drmcommon.h>
@@ -78,7 +77,11 @@ static struct Decoder_Context *decontext = NULL;
 static AVBufferRef* device_ref = NULL;
 static AVBufferRef* frames_ctx_ref = NULL;
 static union {
+#ifdef HAVE_VAAPI
   VADRMPRIMESurfaceDescriptor vaapi_descriptors[MAX_FB_NUM];
+#else
+  void *vaapi_descriptors[MAX_FB_NUM];
+#endif
   AVFrame* drm_descriptors[MAX_FB_NUM];
 } descriptors;
 static void *primeDescriptors[MAX_FB_NUM] = {0};

@@ -48,9 +48,7 @@
 #if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_DRM) 
 int x11_init(const char *displayName, int hwType);
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11;
-#ifdef HAVE_VAAPI
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vaapi;
-#endif
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vulkan;
 #ifdef HAVE_FFMPEGFILTER
 struct Ffmpeg_Filters_Args {
