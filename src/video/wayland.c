@@ -84,17 +84,17 @@
 } while(0)
 
 static struct wl_display *wl_display = NULL;
-static struct wl_surface *wlsurface;
+static struct wl_surface *wlsurface = NULL;
 static struct wl_egl_window *wl_window = NULL;
-static struct wl_compositor *compositor;
-static struct wl_registry *registry;
+static struct wl_compositor *compositor = NULL;
+static struct wl_registry *registry = NULL;
 static struct wl_output *wl_output = NULL;
 static struct wl_seat *wl_seat = NULL;
 static struct wl_pointer *wl_pointer = NULL;
 static struct wl_keyboard *wl_keyboard = NULL;
-static struct xdg_wm_base *xdg_wm_base;
-static struct xdg_toplevel *xdg_toplevel;
-static struct xdg_surface *xdg_surface;
+static struct xdg_wm_base *xdg_wm_base = NULL;
+static struct xdg_toplevel *xdg_toplevel = NULL;
+static struct xdg_surface *xdg_surface = NULL;
 static struct wp_viewporter *wp_viewporter = NULL;
 static struct wp_viewport *wp_viewport = NULL;
 static struct wp_fractional_scale_manager_v1 *wp_fracscale = NULL;
@@ -685,18 +685,25 @@ static void wl_close_display(void *data) {
       wl_seat_release(wl_seat);
       wl_seat = NULL;
     }
-    if (wl_window != NULL) {
+    if (xdg_toplevel != NULL)
       xdg_toplevel_destroy(xdg_toplevel);
+    if (xdg_surface != NULL)
       xdg_surface_destroy(xdg_surface);
+    if (xdg_wm_base != NULL)
       xdg_wm_base_destroy(xdg_wm_base);
+    if (wp_viewport != NULL)
       wp_viewport_destroy(wp_viewport);
+    if (wp_viewporter != NULL)
       wp_viewporter_destroy(wp_viewporter);
-      wl_surface_commit(wlsurface);
+    if (wlsurface != NULL)
       wl_surface_destroy(wlsurface);
-      wl_compositor_destroy(compositor);
-      wl_registry_destroy(registry);
+    if (wl_window != NULL)
       wl_egl_window_destroy(wl_window);
-    }
+    if (compositor != NULL)
+      wl_compositor_destroy(compositor);
+    if (registry != NULL)
+      wl_registry_destroy(registry);
+    wl_display_flush(wl_display);
     wl_display_disconnect(wl_display);
     wl_display = NULL;
     wl_window = NULL;
