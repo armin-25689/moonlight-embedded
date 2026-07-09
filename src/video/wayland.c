@@ -138,10 +138,8 @@ struct _wl_render {
   int drm_fd;
   int dst_fmt;
   int plane_num;
-  int lastrange;
   int lastcolorspace;
   int filter_action;
-  int (*wl_set_hdr_metadata) (int index, AVFrame *frame);
 } static wl_render_base = {0};
 struct _dm_table {
   uint32_t format;
@@ -172,7 +170,6 @@ static int keyboard_modifiers = 0;
 static const char *render_device = "/dev/dri/renderD128";
 
 static void noop() {};
-static int noop_int() { return 0; };
 
 static void wl_output_get_mode (void *data, struct wl_output *wl_output, uint32_t flags,
                                 int32_t width, int32_t height, int32_t refresh) {
@@ -776,33 +773,28 @@ struct DISPLAY_CALLBACK display_callback_wayland = {
 };
 
 #if defined(HAVE_DRM)
-static int set_hdr_static(int index, AVFrame* frame) {
+static int set_color_properties(int index, AVFrame* frame) {
 
-  static bool hdr_active = false;
-  bool last_stat = hdr_active;
-  if (!ffmpeg_has_hdr_metadata(frame)) {
-    hdr_active = false;
-  }
-  else {
+  static int colorp = -1;
+  static int colors = -1;
+  if (colorp == frame->color_primaries && colors == frame->colorspace)
+    return 0;
+
+  bool hdr_active = false;
+  if (ffmpeg_has_hdr_metadata(frame)) {
     hdr_active = true;
   }
 
+  int colorspace = ffmpeg_get_frame_colorspace(frame);
   if (wl_render_base.lastcolorspace >= 0) {
-    int colorspace = ffmpeg_get_frame_colorspace(frame);
-    if (colorspace != wl_render_base.lastcolorspace) {
-      uint32_t color_space = colorspace == COLORSPACE_REC_2020 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT2020 : (colorspace == COLORSPACE_REC_709 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT709 : WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT601);
-      wp_color_representation_surface_v1_set_coefficients_and_range(wl_render_base.wp_representation_surface, color_space, wl_render_base.lastrange);
-      wl_render_base.lastcolorspace = colorspace;
-    }
+    bool full_color_range = ffmpeg_is_frame_full_range(frame);
+    uint32_t range = full_color_range ? WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_FULL : WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_LIMITED;
+    uint32_t color_space = colorspace == COLORSPACE_REC_2020 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT2020 : (colorspace == COLORSPACE_REC_709 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT709 : WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT601);
+    wp_color_representation_surface_v1_set_coefficients_and_range(wl_render_base.wp_representation_surface, color_space, range);
+    wl_render_base.lastcolorspace = colorspace;
   }
 
-  if (last_stat == hdr_active)
-    return 0;
-
-  if (hdr_active == false) {
-    wp_color_management_surface_v1_unset_image_description(wl_render_base.wp_color_surface);
-    return 0;
-  }
+  wp_color_management_surface_v1_unset_image_description(wl_render_base.wp_color_surface);
 
   struct wp_image_description_creator_params_v1 *creator = wp_color_manager_v1_create_parametric_creator(wl_render_base.wp_color_manager);
   if (!creator) {
@@ -810,30 +802,66 @@ static int set_hdr_static(int index, AVFrame* frame) {
     return -1;
   }
 
-#ifdef HAVE_FFMPEGFILTER
-  const char* preferd_primaries = ffmpeg_filters_args.color_primaries;
-#else
-  const char* preferd_primaries = NULL;
-#endif
-  uint32_t primaries_flag = (preferd_primaries != NULL && strcmp(preferd_primaries, "smpte432") == 0) ? WP_COLOR_MANAGER_V1_PRIMARIES_DISPLAY_P3 : WP_COLOR_MANAGER_V1_PRIMARIES_BT2020;
+  uint32_t primaries_flag = WP_COLOR_MANAGER_V1_PRIMARIES_BT2020;
+  uint32_t tf_flag = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ;
+  switch (frame->color_primaries) {
+  case AVCOL_PRI_SMPTE170M:
+    primaries_flag = WP_COLOR_MANAGER_V1_PRIMARIES_NTSC;
+    break;
+  case AVCOL_PRI_BT709:
+    primaries_flag = WP_COLOR_MANAGER_V1_PRIMARIES_SRGB;
+    break;
+  case AVCOL_PRI_BT2020:
+    primaries_flag = WP_COLOR_MANAGER_V1_PRIMARIES_BT2020;
+    break;
+  case AVCOL_PRI_BT470BG:
+    primaries_flag = WP_COLOR_MANAGER_V1_PRIMARIES_PAL;
+    break;
+  case AVCOL_PRI_BT470M:
+    primaries_flag = WP_COLOR_MANAGER_V1_PRIMARIES_PAL_M;
+    break;
+  case AVCOL_PRI_SMPTE432:
+    primaries_flag = WP_COLOR_MANAGER_V1_PRIMARIES_DISPLAY_P3;
+    break;
+  default:
+    if (!hdr_active) {
+      if (colorspace == COLORSPACE_REC_601)
+        primaries_flag = WP_COLOR_MANAGER_V1_PRIMARIES_NTSC;
+      else
+        primaries_flag = WP_COLOR_MANAGER_V1_PRIMARIES_SRGB;
+    }
+    break;
+  }
+  if (!hdr_active)
+    tf_flag = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22;
   wp_image_description_creator_params_v1_set_primaries_named(creator, primaries_flag);
-  wp_image_description_creator_params_v1_set_tf_named(creator, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ);
-  wp_image_description_creator_params_v1_set_mastering_display_primaries(creator, ffmpeg_hdr_metadata[0] * 20, ffmpeg_hdr_metadata[1] * 20, ffmpeg_hdr_metadata[2] * 20, ffmpeg_hdr_metadata[3] * 20, ffmpeg_hdr_metadata[4] * 20, ffmpeg_hdr_metadata[5] * 20, ffmpeg_hdr_metadata[6] * 20, ffmpeg_hdr_metadata[7] * 20);
-  wp_image_description_creator_params_v1_set_mastering_luminance(creator, ffmpeg_hdr_metadata[9], ffmpeg_hdr_metadata[8]);
-  if (ffmpeg_hdr_metadata[10] > 0 && ffmpeg_hdr_metadata[11] > 0) {
-    wp_image_description_creator_params_v1_set_max_cll(creator, ffmpeg_hdr_metadata[10]);
-    wp_image_description_creator_params_v1_set_max_fall(creator, ffmpeg_hdr_metadata[11]);
+  wp_image_description_creator_params_v1_set_tf_named(creator, tf_flag);
+  if (tf_flag == WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ) {
+    if (ffmpeg_hdr_metadata[0] == 0 || !display_callback_wayland.hdr_support || !useHdr) {
+      fprintf(stderr, "wl: cannot set hdr metadata.\n");
+      return -1;
+    }
+    wp_image_description_creator_params_v1_set_mastering_display_primaries(creator, ffmpeg_hdr_metadata[0] * 20, ffmpeg_hdr_metadata[1] * 20, ffmpeg_hdr_metadata[2] * 20, ffmpeg_hdr_metadata[3] * 20, ffmpeg_hdr_metadata[4] * 20, ffmpeg_hdr_metadata[5] * 20, ffmpeg_hdr_metadata[6] * 20, ffmpeg_hdr_metadata[7] * 20);
+    wp_image_description_creator_params_v1_set_mastering_luminance(creator, ffmpeg_hdr_metadata[9], ffmpeg_hdr_metadata[8]);
+    if (ffmpeg_hdr_metadata[10] > 0 && ffmpeg_hdr_metadata[11] > 0) {
+      wp_image_description_creator_params_v1_set_max_cll(creator, ffmpeg_hdr_metadata[10]);
+      wp_image_description_creator_params_v1_set_max_fall(creator, ffmpeg_hdr_metadata[11]);
+    }
   }
 
   struct wp_image_description_v1 *descriptor = wp_image_description_creator_params_v1_create(creator);
   if (!descriptor) {
-    fprintf(stderr, "wl: cannot set hdr metadata.\n");
+    fprintf(stderr, "wl: cannot create image descriptor.\n");
     return -1;
   }
 
   wp_color_management_surface_v1_set_image_description(wl_render_base.wp_color_surface, descriptor, 0);
 
   wp_image_description_v1_destroy(descriptor);
+  wp_image_description_creator_params_v1_destroy(creator);
+
+  colorp = frame->color_primaries;
+  colors = frame->colorspace;
 
   return 0;
 }
@@ -857,7 +885,7 @@ static inline int commit_surface(int index, int width, int height, AVFrame* fram
     return -1;
   }
 
-  wl_render_base.wl_set_hdr_metadata(index, frame);
+  set_color_properties(index, frame);
 
   wl_surface_attach(wlsurface, buffer, 0, 0);
   wl_surface_damage_buffer(wlsurface, 0, 0, width, height);
@@ -1012,22 +1040,16 @@ static int wl_render_init(struct Render_Init_Info *paras) {
   if (wl_render_base.wp_color_manager) {
     wl_render_base.wp_color_surface = wp_color_manager_v1_get_surface(wl_render_base.wp_color_manager, wlsurface);
   }
-  if (!wl_render_base.wp_color_surface || !display_callback_wayland.hdr_support) {
-    if (useHdr) {
-      fprintf(stderr, "wl: cannot get color manager surface ,please remove -hdr options.\n");
-      display_callback_wayland.hdr_support = false;
-      return -1;
-    }
+  if (!wl_render_base.wp_color_surface) {
+    fprintf(stderr, "wl: cannot get color manager surface.\n");
+    display_callback_wayland.hdr_support = false;
+    return -1;
   }
-  if (useHdr) {
-    wl_render_base.wp_color_output = wp_color_manager_v1_get_output(wl_render_base.wp_color_manager, wl_output);
-    struct wp_image_description_v1 *output_description = wp_color_management_output_v1_get_image_description(wl_render_base.wp_color_output);
-    struct wp_image_description_info_v1 *output_description_info = wp_image_description_v1_get_information(output_description);
-    wp_image_description_info_v1_add_listener(output_description_info, &output_description_info_listener, NULL);
-    wp_image_description_v1_destroy(output_description);
-    wl_render_base.wl_set_hdr_metadata = &set_hdr_static;
-  } else
-    wl_render_base.wl_set_hdr_metadata = &noop_int;
+  wl_render_base.wp_color_output = wp_color_manager_v1_get_output(wl_render_base.wp_color_manager, wl_output);
+  struct wp_image_description_v1 *output_description = wp_color_management_output_v1_get_image_description(wl_render_base.wp_color_output);
+  struct wp_image_description_info_v1 *output_description_info = wp_image_description_v1_get_information(output_description);
+  wp_image_description_info_v1_add_listener(output_description_info, &output_description_info_listener, NULL);
+  wp_image_description_v1_destroy(output_description);
 
   wl_render_base.feedback = zwp_linux_dmabuf_v1_get_surface_feedback(wl_render_base.zwp_linux_dmabuf, wlsurface);
   zwp_linux_dmabuf_feedback_v1_add_listener(wl_render_base.feedback, &feedback_listener, NULL);
@@ -1085,7 +1107,6 @@ static inline struct wl_buffer *wl_import_dmabuf(struct _drm_buf *drm_buf) {
 
 static int wl_sync_frame_config(struct Render_Config *config) {
   int dst_fmt = -1;
-  bool full_color_range = config->full_color_range;
   int colorspace = config->color_space;
   wl_render_base.lastcolorspace = -1;
 
@@ -1096,11 +1117,7 @@ static int wl_sync_frame_config(struct Render_Config *config) {
     case AV_PIX_FMT_BGRA:
       break;
     default:;
-      uint32_t color_space = colorspace == COLORSPACE_REC_2020 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT2020 : (colorspace == COLORSPACE_REC_709 ? WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT709 : WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT601);
-      uint32_t range = full_color_range ? WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_FULL : WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_LIMITED;
-      wl_render_base.lastrange = range;
       wl_render_base.lastcolorspace = colorspace;
-      wp_color_representation_surface_v1_set_coefficients_and_range(wl_render_base.wp_representation_surface, color_space, range);
       break;
     }
     dst_fmt = config->pix_fmt;

@@ -558,8 +558,8 @@ static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
   drm_get_prop_enum (drm_info->fd, color_space_name, 3, drm_info->plane_color_encoding_prop_id, drm_info->plane_color_encoding_prop_values);
   const char *colorange_name[3] = { "YCbCr limited range", "YCbCr full range", "nonono"};
   drm_get_prop_enum (drm_info->fd, colorange_name, 3, drm_info->plane_color_range_prop_id, drm_info->plane_color_range_prop_values);
-  const char *colorspace_name[5] = { "Default", "BT2020_RGB", "BT2020_YCC", "BT601_YCC", "BT709_YCC" };
-  drm_get_prop_enum (drm_info->fd, colorspace_name, 5, drm_info->conn_colorspace_prop_id, drm_info->conn_colorspace_values);
+  const char *colorspace_name[6] = { "Default", "BT2020_RGB", "BT2020_YCC", "BT601_YCC", "BT709_YCC", "DCI-P3_RGB_D65" };
+  drm_get_prop_enum (drm_info->fd, colorspace_name, 6, drm_info->conn_colorspace_prop_id, drm_info->conn_colorspace_values);
   const char *broadcast_rgb_name[3] = { "Automatic", "Full", "Limited 16:235" };
   drm_get_prop_enum (drm_info->fd, broadcast_rgb_name, 3, drm_info->conn_broadcast_rgb_prop_id, drm_info->conn_broadcast_rgb_prop_values);
   if (drm_info->conn_colorspace_values[D2020YCC] == 0) drm_info->conn_colorspace_values[D2020YCC] = drm_info->conn_colorspace_values[D2020RGB];

@@ -176,9 +176,11 @@ static inline struct Filter_Desc* generate_vaapi_desc (AVFrame *frame, struct Ff
   if (args->color_primaries == args->color.bt601 || args->color_primaries == args->color.bt709) {
     snprintf(tonemap, sizeof(tonemap),
              "format=%s:primaries=%s:transfer=%s:matrix=%s", 
-             get_pix_fmt_name(frame), args->color_primaries, 
-             args->color_primaries == args->color.bt601 ? "bt601" : "bt709",
-             args->color_primaries == args->color.bt601 ? "bt601" : "bt709");
+             get_pix_fmt_name(frame), args->color_primaries, args->color_primaries, args->color_primaries);
+  } else if (args->color_primaries == args->color.p3 && (args->action & FILTER_TONEMAP_LIGHT) == 0) {
+    snprintf(tonemap, sizeof(tonemap),
+             "format=%s:primaries=%s:transfer=%s:matrix=%s",
+             get_pix_fmt_name(frame), args->color_primaries, "bt709", "bt709");
   } else {
     snprintf(tonemap, sizeof(tonemap),
              "format=%s:primaries=%s:transfer=%s:matrix=%s:display=%d %d|%d %d|%d %d|%d %d|%d %d", 

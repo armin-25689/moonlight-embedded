@@ -494,6 +494,7 @@ static int drm_display_done(int width, int height, int index) {
 
 static int drm_display_loop(void *data, int width, int height, int index) {
   static int orig_colorspace = -1;
+  static int orig_colorprimary = -1;
   uint32_t fb_id;
 
   if (tty_stat.out) {
@@ -509,9 +510,9 @@ static int drm_display_loop(void *data, int width, int height, int index) {
 
   struct Render_Image *image = (struct Render_Image *)data;
   AVFrame *frame = image->sframe.frame;
-  int colorspace = frame->colorspace;
-  if (orig_colorspace != colorspace) {
-    orig_colorspace = colorspace;
+  if (orig_colorspace != frame->colorspace || orig_colorprimary != frame->color_primaries) {
+    orig_colorspace = frame->colorspace;
+    orig_colorprimary = frame->color_primaries;
     drm_config.full_color_range = ffmpeg_is_frame_full_range(frame);
     drm_config.colorspace = ffmpeg_get_frame_colorspace(frame);
     if (drm_config.need_change_color) {
@@ -520,6 +521,9 @@ static int drm_display_loop(void *data, int width, int height, int index) {
     }
     drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, 
                    !drm_config.need_change_color ? drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020RGB : DEFAULTCOLOR] : drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020YCC : (drm_config.colorspace == COLORSPACE_REC_709 ? D709YCC : D601YCC)]);
+    if (frame->color_primaries == AVCOL_PRI_SMPTE432 && drmInfoPtr->conn_colorspace_values[D65P3] != 0) {
+      drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, drmInfoPtr->conn_colorspace_values[D65P3]);
+    }
     set_hdr_metadata_blob (drmInfoPtr, ffmpeg_has_hdr_metadata(frame), &hdr_blob);
   }
 

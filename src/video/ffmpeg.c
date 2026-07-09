@@ -475,7 +475,7 @@ int ffmpeg_get_frame_colorspace(const AVFrame* frame) {
   case AVCOL_SPC_BT2020_CL:
     return COLORSPACE_REC_2020;
   default:
-    return COLORSPACE_REC_601;
+    return COLORSPACE_REC_709;
   }
 }
 

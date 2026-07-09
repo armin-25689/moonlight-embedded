@@ -144,10 +144,8 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
         ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.p3;
       } else if (strstr(config->filters, ":bt2020")) {
         ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.bt2020;
-      } else if (strstr(config->filters, ":bt709")) {
+      } else if (strstr(config->filters, ":bt709") || strstr(config->filters, ":bt601")) {
         ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.bt709;
-      } else if (strstr(config->filters, ":bt601")) {
-        ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.bt601;
       } else  {
         ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.bt2020;
       }
@@ -428,6 +426,9 @@ int main(int argc, char* argv[]) {
       if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444) {
         if (!wantHdr) {
           config.stream.colorSpace = COLORSPACE_REC_709;
+          config.stream.colorRange = COLOR_RANGE_FULL;
+        }
+        if (system == X11_VAAPI) {
           config.stream.colorRange = COLOR_RANGE_FULL;
         }
         printf("Try to use yuv444 mode\n");

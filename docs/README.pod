@@ -119,14 +119,14 @@ x11 platform also can use, but slow than others.
 =item B<-filters> [I<FILTERS>]
 
 Arguments as '[color_primaries:p3],[light:0:100:400],[scale:fmt:size]'
-color_primaries can use p3|bt2020|bt601|bt709.
+color_primaries can use bt2020|bt709|p3.
 light fill minDisplayLuminance:maxfall:maxDisplayLuminance.
 scale can fill fmt|size. Fill size will change decoder frame w,h to 
 display width and height.Fill fmt will change frame format to better
 compatible format such as ARGB or X2RGB10.
 wayland_vaapi platform can use scale:fmt filters to render yuv444.
-Use color_primaries:p3 to change hdr bt2020 to hdr display p3.
-Use light try to finish light tonemap.This may not supported now.
+Use color_primaries:p3 to change bt2020 to display p3 or others.
+Use light try to finish hdr tonemap.This may not supported now.
 Note: this option may not work correctly because of FreeBSD 
 HDR support or option implemention.
 The option is only worked with drm|drm_vaapi|wayland|wayland_vaapi 
