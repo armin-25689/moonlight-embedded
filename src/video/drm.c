@@ -41,7 +41,6 @@ static drmModeModeInfoPtr connModePtr;
 static void *gbm_display = NULL;
 static void *gbm_window = NULL;
 static bool isMaster = true;
-static uint32_t last_fbid = 0;
 static uint32_t hdr_blob = 0;
 
 static uint64_t fps_time;
@@ -495,18 +494,21 @@ static int drm_display_done(int width, int height, int index) {
 static int drm_display_loop(void *data, int width, int height, int index) {
   static int orig_colorspace = -1;
   static int orig_colorprimary = -1;
+  static uint32_t last_fbid = 0;
   uint32_t fb_id;
-
-  if (tty_stat.out) {
-    usleep(fps_time);
-    return 0;
-  }
 
   fb_id = drm_buf[index].fb_id;
   if (fb_id <= 0 || data == NULL)
     return -1;
-  if (last_fbid == fb_id && drmInfoPtr->have_atomic)
-    fb_id = 0;
+
+  if (tty_stat.out || last_fbid == fb_id) {
+    usleep(fps_time);
+    return 0;
+  }
+  last_fbid = fb_id;
+
+  //if (last_fbid == fb_id && drmInfoPtr->have_atomic)
+  //  fb_id = 0;
 
   struct Render_Image *image = (struct Render_Image *)data;
   AVFrame *frame = image->sframe.frame;

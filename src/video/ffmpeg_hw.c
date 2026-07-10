@@ -451,12 +451,6 @@ static int vaapi_export_render_images(AVBufferRef *device_ref, AVFrame *frame, v
     return -1;
   }
 
-  st = vaSyncSurface2(va_ctx->display, surface_id, 6000000000);
-  if (st != VA_STATUS_SUCCESS) {
-    fprintf(stderr, "Ffmpeg_vaapi: vaSyncSurface2() Failed: %d\n", st);
-    goto sync_fail;
-  }
-
   int planes = 0;
   for (size_t i = 0; i < primeDescriptor->num_layers; ++i) {
     for (size_t j = 0; j < primeDescriptor->layers[i].num_planes; j++) {
@@ -524,22 +518,54 @@ static struct Decoder_Context vaapi_backend = {
 };
 #endif
 
+struct Loop_List {
+  struct Loop_List *next;
+  uint8_t *data;
+  uint8_t index;
+};
+static struct Loop_List looplist[MAX_POOLS_COUNT + 1] = {0};
+
 static int look_pools (struct Image_Pool *pools, uint8_t *frame_buf) {
+  static uint8_t loopindex = 0;
+  static struct Loop_List *first = &looplist[0];
+  static struct Loop_List *now = &looplist[0];
   int found = -1;
   if (frame_buf == NULL)
     return -1;
 
-  if (pools->frame_bufs[pools->next] != frame_buf) {
-    for (int i = 0; i < pools->count; i++) {
+  if (now->data != frame_buf) {
+    for (int i = 0; i < MAX_POOLS_COUNT; i++) {
       if (pools->frame_bufs[i] == frame_buf) {
         found = i;
+        now->data = frame_buf;
+        now->index = i;
+        if (now->next == NULL) {
+          if (first->data == frame_buf) {
+            now->next = first->next;
+            first = now;
+          }
+          else {
+            if (loopindex >= MAX_POOLS_COUNT)
+              found = -1;
+            else
+              now->next = &looplist[++loopindex];
+          }
+        }
         break;
       }
     }
+    if (found < 0) {
+      memset(looplist, 0, sizeof(looplist));
+      loopindex = 0;
+      first = &looplist[0];
+      now = &looplist[0];
+      now->next = &looplist[++loopindex];
+      return found;
+    }
   }
-  else
-    found = pools->next;
 
+  found = now->index;
+  now = now->next;
   return found;
 }
 
@@ -773,8 +799,20 @@ static void hw_free_render_images(void *opaque, uint8_t *data) {
   return;
 }
 
+static inline void pool_clean (struct Render_Image *image, int index) {
+  if (image->images.pools->stat[index] != 0) {
+    image->images.free(image->images.pools->image_bufs[index], image->images.layers);
+    image->images.pools->frame_bufs[index] = NULL;
+    memset(image->images.pools->image_bufs[index], 0, sizeof(void *) * MAX_PLANE_NUM);
+    image->images.pools->stat[index] = 0;
+  }
+  return;
+}
+
 int hw_export_render_images(AVFrame *frame, struct Render_Image *image, int render_type) {
   static void *descriptor = NULL;
+  static bool need_recycle = false;
+  static uint8_t recycle[MAX_POOLS_COUNT] = {0};
   int layers;
   int planes;
   void **image_data = image->images.image_data;
@@ -792,40 +830,50 @@ int hw_export_render_images(AVFrame *frame, struct Render_Image *image, int rend
   }
 
   int next = -1;
-  bool new_frame = false;
   if (decontext->sync) {
+    if (decontext->sync(frame) < 0)
+      return -1;
     int index = look_pools(image->images.pools, decontext->get_buf_id(frame));
     if (index < 0) {
-      if ((image->images.pools->count + 1) > MAX_POOLS_COUNT) {
-        if (image->images.free && image->images.layers > 0) {
-          for (int i = 0; i < image->images.pools->count; i++) {
-              image->images.free(image->images.pools->image_bufs[i], image->images.layers);
+      for (int i = 0; i < MAX_POOLS_COUNT; i++) {
+        if (image->images.pools->stat[i] == 0) {
+          next = i;
+          break;
+        }
+      }
+      if (next < 0) {
+        for (int i = 0; i < MAX_POOLS_COUNT; i++) {
+          if (image->images.pools->image_bufs[i] == image->images.image_data) {
+            next = i;
+            break;
           }
         }
-        else {
-          fprintf(stderr, "Ffmpeg_vaapi: image free error.\n");
+        if (next < 0) {
+          fprintf(stderr, "Ffmpeg_vaapi: image index choose error.\n");
           return -1;
         }
-        memset(image->images.pools->image_bufs, 0, sizeof(void *) * MAX_PLANE_NUM * MAX_POOLS_COUNT);
-        memset(image->images.pools->frame_bufs, 0, sizeof(uint8_t *) * MAX_POOLS_COUNT);
-        image->images.pools->count = 0;
-        image->images.pools->next = 0;
-        next = 0;
       }
-      else
-        next = image->images.pools->count;
-      new_frame = true;
     } else {
-      next = index;
+      if (need_recycle) {
+        if (recycle[index] != 0) {
+          recycle[index] = 0;
+        }
+        else {
+          for (int i = 0; i < MAX_POOLS_COUNT; i++) {
+            if (recycle[i] != 0)
+              pool_clean(image, i);
+          }
+          memset(recycle, 0, sizeof(recycle));
+          need_recycle = false;
+        }
+      }
       if (image->images.layers > 0) {
-        if (decontext->sync(frame) < 0)
-          return -1;
         image->images.image_data = image->images.pools->image_bufs[index];
-        image->images.pools->next = index >= (image->images.pools->count - 1) ? 0 : (index + 1);
         return 0;
       }
-      image->images.free(image->images.pools->image_bufs[next], MAX_PLANE_NUM);
+      next = index;
     }
+    pool_clean(image, next);
     image_data = image->images.pools->image_bufs[next];
   } else {
     AVBufferRef *ref = av_buffer_create(NULL, 0, &hw_free_render_images, image, 0);
@@ -856,9 +904,9 @@ int hw_export_render_images(AVFrame *frame, struct Render_Image *image, int rend
   if (decontext->sync) {
     image->images.image_data = image->images.pools->image_bufs[next];
     image->images.pools->frame_bufs[next] = decontext->get_buf_id(frame);
-    if (new_frame)
-      image->images.pools->count++;
-    image->images.pools->next = next >= (image->images.pools->count - 1) ? 0 : (next + 1);
+    image->images.pools->stat[next] = 1;
+    memset(recycle, 1, sizeof(recycle));
+    need_recycle = true;
   }
 
   return 0;

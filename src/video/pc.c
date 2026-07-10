@@ -792,9 +792,9 @@ void x11_cleanup() {
 
   if (renderPtr) {
     struct Render_Image *image = &renderPtr->images[0];
-    int count = image_pools.count > MAX_FB_NUM ? image_pools.count : MAX_FB_NUM;
     if (image->images.free && image->images.layers > 0) {
-      for (int i = 0; i < count; i++) {
+      for (int i = 0; i < MAX_POOLS_COUNT; i++) {
+        if (i < MAX_FB_NUM || image_pools.stat[i] != 0)
           image->images.free(image_pools.image_bufs[i], image->images.layers);
       }
     }
