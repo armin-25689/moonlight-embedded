@@ -523,7 +523,7 @@ static int drm_display_loop(void *data, int width, int height, int index) {
     }
     drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, 
                    !drm_config.need_change_color ? drmInfoPtr->conn_colorspace_values[(drm_config.colorspace == COLORSPACE_REC_2020 || frame->color_trc == AVCOL_TRC_SMPTE2084) ? D2020RGB : DEFAULTCOLOR] : drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020YCC : (drm_config.colorspace == COLORSPACE_REC_709 ? D709YCC : D601YCC)]);
-    if (frame->color_primaries == AVCOL_PRI_SMPTE432 && drmInfoPtr->conn_colorspace_values[D65P3] != 0) {
+    if (frame->color_primaries == AVCOL_PRI_SMPTE432 && drmInfoPtr->conn_colorspace_values[D65P3] != 0 && frame->color_trc != AVCOL_TRC_SMPTE2084) {
       drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, drmInfoPtr->conn_colorspace_values[D65P3]);
     }
     set_hdr_metadata_blob (drmInfoPtr, ffmpeg_has_hdr_metadata(frame), &hdr_blob);

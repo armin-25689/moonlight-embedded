@@ -36,8 +36,8 @@
 
 struct Ffmpeg_Filters_Args ffmpeg_filters_args = { .color.p3 = "smpte432", .color.bt2020 = "bt2020",
                                                    .color.bt709 = "bt709", .color.bt601 = "bt601" };
-enum { FILTER_TONEMAP_VAAPI = 0, FILTER_SCALE_VAAPI };
-static const char *filter_name_list[] = { "tonemap_vaapi", "scale_vaapi" };
+enum { FILTER_TONEMAP_VAAPI = 0, FILTER_SCALE_VAAPI, FILTER_VULKAN };
+static const char *filter_name_list[] = { "tonemap_vaapi", "scale_vaapi", "libplacebo" };
 // General decoder and renderer state
 static AVFrame *filter_frame = NULL;
 struct Filter_Property {
@@ -265,11 +265,6 @@ static inline int generate_vaapi_desc (int action, struct Filter_Desc *filters_d
                     "light=%d %d",
                     colors->maxcll, colors->maxfall);
       }
-      if (strcmp(colors->color_primaries, "smpte432") == 0) {
-        APPEND_DESC(filters_desc[count].desc,
-                    "matrix=%s",
-                    "bt709");
-      }
     }
 
     filters_desc[count].name = filter_name_list[FILTER_TONEMAP_VAAPI];
@@ -287,6 +282,51 @@ static inline int generate_vaapi_desc (int action, struct Filter_Desc *filters_d
     filters_desc[count].name = filter_name_list[FILTER_SCALE_VAAPI];
     count++;
   }
+
+  *filter_count = count;
+  return 0;
+}
+
+static inline int generate_vulkan_desc (int action, struct Filter_Desc *filters_desc, int *filter_count, struct Color_Args *colors) {
+  int count = 0;
+
+  if (colors->ishdr &&
+      (action & FILTER_TONEMAP_COLOR_PRIMARIES)) {
+    if (hdr_metadata_ref[0] == 0) {
+      fprintf(stderr, "hdr_metadata_ref is not fill correctly.\n");
+      return -1;
+    }
+
+    if (colors->tosdr) {
+      APPEND_DESC(filters_desc[count].desc,
+                  "color_primaries=%s:color_trc=%s:range=%s:tonemapping=%s:peak_detect=true:apply_filmgrain=false",
+                  colors->color_primaries, "iec61966-2-1", "full", "bt.2390");
+    } else {
+      APPEND_DESC(filters_desc[count].desc,
+                  "color_primaries=%s:color_trc=%s:range=%s:tonemapping=%s:peak_detect=true:apply_filmgrain=false",
+                  colors->color_primaries, "smpte2084", "full", "bt.2390");
+    }
+  }
+
+  if ((action & FILTER_SCALE_FMT) || (action & FILTER_TONEMAP_COLOR_PRIMARIES)) {
+    enum AVPixelFormat dstfmt = use_hdr_fmt ? colors->hdrfmt : colors->sdrfmt;
+    APPEND_DESC(filters_desc[count].desc,
+                "format=%s",
+                av_get_pix_fmt_name(dstfmt));
+  }
+
+  if (action & FILTER_SCALE_SIZE) {
+    APPEND_DESC(filters_desc[count].desc,
+    "w=%d:h=%d:force_original_aspect_ratio=decrease",
+    colors->width, colors->height);
+  }
+
+  if (action & (FILTER_SCALE_FMT | FILTER_SCALE_SIZE | FILTER_TONEMAP_COLOR_PRIMARIES)) {
+    filters_desc[count].name = filter_name_list[FILTER_VULKAN];
+    count++;
+  }
+  else
+    return -1;
 
   *filter_count = count;
   return 0;
@@ -312,6 +352,10 @@ static inline struct Filter_Desc* generate_filters_desc (AVFrame *frame, struct 
   switch (format) {
   case AV_PIX_FMT_VAAPI:
     if (generate_vaapi_desc(args->action, filters_desc, filter_count, &colors) == 0)
+      return filters_desc;
+    break;
+  case AV_PIX_FMT_VULKAN:
+    if (generate_vulkan_desc(args->action, filters_desc, filter_count, &colors) == 0)
       return filters_desc;
     break;
   default:
