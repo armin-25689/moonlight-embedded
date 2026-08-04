@@ -429,6 +429,10 @@ static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
         break;
       }
       if (format == plane->formats[j]) {
+        int findex = formats_index == 0 ? 0 : formats_index - 1;
+        if (drm_info->plane_formats[findex] != format) {
+          drm_info->plane_formats[formats_index++] = plane->formats[j];
+        }
         format_site = formats_index - 1;
       }
       if (formats_index >= NEEDED_DRM_FORMAT_NUM)
@@ -474,20 +478,21 @@ static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
 
   if (drm_props.snap.props_num == 0) {
 #define CONUM 6
-#define CRNUM 3
+#define CRNUM 4
 #define PNUM 14
-#define CNUM 9
-#define NUMS 23
+#define CNUM (CONUM + CRNUM)
+#define NUMS (CNUM + PNUM)
 
     const char *names[] = { "CRTC_ID", "HDR_OUTPUT_METADATA", "Colorspace", "max bpc", "Broadcast RGB", "allm_enable",
-                             "MODE_ID", "ACTIVE", "VRR_ENABLED",
+                             "MODE_ID", "ACTIVE", "VRR_ENABLED", "GAMMA_LUT",
                              "FB_ID", "CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H", "SRC_X", "SRC_Y", "SRC_W", "SRC_H", "rotation", "CRTC_ID", "COLOR_ENCODING", "COLOR_RANGE", "EOTF"
                           };
     uint32_t *props_list[] = { &drm_info->conn_crtc_prop_id, &drm_info->conn_hdr_metadata_prop_id,
                                &drm_info->conn_colorspace_prop_id, &drm_info->conn_max_bpc_prop_id,
                                &drm_info->conn_broadcast_rgb_prop_id, &drm_info->conn_allm_prop_id, 
                                &drm_info->crtc_prop_mode_id, &drm_info->crtc_prop_active,
-                               &drm_info->crtc_vrr_prop_id, &drm_info->plane_fb_id_prop_id,
+                               &drm_info->crtc_vrr_prop_id, &drm_info->crtc_gammalut_prop_id,
+                               &drm_info->plane_fb_id_prop_id,
                                &drm_info->plane_crtc_x_prop_id, &drm_info->plane_crtc_y_prop_id, 
                                &drm_info->plane_crtc_w_prop_id, &drm_info->plane_crtc_h_prop_id, 
                                &drm_info->plane_src_x_prop_id, &drm_info->plane_src_y_prop_id, 
@@ -533,7 +538,8 @@ static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
           drm_props.snap.ids[add_count] = ids[i];
           drm_props.snap.props[add_count] = *props_list[i];
           drm_props.snap.props_value[add_count] = *values_list[i];
-          if (*props_list[i] == drm_info->conn_hdr_metadata_prop_id)
+          if (*props_list[i] == drm_info->conn_hdr_metadata_prop_id ||
+              *props_list[i] == drm_info->crtc_gammalut_prop_id)
             drm_props.snap.props_value[add_count] = 0;
           if (*props_list[i] == drm_info->crtc_prop_mode_id) {
             drmModePropertyBlobPtr blob = drmModeGetPropertyBlob(drm_info->fd, *values_list[i]);
@@ -736,6 +742,7 @@ uint32_t translate_format_to_drm(int format, int *bpp, int *heightmulti, int *pl
     *planenum = 3;
     return DRM_FORMAT_YUV444;
   case AV_PIX_FMT_YUV444P10:
+  case AV_PIX_FMT_YUV444P16:
     *bpp = 16;
     *heightmulti = 3;
     *planenum = 3;
@@ -751,6 +758,16 @@ uint32_t translate_format_to_drm(int format, int *bpp, int *heightmulti, int *pl
     *heightmulti = 1;
     *planenum = 1;
     return DRM_FORMAT_XVYU2101010;
+  case AV_PIX_FMT_XV36:
+    *bpp = 64;
+    *heightmulti = 1;
+    *planenum = 1;
+    return DRM_FORMAT_XVYU12_16161616;
+  case AV_PIX_FMT_XV48:
+    *bpp = 64;
+    *heightmulti = 1;
+    *planenum = 1;
+    return DRM_FORMAT_XVYU16161616;
   case AV_PIX_FMT_YUV420P:
   case AV_PIX_FMT_YUVJ420P:
     *bpp = 8;

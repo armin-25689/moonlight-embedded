@@ -50,6 +50,7 @@ struct Drm_Info {
   uint32_t crtc_prop_mode_id;
   uint32_t crtc_prop_active;
   uint32_t crtc_vrr_prop_id;
+  uint32_t crtc_gammalut_prop_id;
   int crtc_index;
   drmModeModeInfo crtc_mode;
   uint32_t crtc_mode_blob_id;

@@ -492,7 +492,7 @@ static int drm_display_done(int width, int height, int index) {
 }
 
 static int drm_display_loop(void *data, int width, int height, int index) {
-  static int orig_colorspace = -1;
+  static int orig_colortrc = -1;
   static int orig_colorprimary = -1;
   static uint32_t last_fbid = 0;
   uint32_t fb_id;
@@ -512,8 +512,8 @@ static int drm_display_loop(void *data, int width, int height, int index) {
 
   struct Render_Image *image = (struct Render_Image *)data;
   AVFrame *frame = image->sframe.frame;
-  if (orig_colorspace != frame->colorspace || orig_colorprimary != frame->color_primaries) {
-    orig_colorspace = frame->colorspace;
+  if (orig_colortrc != frame->color_trc || orig_colorprimary != frame->color_primaries) {
+    orig_colortrc = frame->color_trc;
     orig_colorprimary = frame->color_primaries;
     drm_config.full_color_range = ffmpeg_is_frame_full_range(frame);
     drm_config.colorspace = ffmpeg_get_frame_colorspace(frame);
@@ -522,7 +522,7 @@ static int drm_display_loop(void *data, int width, int height, int index) {
       drm_choose_color_config(colorspace, drm_config.full_color_range);
     }
     drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, 
-                   !drm_config.need_change_color ? drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020RGB : DEFAULTCOLOR] : drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020YCC : (drm_config.colorspace == COLORSPACE_REC_709 ? D709YCC : D601YCC)]);
+                   !drm_config.need_change_color ? drmInfoPtr->conn_colorspace_values[(drm_config.colorspace == COLORSPACE_REC_2020 || frame->color_trc == AVCOL_TRC_SMPTE2084) ? D2020RGB : DEFAULTCOLOR] : drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020YCC : (drm_config.colorspace == COLORSPACE_REC_709 ? D709YCC : D601YCC)]);
     if (frame->color_primaries == AVCOL_PRI_SMPTE432 && drmInfoPtr->conn_colorspace_values[D65P3] != 0) {
       drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, drmInfoPtr->conn_colorspace_values[D65P3]);
     }
@@ -623,18 +623,10 @@ static int get_config_from_frame(struct Render_Config *config) {
 
     if (drm_config.filter_action & FILTER_SCALE_FMT) {
       need_change_color_config = false;
-  #ifdef HAVE_FFMPEGFILTER
-      if (ffmpeg_filters_args.pix_fmt > 0) {
-        drm_config.dst_fmt = ffmpeg_filters_args.pix_fmt;
-      }
+      if (useHdr)
+        drm_config.dst_fmt = FILTER_DEFAULT_HDR_FMT;
       else
-  #endif
-      {
-        if (useHdr)
-          drm_config.dst_fmt = FILTER_DEFAULT_HDR_FMT;
-        else
-          drm_config.dst_fmt = FILTER_DEFAULT_FMT;
-      }
+        drm_config.dst_fmt = FILTER_DEFAULT_FMT;
     }
 
     int flags = 0;
@@ -658,6 +650,7 @@ static int get_config_from_frame(struct Render_Config *config) {
 
   if (format == 0 || drm_get_plane_info(drmInfoPtr, format) < 0) {
     fprintf(stderr, "DRM: could not find supported format with ffmpeg pix format(%d).\n", drm_config.dst_fmt);
+    fprintf(stderr, "Please try add '-filters scale:fmt' option to cmd.\n");
     return -1;
   }
 
@@ -667,6 +660,7 @@ static int get_config_from_frame(struct Render_Config *config) {
     fprintf(stderr, "Could not set fb to drm crtc.\n");
     return -1;
   }
+  drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->crtc_id, drmInfoPtr->crtc_gammalut_prop_id, 0);
 
   return 0;
 }

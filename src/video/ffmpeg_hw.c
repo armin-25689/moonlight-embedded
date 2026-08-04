@@ -141,8 +141,8 @@ static inline bool is_two_plane_swfmt (bool hdr, bool yuv444) {
 static int vulkan_get_format(AVBufferRef *device_ref) {
   enum AVPixelFormat yuv420[] = { AV_PIX_FMT_NV12, AV_PIX_FMT_NONE };
   enum AVPixelFormat yuv42010[] = { AV_PIX_FMT_P010, AV_PIX_FMT_NONE };
-  enum AVPixelFormat yuv444[] = { AV_PIX_FMT_VUYX, AV_PIX_FMT_YUV444P, AV_PIX_FMT_NONE };
-  enum AVPixelFormat yuv44410[] = { AV_PIX_FMT_XV30, AV_PIX_FMT_YUV444P10, AV_PIX_FMT_NONE };
+  enum AVPixelFormat yuv444[] = { AV_PIX_FMT_VUYX, AV_PIX_FMT_YUV444P, AV_PIX_FMT_UYVA, AV_PIX_FMT_NONE };
+  enum AVPixelFormat yuv44410[] = { AV_PIX_FMT_XV30, AV_PIX_FMT_YUV444P10, AV_PIX_FMT_YUV444P16, AV_PIX_FMT_NONE };
 
   AVHWFramesConstraints *constraints = av_hwdevice_get_hwframe_constraints(device_ref, NULL);
   if (!constraints)

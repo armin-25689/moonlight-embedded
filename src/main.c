@@ -138,6 +138,7 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
 
 #ifdef HAVE_FFMPEGFILTER
   if (config->filters) {
+    ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.bt2020;
     if (strstr(config->filters, "color_primaries:")) {
       drFlags |= FILTER_TONEMAP_COLOR_PRIMARIES;
       if (strstr(config->filters, "p3")) {
@@ -146,20 +147,17 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
         ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.bt2020;
       } else if (strstr(config->filters, ":bt709") || strstr(config->filters, ":bt601")) {
         ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.bt709;
-      } else  {
-        ffmpeg_filters_args.color_primaries = ffmpeg_filters_args.color.bt2020;
       }
     }
 #define MAXV(a, b)  ((a) > (b) ? (a) : (b))
-    double minlight;
-    int middlelight, maxlight;
+    int cllDlumi, fallDcll, lumiRatio;
     const char *flagpos = strstr(config->filters, "light:");
     if (flagpos) {
-      if (sscanf(flagpos, "light:%lf:%d:%d", &minlight, &middlelight, &maxlight) == 3) {
+      if (sscanf(flagpos, "light:%d:%d:%d", &cllDlumi, &fallDcll, &lumiRatio) == 3) {
         drFlags |= FILTER_TONEMAP_LIGHT;
-        ffmpeg_filters_args.light.minlight = minlight < 0.0001 ? 0 : (minlight > 100.0 ? 0 : (int)(minlight * 10000));
-        ffmpeg_filters_args.light.maxlight = maxlight < 0 ? 0 : (maxlight > 65535 ? 10000 : maxlight);
-        ffmpeg_filters_args.light.middlelight = middlelight < 0 ? 0 : (middlelight > 65535 ? 10000 : middlelight);
+        ffmpeg_filters_args.light.ratio_num.lumi = (lumiRatio < 0 || lumiRatio > LIGHT_LUMI_DEN) ? 10 : lumiRatio;
+        ffmpeg_filters_args.light.ratio_num.cll = (cllDlumi < 0 || cllDlumi > LIGHT_CLL_DEN) ? 18 : cllDlumi;
+        ffmpeg_filters_args.light.ratio_num.fall = (fallDcll < 0 || fallDcll > LIGHT_FALL_DEN) ? 3 : fallDcll;
       }
     }
 #undef MAXV
@@ -424,13 +422,8 @@ int main(int argc, char* argv[]) {
     }
     if (config.yuv444) {
       if (config.stream.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444) {
-        if (!wantHdr) {
-          config.stream.colorSpace = COLORSPACE_REC_709;
-          config.stream.colorRange = COLOR_RANGE_FULL;
-        }
-        if (system == X11_VAAPI) {
-          config.stream.colorRange = COLOR_RANGE_FULL;
-        }
+        config.stream.colorSpace = COLORSPACE_REC_709;
+        config.stream.colorRange = COLOR_RANGE_FULL;
         printf("Try to use yuv444 mode\n");
       }
       else {

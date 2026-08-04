@@ -886,7 +886,7 @@ DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vulkan = {
   .setup = x11_setup_vulkan,
   .cleanup = x11_cleanup,
   .submitDecodeUnit = x11_submit_decode_unit,
-  .capabilities = CAPABILITY_DIRECT_SUBMIT,
+  .capabilities = CAPABILITY_DIRECT_SUBMIT | CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC | CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1,
 };
 
 DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vaapi = {

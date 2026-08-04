@@ -51,11 +51,19 @@ extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11;
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vaapi;
 extern DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vulkan;
 #ifdef HAVE_FFMPEGFILTER
+#define LIGHT_CLL_DEN 20
+#define LIGHT_FALL_DEN 6
+#define LIGHT_LUMI_DEN 10
 struct Ffmpeg_Filters_Args {
   struct {
-    int minlight;
-    int middlelight;
-    int maxlight;
+    uint16_t maxlight;
+    uint16_t maxfall;
+    uint16_t maxcll;
+    struct {
+      int lumi;
+      int cll;
+      int fall;
+    } ratio_num;
   } light;
   struct {
     int width;
@@ -63,7 +71,6 @@ struct Ffmpeg_Filters_Args {
   } video_size;
   int action;
   const char *color_primaries;
-  int pix_fmt;
   struct {
     const char *p3;
     const char *bt2020;

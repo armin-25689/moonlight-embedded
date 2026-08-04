@@ -35,8 +35,7 @@
 #define MAX_FILTER_DESC_LEN 255
 
 struct Ffmpeg_Filters_Args ffmpeg_filters_args = { .color.p3 = "smpte432", .color.bt2020 = "bt2020",
-                                                   .color.bt709 = "bt709", .color.bt601 = "bt601",
-                                                   .pix_fmt = -1 };
+                                                   .color.bt709 = "bt709", .color.bt601 = "bt601" };
 enum { FILTER_TONEMAP_VAAPI = 0, FILTER_SCALE_VAAPI };
 static const char *filter_name_list[] = { "tonemap_vaapi", "scale_vaapi" };
 // General decoder and renderer state
@@ -85,6 +84,7 @@ static inline enum AVPixelFormat get_pix_fmt (AVFrame *frame) {
   return pix_fmt;
 }
 
+/*
 static inline const char* get_pix_fmt_name (AVFrame *frame) {
   enum AVPixelFormat pix_fmt = get_pix_fmt(frame);
   if (pix_fmt < 0)
@@ -92,6 +92,7 @@ static inline const char* get_pix_fmt_name (AVFrame *frame) {
   else 
     return av_get_pix_fmt_name(pix_fmt);
 }
+*/
 
 static inline AVFilterContext* get_filter (const char* filtername, char* filterdesc, AVFilterGraph *graph, AVBufferRef *device_ctx) {
   if (filtername == NULL || filterdesc == NULL || graph == NULL) {
@@ -120,153 +121,205 @@ static inline AVFilterContext* get_filter (const char* filtername, char* filterd
   return ctx;
 }
 
-static inline struct Filter_Desc* generate_vaapi_desc (AVFrame *frame, struct Ffmpeg_Filters_Args *args, int *filter_count) {
-  if (frame == NULL || hdr_metadata_ref == NULL || args == NULL || filter_count == NULL) {
+struct Color_Args {
+  const char* color_primaries;
+  uint16_t gbrw[8];
+  uint16_t maxlight;
+  uint16_t minlight;
+  uint16_t maxcll;
+  uint16_t maxfall;
+  enum AVPixelFormat sdrfmt;
+  enum AVPixelFormat hdrfmt;
+  enum AVPixelFormat srcformat;
+  int width;
+  int height;
+  bool ishdr;
+  bool tosdr;
+};
+
+#define APPEND_DESC(dstdesc, fmt, ...) \
+  do { \
+    char iargs[MAX_FILTER_DESC_LEN] = {'\0'}; \
+    snprintf(iargs, sizeof(iargs), fmt, ##__VA_ARGS__); \
+    int dlen = strlen(dstdesc); \
+    int alen = strlen(iargs); \
+    if (dlen + alen + 1 < MAX_FILTER_DESC_LEN) { \
+      if (dlen > 1) { \
+        char *colon = ":"; \
+        memcpy(dstdesc + dlen, colon, 2); \
+        dlen++; \
+      } \
+      memcpy(dstdesc + dlen, iargs, strlen(iargs) + 1); \
+    } \
+  } while (0)
+
+static inline int deal_filters_args (AVFrame *frame, struct Ffmpeg_Filters_Args *args, struct Color_Args *colors) {
+  if (frame == NULL || hdr_metadata_ref == NULL || args == NULL || colors == NULL) {
+    fprintf(stderr, "Invalied arguments.\n");
+    return -1;
+  }
+  uint16_t p3_gbrw[8] = { 13250, 34500, 7500, 3000, 34000, 16000, 15635, 16450 };
+  uint16_t bt2020_gbrw[8] = { hdr_metadata_ref[2], hdr_metadata_ref[3], hdr_metadata_ref[4], hdr_metadata_ref[5], hdr_metadata_ref[0], hdr_metadata_ref[1], hdr_metadata_ref[6], hdr_metadata_ref[7] };
+
+  if (frame->color_trc == AVCOL_TRC_SMPTE2084) {
+    colors->ishdr = true;
+  }
+  colors->color_primaries = args->color_primaries == NULL ? args->color.bt2020 : args->color_primaries;
+  if (colors->color_primaries == args->color.bt601 || colors->color_primaries == args->color.bt709 ||
+      (colors->color_primaries == args->color.p3 && (args->action & FILTER_TONEMAP_LIGHT) == 0)) {
+    colors->tosdr = true;
+  }
+  if ((args->action & FILTER_TONEMAP_COLOR_PRIMARIES) &&
+      (args->color_primaries == args->color.p3)) {
+    memcpy(colors->gbrw, p3_gbrw, sizeof(p3_gbrw));
+    // write modified hdr data to shared list
+    if (colors->ishdr) {
+      hdr_metadata_ref[0] = p3_gbrw[4];
+      hdr_metadata_ref[1] = p3_gbrw[5];
+      hdr_metadata_ref[2] = p3_gbrw[0];
+      hdr_metadata_ref[3] = p3_gbrw[1];
+      hdr_metadata_ref[4] = p3_gbrw[2];
+      hdr_metadata_ref[5] = p3_gbrw[3];
+      hdr_metadata_ref[6] = p3_gbrw[6];
+      hdr_metadata_ref[7] = p3_gbrw[7];
+    }
+  }
+  else {
+    memcpy(colors->gbrw, bt2020_gbrw, sizeof(bt2020_gbrw));
+  }
+
+  if ((args->action & FILTER_TONEMAP_LIGHT) &&
+      ((args->light.maxfall > 0 &&
+        args->light.maxcll > 0) ||
+       args->light.maxlight > 0)) {
+    colors->maxlight = args->light.maxlight;
+    colors->minlight = hdr_metadata_ref[9];
+    if (hdr_metadata_ref[10] == 0) {
+      colors->maxcll = 0;
+      colors->maxfall = 0;
+    }
+    else {
+      colors->maxcll = args->light.maxcll;
+      colors->maxfall = args->light.maxfall;
+    }
+    // write modified hdr data to shared list
+    if (hdr_metadata_ref[8] != 0) {
+      if (colors->ishdr) {
+        printf("Filters will tonemap light(maxcll:maxfall:maxluminance) from %d:%d:%d to %d:%d:%d.\n", hdr_metadata_ref[10], hdr_metadata_ref[11],
+               hdr_metadata_ref[8], colors->maxcll, colors->maxfall, colors->maxlight);
+        hdr_metadata_ref[8] = colors->maxlight;
+        hdr_metadata_ref[9] = colors->minlight;
+        hdr_metadata_ref[10] = colors->maxcll;
+        hdr_metadata_ref[11] = colors->maxfall;
+      }
+    }
+  }
+  else {
+    colors->maxlight = hdr_metadata_ref[8];
+    colors->minlight = hdr_metadata_ref[9];
+    colors->maxcll = hdr_metadata_ref[10];
+    colors->maxfall = hdr_metadata_ref[11];
+  }
+
+  colors->hdrfmt = AV_PIX_FMT_X2RGB10LE;
+  colors->sdrfmt = AV_PIX_FMT_BGRA;
+  colors->srcformat = get_pix_fmt(frame);
+
+  if ((args->action & FILTER_SCALE_SIZE) &&
+      (args->video_size.width > 0 && args->video_size.height > 0)) {
+    colors->width = args->video_size.width;
+    colors->height = args->video_size.height;
+  }
+  else {
+    colors->width = frame->width;
+    colors->height = frame->height;
+  }
+
+  return 0;
+}
+
+static inline int generate_vaapi_desc (int action, struct Filter_Desc *filters_desc, int *filter_count, struct Color_Args *colors) {
+  int count = 0;
+
+  if (colors->ishdr &&
+      ((action & FILTER_TONEMAP_COLOR_PRIMARIES) ||
+       (action & FILTER_TONEMAP_LIGHT))) {
+    if (hdr_metadata_ref[0] == 0) {
+      fprintf(stderr, "hdr_metadata_ref is not fill correctly.\n");
+      return -1;
+    }
+
+    if (colors->tosdr) {
+      APPEND_DESC(filters_desc[count].desc,
+                  "format=%s:primaries=%s:transfer=%s",
+                  av_get_pix_fmt_name(colors->sdrfmt), colors->color_primaries, "iec61966-2-1");
+    } else {
+      APPEND_DESC(filters_desc[count].desc,
+                  "format=%s:primaries=%s:display=%d %d|%d %d|%d %d|%d %d|%d %d",
+                  av_get_pix_fmt_name(colors->srcformat), colors->color_primaries,
+                  colors->gbrw[0], colors->gbrw[1], colors->gbrw[2], colors->gbrw[3],
+                  colors->gbrw[4], colors->gbrw[5], colors->gbrw[6], colors->gbrw[7],
+                  colors->minlight, colors->maxlight * 10000);
+      if (colors->maxcll > 0 && colors->maxfall > 0) {
+        APPEND_DESC(filters_desc[count].desc,
+                    "light=%d %d",
+                    colors->maxcll, colors->maxfall);
+      }
+      if (strcmp(colors->color_primaries, "smpte432") == 0) {
+        APPEND_DESC(filters_desc[count].desc,
+                    "matrix=%s",
+                    "bt709");
+      }
+    }
+
+    filters_desc[count].name = filter_name_list[FILTER_TONEMAP_VAAPI];
+    count++;
+  }
+
+  if ((action & FILTER_SCALE_FMT) ||
+      (action & FILTER_SCALE_SIZE) || (colors->tosdr && !colors->ishdr)) {
+    enum AVPixelFormat dstfmt = (use_hdr_fmt && !colors->tosdr) ? colors->hdrfmt : colors->sdrfmt;
+    dstfmt = (action & FILTER_SCALE_FMT || (colors->tosdr && !colors->ishdr)) ? dstfmt : colors->srcformat;
+    APPEND_DESC(filters_desc[count].desc,
+                "w=%d:h=%d:format=%s:mode=fast",
+                colors->width, colors->height, av_get_pix_fmt_name(dstfmt));
+
+    filters_desc[count].name = filter_name_list[FILTER_SCALE_VAAPI];
+    count++;
+  }
+
+  *filter_count = count;
+  return 0;
+}
+
+static inline struct Filter_Desc* generate_filters_desc (AVFrame *frame, struct Ffmpeg_Filters_Args *args, int *filter_count) {
+  enum AVPixelFormat format = frame->format;
+  struct Color_Args colors = {0};
+  if (deal_filters_args(frame, args, &colors) < 0) {
+    fprintf(stderr, "Filter generator could not fill args.\n");
+    return NULL;
+  }
+  if (filter_count == NULL) {
     fprintf(stderr, "Invalied arguments.\n");
     return NULL;
   }
-  char tonemap[MAX_FILTER_DESC_LEN] = {'\0'};
-  int p3_gbrw[8] = { 13250, 34500, 7500, 3000, 34000, 16000, 15635, 16450 };
-  int bt2020_gbrw[8] = { hdr_metadata_ref[2], hdr_metadata_ref[3], hdr_metadata_ref[4], hdr_metadata_ref[5], hdr_metadata_ref[0], hdr_metadata_ref[1], hdr_metadata_ref[6], hdr_metadata_ref[7] };
-
-  int *gbrw = NULL;
-  int minlight, maxlight, maxcll, maxfall;
-  if ((args->action & FILTER_TONEMAP_COLOR_PRIMARIES) &&
-      (args->color_primaries == args->color.p3)) {
-    gbrw = p3_gbrw;
-    // write modified hdr data to shared list
-    hdr_metadata_ref[0] = p3_gbrw[4];
-    hdr_metadata_ref[1] = p3_gbrw[5];
-    hdr_metadata_ref[2] = p3_gbrw[0];
-    hdr_metadata_ref[3] = p3_gbrw[1];
-    hdr_metadata_ref[4] = p3_gbrw[2];
-    hdr_metadata_ref[5] = p3_gbrw[3];
-    hdr_metadata_ref[6] = p3_gbrw[6];
-    hdr_metadata_ref[7] = p3_gbrw[7];
-  }
-  else {
-    gbrw = bt2020_gbrw;
-  }
-  if ((args->action & FILTER_TONEMAP_LIGHT) &&
-      (args->light.maxlight > 0 &&
-       args->light.middlelight > 0)) {
-    maxlight = args->light.maxlight;
-    minlight = args->light.minlight;
-    if (hdr_metadata_ref[10] == 0) {
-      maxcll = 0;
-      maxfall = 0;
-    }
-    else {
-      maxcll = args->light.maxlight;
-      maxfall = args->light.middlelight;
-    }
-    // write modified hdr data to shared list
-    hdr_metadata_ref[8] = maxlight;
-    hdr_metadata_ref[9] = minlight;
-    hdr_metadata_ref[10] = maxcll;
-    hdr_metadata_ref[11] = maxfall;
-  }
-  else {
-    maxlight = hdr_metadata_ref[8];
-    minlight = hdr_metadata_ref[9];
-    maxcll = hdr_metadata_ref[10];
-    maxfall = hdr_metadata_ref[11];
-  }
-    
-  if (args->color_primaries == args->color.bt601 || args->color_primaries == args->color.bt709) {
-    snprintf(tonemap, sizeof(tonemap),
-             "format=%s:primaries=%s:transfer=%s:matrix=%s", 
-             get_pix_fmt_name(frame), args->color_primaries, args->color_primaries, args->color_primaries);
-  } else if (args->color_primaries == args->color.p3 && (args->action & FILTER_TONEMAP_LIGHT) == 0) {
-    snprintf(tonemap, sizeof(tonemap),
-             "format=%s:primaries=%s:transfer=%s:matrix=%s",
-             get_pix_fmt_name(frame), args->color_primaries, "bt709", "bt709");
-  } else {
-    snprintf(tonemap, sizeof(tonemap),
-             "format=%s:primaries=%s:transfer=%s:matrix=%s:display=%d %d|%d %d|%d %d|%d %d|%d %d", 
-             get_pix_fmt_name(frame), args->color_primaries, "smpte2084",
-             frame->colorspace == AVCOL_SPC_BT2020_NCL ? "bt2020nc" : "bt2020",
-             gbrw[0], gbrw[1], gbrw[2], gbrw[3], gbrw[4], gbrw[5], gbrw[6], gbrw[7],
-             minlight, maxlight * 10000);
-    if (maxcll > 0 && maxfall > 0) {
-      char lightargs[30] = {'\0'};
-      int len = strlen(tonemap);
-      snprintf(lightargs, sizeof(lightargs),
-               ":light=%d %d", maxcll, maxfall);
-      memcpy(tonemap + len, lightargs, strlen(lightargs) + 1);
-    }
-  }
-
-  char scale[MAX_FILTER_DESC_LEN] = {'\0'};
-  int width, height, format;
-  if ((args->action & FILTER_SCALE_SIZE) &&
-      (args->video_size.width > 0 && args->video_size.height > 0)) {
-    width = args->video_size.width;
-    height = args->video_size.height;
-  }
-  else {
-    width = frame->width;
-    height = frame->height;
-  }
-  if (args->action & FILTER_SCALE_FMT) {
-    if (use_hdr_fmt) {
-      format = AV_PIX_FMT_X2RGB10LE;
-    }
-    else {
-      format = AV_PIX_FMT_BGRA;
-    }
-    args->pix_fmt = format;
-  }
-  else {
-      format = AV_PIX_FMT_NONE;
-  }
-  snprintf(scale, sizeof(scale),
-           "w=%d:h=%d:format=%s:mode=fast",
-           width, height, format == AV_PIX_FMT_NONE ? get_pix_fmt_name(frame) : av_get_pix_fmt_name(format));
-
   struct Filter_Desc *filters_desc = calloc(MAX_FILTER, sizeof(struct Filter_Desc));
   if (filters_desc == NULL) {
     fprintf(stderr, "Alloc filters desc mem failed.\n");
     return NULL;
   }
 
-  int count = 0;
-  if (filter_frame->colorspace == AVCOL_SPC_BT2020_NCL || filter_frame->colorspace == AVCOL_SPC_BT2020_CL) {
-    if ((args->action & FILTER_TONEMAP_COLOR_PRIMARIES) ||
-        (args->action & FILTER_TONEMAP_LIGHT)) {
-      if (hdr_metadata_ref[0] == 0) {
-        fprintf(stderr, "hdr_metadata_ref is not fill correctly.\n");
-        return NULL;
-      }
-
-      filters_desc[count].name = filter_name_list[FILTER_TONEMAP_VAAPI];
-      int len = strlen(tonemap);
-      memcpy(filters_desc[count].desc, tonemap, len + 1);
-      count++;
-    }
-  }
-  if ((args->action & FILTER_SCALE_FMT) ||
-      (args->action & FILTER_SCALE_SIZE)) {
-    filters_desc[count].name = filter_name_list[FILTER_SCALE_VAAPI];
-    int len = strlen(scale);
-    memcpy(filters_desc[count].desc, scale, len + 1);
-    count++;
-  }
-
-  *filter_count = count;
-  return filters_desc;
-}
-
-static inline struct Filter_Desc* generate_filters_desc (AVFrame *frame, struct Ffmpeg_Filters_Args *args, int *filter_count) {
-  enum AVPixelFormat format = frame->format;
   switch (format) {
   case AV_PIX_FMT_VAAPI:
-    return generate_vaapi_desc(frame, args, filter_count);
+    if (generate_vaapi_desc(args->action, filters_desc, filter_count, &colors) == 0)
+      return filters_desc;
+    break;
   default:
     fprintf(stderr, "Filter generator could not support this format: %d.\n", format);
-    return NULL;
+    break;
   }
 
+  free(filters_desc);
   return NULL;
 }
 
@@ -303,6 +356,10 @@ static inline int ffmpeg_create_filter_graph(AVFrame *frame, AVCodecContext *dec
     goto filter_clear;
   }
   AVRational time_base = { .num = 1, .den = 300 };
+  if (frame->time_base.num != 0 && frame->time_base.den != 0) {
+    time_base.num = frame->time_base.num;
+    time_base.den = frame->time_base.den;
+  }
   para->width = frame->width;
   para->height = frame->height;
   para->format = frame->format;
@@ -403,7 +460,7 @@ static inline int pass_frame_to_graph (AVFrame *inframe, AVFilterContext *src_ct
 static inline int ffmpeg_get_filte_frame(AVFrame *frame, AVCodecContext *decoder_ctx) {
   int err = -1;
   AVFilterContext *src_ctx, *sink_ctx;
-  if (filter_frame->colorspace == AVCOL_SPC_BT2020_NCL || filter_frame->colorspace == AVCOL_SPC_BT2020_CL) {
+  if (filter_frame->color_trc == AVCOL_TRC_SMPTE2084 || filter_frame->color_trc == AVCOL_TRC_ARIB_STD_B67) {
     if (hdr_filter_graph->graph == NULL) {
       if (ffmpeg_create_filter_graph(filter_frame, decoder_ctx, hdr_filter_graph) < 0) {
         fprintf(stderr, "Create hdr filter graph failed.\n");
@@ -422,6 +479,7 @@ static inline int ffmpeg_get_filte_frame(AVFrame *frame, AVCodecContext *decoder
     }
     src_ctx = sdr_filter_graph->src_ctx;
     sink_ctx = sdr_filter_graph->sink_ctx;
+    filter_frame->color_trc = AVCOL_TRC_IEC61966_2_1;
   }
 
   return pass_frame_to_graph(filter_frame, src_ctx, frame, sink_ctx);
@@ -505,4 +563,14 @@ void ffmpeg_filter_stop_filte () {
   }
   av_frame_free(&frame);
   destroy_filter_graphs();
+}
+
+void ffmpeg_filter_caculate_light (uint16_t *srcmaxlight, uint16_t *srccll, uint16_t *srcfall) {
+  if (*srccll == 0 || *srcfall == 0) {
+    *srccll = (uint16_t) *srcmaxlight * ffmpeg_filters_args.light.ratio_num.cll / LIGHT_CLL_DEN;
+    *srcfall = (uint16_t) *srccll * ffmpeg_filters_args.light.ratio_num.fall / LIGHT_FALL_DEN;
+  }
+  ffmpeg_filters_args.light.maxlight = ffmpeg_filters_args.light.ratio_num.lumi == 0 ? *srcmaxlight : (uint16_t) *srcmaxlight * ffmpeg_filters_args.light.ratio_num.lumi / LIGHT_LUMI_DEN;
+  ffmpeg_filters_args.light.maxcll = ffmpeg_filters_args.light.ratio_num.cll == 0 ? *srccll : (uint16_t) ffmpeg_filters_args.light.maxlight * ffmpeg_filters_args.light.ratio_num.cll / LIGHT_CLL_DEN;
+  ffmpeg_filters_args.light.maxfall = ffmpeg_filters_args.light.ratio_num.fall == 0 ? *srcfall : (uint16_t) ffmpeg_filters_args.light.maxcll * ffmpeg_filters_args.light.ratio_num.fall / LIGHT_FALL_DEN;
 }

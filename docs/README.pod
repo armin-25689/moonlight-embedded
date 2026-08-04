@@ -118,17 +118,16 @@ x11 platform also can use, but slow than others.
 
 =item B<-filters> [I<FILTERS>]
 
-Arguments as '[color_primaries:p3],[light:0:100:400],[scale:fmt:size]'
+Arguments as '[color_primaries:p3],[light:0:0:0],[scale:fmt:size]'
 color_primaries can use bt2020|bt709|p3.
-light fill minDisplayLuminance:maxfall:maxDisplayLuminance.
+light fill maxcll/maxDisplayLuminance:maxfall/maxcll:newMaxLumi/oldMaxLumi.
+first is 0-20,then 0-6,then 0-10.default is [18:3:10].0 means no change.
 scale can fill fmt|size. Fill size will change decoder frame w,h to 
 display width and height.Fill fmt will change frame format to better
 compatible format such as ARGB or X2RGB10.
 wayland_vaapi platform can use scale:fmt filters to render yuv444.
 Use color_primaries:p3 to change bt2020 to display p3 or others.
 Use light try to finish hdr tonemap.This may not supported now.
-Note: this option may not work correctly because of FreeBSD 
-HDR support or option implemention.
 The option is only worked with drm|drm_vaapi|wayland|wayland_vaapi 
 platform.
 
@@ -334,7 +333,8 @@ Connect:
  And try to disable kbdmux or use -input to specify wanted keyboards or mouses.
 
  Note1: If meet crash frequently, try adjust Integrated Graphics Device(IDG)
-       Aperture size from BIOS.
+       Aperture size from BIOS.And add this line to /boot/loader.conf
+       compat.linuxkpi.i915_reset=1 #for intel igpu
  Note2: If want use drm platform smoothly, The sunshine need to switch to 
        software encoder to enable slice multi-thread for decoder.
  Note3: If have no audio device,use vitual_oss:

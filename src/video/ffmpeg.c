@@ -81,23 +81,23 @@ static inline int ffmpeg_attach_hdr10_metadata (AVFrame *frame) {
       mastering->has_luminance = data.maxDisplayLuminance != 0 ? 1 : 0;
       mastering->has_primaries = data.displayPrimaries[0].x != 0 ? 1 : 0;
 
-      if (data.maxContentLightLevel > 0 && data.maxFrameAverageLightLevel > 0) {
+      uint16_t mcll = data.maxContentLightLevel;
+      uint16_t mfall = data.maxFrameAverageLightLevel;
+#ifdef HAVE_FFMPEGFILTER
+      ffmpeg_filter_caculate_light(&data.maxDisplayLuminance, &mcll, &mfall);
+#endif
+      if (mcll > 0 && mfall > 0) {
         AVContentLightMetadata *light = av_content_light_metadata_create_side_data(frame);
         if (light == NULL) {
           fprintf(stderr, "Cannot get light ptr from frame.\n");
           return -1;
         }
-        light->MaxCLL = data.maxContentLightLevel;
-        light->MaxFALL = data.maxFrameAverageLightLevel;
+        light->MaxCLL = mcll;
+        light->MaxFALL = mfall;
         if (ffmpeg_hdr_metadata[10] == 0) {
           ffmpeg_hdr_metadata[10] = light->MaxCLL;
           ffmpeg_hdr_metadata[11] = light->MaxFALL;
         }
-/*
-        light->MaxCLL = data.maxContentLightLevel > 0 ? data.maxContentLightLevel : data.maxDisplayLuminance;
-        light->MaxFALL = data.maxFrameAverageLightLevel > 0 ? data.maxFrameAverageLightLevel : (int)(light->MaxCLL / 5);
-        light->MaxFALL = light->MaxFALL < 100 ? 100 : light->MaxFALL;
-*/
       }
 
       if (ffmpeg_hdr_metadata[0] == 0) {
@@ -475,7 +475,7 @@ int ffmpeg_get_frame_colorspace(const AVFrame* frame) {
   case AVCOL_SPC_BT2020_CL:
     return COLORSPACE_REC_2020;
   default:
-    return COLORSPACE_REC_709;
+    return COLORSPACE_REC_601;
   }
 }
 

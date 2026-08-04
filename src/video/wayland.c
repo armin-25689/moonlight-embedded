@@ -427,7 +427,11 @@ static void registry_handler(void *data,struct wl_registry *registry, uint32_t i
     if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
       wl_render_base.zwp_linux_dmabuf = wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, 4);
     } else if (strcmp(interface, wp_color_manager_v1_interface.name) == 0) {
+      #ifndef WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_COMPOUND_POWER_2_4
       wl_render_base.wp_color_manager = wl_registry_bind(registry, id, &wp_color_manager_v1_interface, 1);
+      #else
+      wl_render_base.wp_color_manager = wl_registry_bind(registry, id, &wp_color_manager_v1_interface, 2);
+      #endif
       wp_color_manager_v1_add_listener(wl_render_base.wp_color_manager, &wp_color_manager_listener, NULL);
     } else if (strcmp(interface, wp_color_representation_manager_v1_interface.name) == 0) {
       wl_render_base.wp_color_representation = wl_registry_bind(registry, id, &wp_color_representation_manager_v1_interface, 1);
@@ -777,7 +781,7 @@ static int set_color_properties(int index, AVFrame* frame) {
 
   static int colorp = -1;
   static int colors = -1;
-  if (colorp == frame->color_primaries && colors == frame->colorspace)
+  if (colorp == frame->color_primaries && colors == frame->color_trc)
     return 0;
 
   bool hdr_active = false;
@@ -832,8 +836,18 @@ static int set_color_properties(int index, AVFrame* frame) {
     }
     break;
   }
-  if (!hdr_active)
-    tf_flag = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22;
+  if (!hdr_active) {
+    if (frame->color_trc == AVCOL_TRC_IEC61966_2_1) {
+      #ifndef WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_COMPOUND_POWER_2_4
+      tf_flag = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_SRGB;
+      #else
+      tf_flag = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_COMPOUND_POWER_2_4;
+      #endif
+    }
+    else {
+      tf_flag = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22;
+    }
+  }
   wp_image_description_creator_params_v1_set_primaries_named(creator, primaries_flag);
   wp_image_description_creator_params_v1_set_tf_named(creator, tf_flag);
   if (tf_flag == WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ) {
@@ -861,7 +875,7 @@ static int set_color_properties(int index, AVFrame* frame) {
   wp_image_description_creator_params_v1_destroy(creator);
 
   colorp = frame->color_primaries;
-  colors = frame->colorspace;
+  colors = frame->color_trc;
 
   return 0;
 }
@@ -1150,6 +1164,7 @@ static int wl_sync_frame_config(struct Render_Config *config) {
     }
     if (found < 0) {
       fprintf(stderr, "ERROR: wayland linux dmabuf not support the drm format: %.4s.\n", (char *)&wl_render_base.drm_buf[0].format[0]);
+      fprintf(stderr, "Please try add '-filters scale:fmt' option to cmd.\n");
       return -1;
     }
   }
