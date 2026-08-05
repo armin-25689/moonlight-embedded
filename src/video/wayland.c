@@ -134,6 +134,7 @@ struct _wl_render {
   } presentation;
   uint64_t size[MAX_PLANE_NUM];
   uint32_t *supported_format;
+  int wp_color_manager_version;
   int supported_format_count;
   int drm_fd;
   int dst_fmt;
@@ -427,11 +428,11 @@ static void registry_handler(void *data,struct wl_registry *registry, uint32_t i
     if (strcmp(interface, zwp_linux_dmabuf_v1_interface.name) == 0) {
       wl_render_base.zwp_linux_dmabuf = wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, 4);
     } else if (strcmp(interface, wp_color_manager_v1_interface.name) == 0) {
-      #ifndef WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_COMPOUND_POWER_2_4
-      wl_render_base.wp_color_manager = wl_registry_bind(registry, id, &wp_color_manager_v1_interface, 1);
-      #else
-      wl_render_base.wp_color_manager = wl_registry_bind(registry, id, &wp_color_manager_v1_interface, 2);
-      #endif
+      wl_render_base.wp_color_manager_version = version;
+      if (version == 1)
+        wl_render_base.wp_color_manager = wl_registry_bind(registry, id, &wp_color_manager_v1_interface, 1);
+      else
+        wl_render_base.wp_color_manager = wl_registry_bind(registry, id, &wp_color_manager_v1_interface, 2);
       wp_color_manager_v1_add_listener(wl_render_base.wp_color_manager, &wp_color_manager_listener, NULL);
     } else if (strcmp(interface, wp_color_representation_manager_v1_interface.name) == 0) {
       wl_render_base.wp_color_representation = wl_registry_bind(registry, id, &wp_color_representation_manager_v1_interface, 1);
@@ -837,14 +838,11 @@ static int set_color_properties(int index, AVFrame* frame) {
     break;
   }
   if (!hdr_active) {
-    if (frame->color_trc == AVCOL_TRC_IEC61966_2_1) {
-      #ifndef WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_COMPOUND_POWER_2_4
-      tf_flag = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_SRGB;
-      #else
+    if (frame->color_trc == AVCOL_TRC_IEC61966_2_1 && wl_render_base.wp_color_manager_version > 1) {
       tf_flag = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_COMPOUND_POWER_2_4;
-      #endif
     }
-    else {
+    else
+    {
       tf_flag = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22;
     }
   }
@@ -872,7 +870,6 @@ static int set_color_properties(int index, AVFrame* frame) {
   wp_color_management_surface_v1_set_image_description(wl_render_base.wp_color_surface, descriptor, 0);
 
   wp_image_description_v1_destroy(descriptor);
-  wp_image_description_creator_params_v1_destroy(creator);
 
   colorp = frame->color_primaries;
   colors = frame->color_trc;
