@@ -21,7 +21,6 @@
 
 #include "connection.h"
 #include <sys/stat.h>
-#include <sys/signalfd.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -29,19 +28,19 @@
 #include <string.h>
 #include <errno.h>
 
+#define POLL_CTL_ADD 1
+#define POLL_CTL_MOD 2
+#define POLL_CTL_DEL 4
+
 LIST_HEAD(head_of_list, List_Node);
 static struct head_of_list first_node;
 static struct head_of_list *head_node = &first_node;
-static int epoll_fd = -1;
-static int sigFd = -1;
+static int kqueue_fd = -1;
 static bool exitnow = false;
 bool done = false;
 
 static int loop_sig_handler(int fd, void *data) {
-  struct signalfd_siginfo info;
-  if (read(fd, &info, sizeof(info)) != sizeof(info))
-    return LOOP_RETURN;
-  switch (info.ssi_signo) {
+  switch (fd) {
     case SIGINT:
     case SIGTERM:
     case SIGQUIT:
@@ -52,60 +51,11 @@ static int loop_sig_handler(int fd, void *data) {
   return LOOP_OK;
 }
 
-static inline int create_epoll_data (struct epoll_event *eventsi, int fd, void *data, Fd_Handler handler, int events, int opt) {
-  struct FD_Function *epoll_event_info = NULL;
-  struct List_Node *nodePtr = NULL;
-
-  if (!handler || fd < 0 || events <= 0) {
-    fprintf(stderr, "Can not add fd to epoll because of null handler\n");
-    return -1;
-  }
-
-  if (opt == EPOLL_CTL_MOD) {
-    LIST_FOREACH(nodePtr, head_node, node) {
-      if(((struct FD_Function *)nodePtr->data)->fd == fd) {
-        epoll_event_info = nodePtr->data;
-        break;
-      }
-    }
-  }
-  else {
-    nodePtr = malloc(sizeof(struct List_Node));
-    epoll_event_info = malloc(sizeof(struct FD_Function));
-    if (nodePtr && epoll_event_info) {
-      memset(nodePtr, 0, sizeof(struct List_Node));
-      memset(epoll_event_info, 0, sizeof(struct FD_Function));
-      nodePtr->data = (void *) epoll_event_info;
-      LIST_INSERT_HEAD(head_node, nodePtr, node);
-    }
-    else {
-      if (nodePtr)
-        free(nodePtr);
-      nodePtr = NULL;
-    }
-  }
-  if (epoll_event_info == NULL || nodePtr == NULL) {
-    if (epoll_event_info)
-      free(epoll_event_info);
-    fprintf(stderr, "Can not modify epoll event info because of no address\n");
-    return -1;
-  }
-  epoll_event_info->fd = fd;
-  epoll_event_info->data = data;
-  epoll_event_info->func = handler;
-  epoll_event_info->events = events;
-  eventsi->events = events;
-  // not set fd to data.fd,beacause use ptr instead. union type
-  //eventsi->data.fd = fd;
-  eventsi->data.ptr = (void *)(epoll_event_info);
-  return 0;
-}
-
-static void clear_epoll_data(int fd) {
+static void clear_kqueue_data(int fd, int event) {
   struct List_Node *nodePtr = NULL;
 
   LIST_FOREACH(nodePtr, head_node, node) {
-    if(((struct FD_Function *)nodePtr->data)->fd == fd || fd == -2) {
+    if((((struct FD_Function *)nodePtr->data)->fd == fd && ((struct FD_Function *)nodePtr->data)->events == event) || fd == -2) {
       LIST_REMOVE(nodePtr, node);
       free(nodePtr->data);
       free(nodePtr);
@@ -115,52 +65,136 @@ static void clear_epoll_data(int fd) {
   }
 }
 
-static inline void fd_ctl(int fd, void *data, Fd_Handler handler, int events, int opt) {
-  if (done || fd < 0)
+static inline struct FD_Function *create_kqueue_data (int fd, void *data, Fd_Handler handler, Fd_Clear clean, int events, int opt) {
+  struct FD_Function *kqueue_event_info = NULL;
+  struct List_Node *nodePtr = NULL;
+
+  if (fd < 0 || events == 0) {
+    fprintf(stderr, "Can not add fd to kqueue because of invalid fd or events\n");
+    return NULL;
+  }
+
+  if (handler == NULL) {
+    fprintf(stderr, "Can not add fd to kqueue because of null handler\n");
+    return NULL;
+  }
+  if (opt == POLL_CTL_MOD) {
+    LIST_FOREACH(nodePtr, head_node, node) {
+      if(((struct FD_Function *)nodePtr->data)->fd == fd && ((struct FD_Function *)nodePtr->data)->events == events) {
+        kqueue_event_info = nodePtr->data;
+        break;
+      }
+    }
+  }
+  if (kqueue_event_info == NULL) {
+    nodePtr = malloc(sizeof(struct List_Node));
+    kqueue_event_info = malloc(sizeof(struct FD_Function));
+    if (nodePtr && kqueue_event_info) {
+      memset(nodePtr, 0, sizeof(struct List_Node));
+      memset(kqueue_event_info, 0, sizeof(struct FD_Function));
+      nodePtr->data = (void *) kqueue_event_info;
+      LIST_INSERT_HEAD(head_node, nodePtr, node);
+    }
+    else {
+      if (nodePtr)
+        free(nodePtr);
+      nodePtr = NULL;
+    }
+  }
+  if (kqueue_event_info == NULL || nodePtr == NULL) {
+    if (kqueue_event_info)
+      free(kqueue_event_info);
+    fprintf(stderr, "Can not modify kqueue event info because of no address\n");
+    return NULL;
+  }
+
+  kqueue_event_info->fd = fd;
+  kqueue_event_info->data = data;
+  kqueue_event_info->func = handler;
+  kqueue_event_info->clean = clean;
+  kqueue_event_info->events = events;
+  return kqueue_event_info;
+}
+
+static inline void fd_ctl(int fd, void *data, Fd_Handler handler, Fd_Clear clean, int events, int opt) {
+  if (done)
     return;
 
-  struct epoll_event event_data = {0};
+  struct kevent event_data = {0};
+  struct FD_Function *infos = NULL;
 
-  if (create_epoll_data(&event_data, fd, data, handler, events, opt) < 0)
+  switch (opt) {
+  case POLL_CTL_ADD:
+  case POLL_CTL_MOD:
+    infos = create_kqueue_data(fd, data, handler, clean, events, opt);
+    if (infos == NULL) {
+      fprintf(stderr, "Can not create queue data:%d,%d\n", fd, events);
+      return;
+    }
+    u_int fflags = 0;
+    u_short flags = EV_ADD;
+    int64_t fdata = 0;
+    switch (events) {
+    case EVFILT_READ:
+    case EVFILT_SIGNAL:
+      break;
+    case EVFILT_VNODE:
+      flags |= EV_CLEAR;
+      fflags |= NOTE_WRITE;
+      break;
+    case EVFILT_TIMER:
+      fflags |= NOTE_MSECONDS;
+      fdata = fd;
+      break;
+    }
+    EV_SET(&event_data, fd, events, flags, fflags, fdata, (void *)infos);
+    break;
+  case POLL_CTL_DEL:
+    if (events != 0 && fd >= 0)
+      clear_kqueue_data(fd, events);
+    else
+      fprintf(stderr, "Can not delelte fd from kqueue:%d,%d\n", fd, events);
+    EV_SET(&event_data, fd, events, EV_DELETE, 0, 0, NULL);
+    break;
+  default:
+    fprintf(stderr, "Can not opt kqueue.\n");
     return;
-  int err = epoll_ctl(epoll_fd, opt, fd, &event_data);
+  }
+  int err = kevent(kqueue_fd, &event_data, 1, NULL, 0, NULL);
   if (err < 0) {
-    if (opt == EPOLL_CTL_ADD)
-      clear_epoll_data(fd);
-    fprintf(stderr, "Can not add fd to epoll:%d\n", errno);
-    exit(EXIT_FAILURE);
+    if (opt != POLL_CTL_DEL) {
+      clear_kqueue_data(fd, events);
+      fprintf(stderr, "Can not add fd to kqueue:%d\n", errno);
+      exit(EXIT_FAILURE);
+    }
   }
   return;
 }
 
 void loop_add_fd(int fd, Fd_Handler handler, int events) {
-  return fd_ctl(fd, NULL, handler, events, EPOLL_CTL_ADD);
+  return fd_ctl(fd, NULL, handler, NULL, events >= 0 ? EVFILT_READ : events, POLL_CTL_ADD);
 }
 
-void loop_add_fd1(int fd, Fd_Handler handler, int events, void *data) {
-  return fd_ctl(fd, data, handler, events, EPOLL_CTL_ADD);
+void loop_add_fd1(int fd, Fd_Handler handler, Fd_Clear clean, int events, void *data) {
+  return fd_ctl(fd, data, handler, clean, events == 0 ? EVFILT_READ : events, POLL_CTL_ADD);
 }
 
-void loop_mod_fd(int fd, Fd_Handler handler, int events, void *data) {
-  return fd_ctl(fd, data, handler, events, EPOLL_CTL_MOD);
+void loop_mod_fd(int fd, Fd_Handler handler, Fd_Clear clean, int events, void *data) {
+  return fd_ctl(fd, data, handler, clean, events == 0 ? EVFILT_READ : events, POLL_CTL_MOD);
+}
+
+void loop_remove_ident(int fd, int event) {
+  return fd_ctl(fd, NULL, NULL, NULL, event, POLL_CTL_DEL);
 }
 
 void loop_remove_fd(int fd) {
-  if (done || fd < 0)
-    return;
-  int err = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
-  if (err < 0) {
-    fprintf(stderr, "Can not delelte fd from epoll:%d\n", errno);
-    return;
-  }
-  clear_epoll_data(fd);
-  return;
+  return loop_remove_ident(fd, EVFILT_READ);
 }
 
 void loop_create() {
-  epoll_fd = epoll_create1(0);
-  if (epoll_fd < 0) {
-    fprintf(stderr, "Can not create epoll fd: %d\n", errno);
+  kqueue_fd = kqueuex(KQUEUE_CLOEXEC);
+  if (kqueue_fd < 0) {
+    fprintf(stderr, "Can not create kqueue fd: %d\n", errno);
     exit(EXIT_FAILURE);
   }
 
@@ -175,30 +209,56 @@ void loop_create() {
   sigaddset(&sigset, SIGQUIT);
   sigaddset(&sigset, SIGTSTP);
   sigprocmask(SIG_BLOCK, &sigset, NULL);
-  sigFd = signalfd(-1, &sigset, 0);
-  if (sigFd >= 0)
-    loop_add_fd(sigFd, &loop_sig_handler, EPOLLIN | EPOLLERR | EPOLLHUP);
+  loop_add_fd(SIGHUP, &loop_sig_handler, EVFILT_SIGNAL);
+  loop_add_fd(SIGTERM, &loop_sig_handler, EVFILT_SIGNAL);
+  loop_add_fd(SIGINT, &loop_sig_handler, EVFILT_SIGNAL);
+  loop_add_fd(SIGQUIT, &loop_sig_handler, EVFILT_SIGNAL);
 }
 
 void loop_main() {
   int maxEvents = 300;
 
   while (!done) {
-    struct epoll_event events[300] = {0};
-    int fd_events = epoll_wait(epoll_fd, events, maxEvents, -1);
+    struct kevent events[300] = {0};
+    int fd_events = kevent(kqueue_fd, NULL, 0, events, maxEvents, NULL);
     if (fd_events < 0) {
-      done = true;
+      if (errno == EINTR)
+        continue;
+      else
+        done = true;
+      break;
     }
     for (int i = 0 ;i < fd_events; i++) {
-      struct FD_Function *function = (struct FD_Function *)events[i].data.ptr;
-      int ret = function->func(function->fd, function->data);
-      if (ret == LOOP_RETURN) {
-        done = true;
+      if (events[i].udata == NULL)
+        continue;
+      struct FD_Function *function = (struct FD_Function *)events[i].udata;
+      if (events[i].flags & (EV_EOF | EV_ERROR)) {
+        if (function->clean)
+          function->clean((int) events[i].ident, function->data);
+        loop_remove_ident((int) events[i].ident, events[i].filter);
+        for (int j = (i + 1); j < fd_events; j++) {
+          if (events[i].udata == events[j].udata)
+            events[j].udata = NULL;
+        }
+        continue;
+      }
+      int ret = function->func((int) events[i].ident, function->data);
+      switch (ret) {
+      case LOOP_OK:
+        break;
+      case LOOP_RETURN:
+        goto failed;
+      case LOOP_REMOVE:
+        for (int j = (i + 1); j < fd_events; j++) {
+          if (events[i].udata == events[j].udata)
+            events[j].udata = NULL;
+        }
         break;
       }
     }
   }
 
+failed:
   done = true;
 }
 
@@ -210,13 +270,9 @@ void loop_start() {
 
 void loop_destroy() {
   done = true;
-  if (sigFd >= 0) {
-    close(sigFd);
-    sigFd = -1;
-  }
-  if (epoll_fd >= 0)
-    close(epoll_fd);
-  epoll_fd = -1;
+  if (kqueue_fd >= 0)
+    close(kqueue_fd);
+  kqueue_fd = -1;
   // -2 means clear list
-  clear_epoll_data(-2);
+  clear_kqueue_data(-2, 0);
 }

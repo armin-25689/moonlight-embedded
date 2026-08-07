@@ -17,17 +17,20 @@
  * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <sys/epoll.h>
+#include <sys/event.h>
 #include <sys/queue.h>
 #include <stdbool.h>
 
+#define LOOP_REMOVE 2
 #define LOOP_RETURN 1
 #define LOOP_OK 0
 
 typedef int(*Fd_Handler)(int fd, void *data);
+typedef void(*Fd_Clear)(int fd, void *data);
 
 struct FD_Function {
   Fd_Handler func;
+  Fd_Clear clean;
   void*   data;
   int     fd;
   int     events;
@@ -41,9 +44,10 @@ struct List_Node {
 extern bool done;
 
 void loop_add_fd(int fd, Fd_Handler handler, int events);
-void loop_add_fd1(int fd, Fd_Handler handler, int events, void *data);
-void loop_mod_fd(int fd, Fd_Handler handler, int events, void *data);
+void loop_add_fd1(int fd, Fd_Handler handler, Fd_Clear clean, int events, void *data);
+void loop_mod_fd(int fd, Fd_Handler handler, Fd_Clear clean, int events, void *data);
 void loop_remove_fd(int fd);
+void loop_remove_ident(int fd, int event);
 
 void loop_create();
 void loop_start();

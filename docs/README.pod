@@ -231,6 +231,11 @@ Enable the I<INPUT> device.
 By default all available input devices are enabled.
 Only evdev devices /dev/input/event* are supported.
 
+=item B<-disablemonitor>
+
+Disable extended input device hotplug events monitor.
+The feature is for jailed moonlight.Disable it will reduce input latency.
+
 =item B<-sdlgp>
 
 Using SDL gamepad driver instead of evdev.

@@ -26,6 +26,7 @@
 #include "libevdev/libevdev.h"
 #include <Limelight.h>
 
+#include <dirent.h>
 #include <libudev.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -220,6 +221,15 @@ static bool (*handler) (struct input_event*, struct input_device*);
 static int evdev_handle(int fd, void *data);
 static int mt_evdev_handle(int fd, void *data, int interval, uint32_t event, int slot);
 
+struct {
+  DIR *dir;
+  uint8_t *input_stat;
+  int max_count;
+  struct mapping *mapping;
+  int rotate;
+  int key;
+} static imonitor = {0};
+
 static int evdev_get_map(int* map, int length, int value) {
   for (int i = 0; i < length; i++) {
     if (value == map[i])
@@ -252,6 +262,80 @@ static void freeallkey () {
       LiSendKeyboardEvent(0x80 << 8 | keyCodes[i], KEY_ACTION_UP, 0);
     }
   }
+}
+
+static int monitor_dir_handle (int fd, void *data) {
+  static int max_count = 100000;
+  DIR *dir = (DIR *)data;
+  struct dirent *entry = NULL;
+  rewinddir(dir);
+  int count = 0;
+  while ((entry = readdir(dir)) != NULL) {
+    count++;
+  }
+  if (count > max_count) {
+    struct dirent *dp = NULL;
+    rewinddir(dir);
+    while ((dp = readdir(dir)) != NULL) {
+      int device_num = -1;
+      if (sscanf(dp->d_name, "%*[^0-9]%d", &device_num) == 1 && device_num >= 0) {
+        if (device_num > imonitor.max_count) {
+          uint8_t *tmplist = realloc(imonitor.input_stat, imonitor.max_count * 2 * sizeof(uint8_t));
+          if (tmplist == NULL)
+            return LOOP_RETURN;
+          imonitor.input_stat = tmplist;
+          imonitor.max_count = imonitor.max_count * 2;
+        }
+        if (imonitor.input_stat[device_num] == 0) {
+          char path[267] = {'\0'};
+          snprintf(path, sizeof(path), "/dev/input/%s", dp->d_name);
+          evdev_create(path, imonitor.mapping, verboseMe, imonitor.rotate);
+        }
+      }
+    }
+  }
+  max_count = count;
+  return LOOP_OK;
+}
+static int monitor_input_dir_start (bool isinputadded, struct mapping *mappings, int rotate) {
+  const char *input_dir = "/dev/input";
+  memset(&imonitor, 0, sizeof(imonitor));
+  imonitor.mapping = mappings;
+  imonitor.rotate = rotate;
+  imonitor.key = 1000;
+  if ((access("/var/run/devd.seqpacket.pipe", F_OK) == 0 || access("/var/run/devd.pipe", F_OK) == 0) || isinputadded || mappings == NULL) {
+    return 0;
+  }
+  if (access(input_dir, R_OK) < 0) {
+    perror("No permission to /dev/input:");
+    return -1;
+  }
+  imonitor.input_stat = calloc(100, sizeof(uint8_t));
+  imonitor.max_count = 100;
+  if (imonitor.input_stat == NULL) {
+    perror("Cannot alloc imonitor input_stat:");
+    return -1;
+  }
+  imonitor.dir = opendir(input_dir);
+  if (imonitor.dir == NULL) {
+    perror("Cannot open /dev/input:");
+    free(imonitor.input_stat);
+    imonitor.input_stat = NULL;
+    return -1;
+  }
+
+  loop_add_fd1(imonitor.key, &monitor_dir_handle, NULL, EVFILT_TIMER, (void *)imonitor.dir);
+  return 0;
+}
+
+static void monitor_input_dir_stop () {
+  if (imonitor.dir) {
+    loop_remove_ident(imonitor.key, EVFILT_TIMER);
+    closedir(imonitor.dir);
+  }
+  if (imonitor.input_stat)
+    free(imonitor.input_stat);
+  memset(&imonitor, 0, sizeof(imonitor));
 }
 
 static bool evdev_init_parms(struct input_device *dev, struct input_abs_parms *parms, int code) {
@@ -298,6 +382,13 @@ static void evdev_remove_device(struct input_device *dis_device, const char *pat
       if (device->mouseEmulation) {
         device->mouseEmulation = false;
         pthread_join(device->meThread, NULL);
+      }
+
+      if (imonitor.input_stat) {
+        int device_num = -1;
+        if (device->path && sscanf(device->path, "%*[^0-9]%d", &device_num) == 1 && device_num >= 0 && device_num < imonitor.max_count) {
+          imonitor.input_stat[device_num] = 0;
+        }
       }
 
       free(device->path);
@@ -1611,6 +1702,12 @@ direct_exit:
 #undef FAILED_RES
 }
 
+static void evdev_remove_handle(int fd, void *data) {
+  if (data == NULL) return;
+  struct input_device *device = (struct input_device *)data;
+  return evdev_remove(device);
+}
+
 static int evdev_handle(int fd, void *data) {
   struct input_device *device = (struct input_device *)data;
   int rc;
@@ -1628,6 +1725,7 @@ static int evdev_handle(int fd, void *data) {
   }
   if (rc == -ENODEV) {
     evdev_remove(device);
+    return LOOP_REMOVE;
   } else if (rc != -EAGAIN && rc < 0) {
     fprintf(stderr, "Error occur from evdev device: %s, remove %s\n", strerror(-rc), device->path);
     evdev_remove(device);
@@ -1635,18 +1733,19 @@ static int evdev_handle(int fd, void *data) {
       fprintf(stderr, "There is no avaliable input device! Exit now.\n");
       return LOOP_RETURN;
     }
+    return LOOP_REMOVE;
   }
   return LOOP_OK;
 }
 
-void evdev_init_vars(bool isfakegrab, bool issdlgp, bool isswapxyab, bool isinputadded) {
+void evdev_init_vars(bool isfakegrab, bool issdlgp, bool isswapxyab, bool isinputadded, struct mapping *mappings, int rotate) {
   fakeGrab = isfakegrab;
   sdlgp = issdlgp;
   swapXYAB = isswapxyab;
-  if (swapXYAB)
-
   if (isinputadded)
     return;
+
+  monitor_input_dir_start (isinputadded, mappings, rotate);
 
   const char* tryFirstInput = "/dev/input/event0";
   const char* trySecondInput = "/dev/input/event1";
@@ -1804,6 +1903,25 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
     mappings = NULL;
   }
 
+  if (imonitor.input_stat) {
+    int device_num = -1;
+    if (sscanf(device, "%*[^0-9]%d", &device_num) == 1 && device_num >= 0 && device_num < imonitor.max_count) {
+      if (imonitor.input_stat[device_num] == 1 && numDevices > 0) {
+        struct List_Node *tmpnodePtr = NULL;
+        LIST_FOREACH(tmpnodePtr, head_device, node) {
+          struct input_device *device_ptr = (struct input_device *)tmpnodePtr->data;
+          if (strcmp(device_ptr->path, device) == 0) {
+            libevdev_free(evdev);
+            close(fd);
+            return;
+          }
+        }
+      }
+      else
+        imonitor.input_stat[device_num] = 1;
+    }
+  }
+
   struct input_device *dev = malloc(sizeof(struct input_device));
   struct List_Node *nodePtr = malloc(sizeof(struct List_Node));
 
@@ -1911,7 +2029,7 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
     }
   }
 
-  loop_add_fd1(dev->fd, &evdev_handle, EPOLLIN, (void *)(dev));
+  loop_add_fd1(dev->fd, &evdev_handle, &evdev_remove_handle, 0, (void *)(dev));
 }
 
 static void evdev_map_key(char* keyName, short* key) {
@@ -2048,6 +2166,7 @@ void evdev_start() {
 void evdev_stop() {
   grab_window(E_UNGRAB_WINDOW);
   evdev_remove_all();
+  monitor_input_dir_stop();
 }
 
 void evdev_init(bool mouse_emulation_enabled) {

@@ -59,11 +59,12 @@ bool ensure_buf_size(void **buf, size_t *buf_size, size_t required_size) {
     return false;
 
   *buf_size = required_size;
-  *buf = realloc(*buf, *buf_size);
-  if (!*buf) {
+  void *tmpbuf = realloc(*buf, *buf_size);
+  if (!tmpbuf) {
     fprintf(stderr, "Failed to allocate %zu bytes\n", *buf_size);
     abort();
   }
+  *buf = tmpbuf;
 
   return true;
 }

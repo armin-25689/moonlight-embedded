@@ -59,6 +59,7 @@ static struct option long_options[] = {
   {"bitrate", required_argument, NULL, 'g'},
   {"packetsize", required_argument, NULL, 'h'},
   {"app", required_argument, NULL, 'i'},
+  {"disablemonitor", no_argument, NULL, 'I'},
   {"input", required_argument, NULL, 'j'},
   {"mapping", required_argument, NULL, 'k'},
   {"swapxyab", no_argument, NULL, 'K'},
@@ -179,6 +180,9 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
     break;
   case 'i':
     config->app = value;
+    break;
+  case 'I':
+    config->disable_monitor = true;
     break;
   case 'j':
     if (config->inputsCount >= MAX_INPUTS) {
@@ -455,6 +459,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->port = 47989;
 
   config->inputsCount = 0;
+  config->disable_monitor = false;
   config->yuv444 = false;
   config->fakegrab = false;
   config->less_threads = false;

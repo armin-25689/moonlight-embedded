@@ -471,7 +471,7 @@ int main(int argc, char* argv[]) {
         }
         #endif
 
-        evdev_init_vars(config.fakegrab, config.sdlgp, config.swapxyab, inputAdded);
+        evdev_init_vars(config.fakegrab, config.sdlgp, config.swapxyab, inputAdded, config.disable_monitor ? NULL : mappings, config.rotate);
 
         for (int i=0;i<config.inputsCount;i++) {
           if (config.debug_level > 0)

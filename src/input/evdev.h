@@ -38,7 +38,7 @@ void evdev_stop();
 void evdev_map(char* device);
 void evdev_rumble(unsigned short controller_id, unsigned short low_freq_motor, unsigned short high_freq_motor);
 void evdev_trans_op_fd(int fd);
-void evdev_init_vars(bool isfakegrab, bool issdlgp, bool isswapxyab, bool isinputadded);
+void evdev_init_vars(bool isfakegrab, bool issdlgp, bool isswapxyab, bool isinputadded, struct mapping* mappings, int rotate);
 void grab_window(enum grabWindowRequest request);
 void sync_input_state(bool isinputing);
 void evdev_pass_mouse_mode(bool handled_by_window);

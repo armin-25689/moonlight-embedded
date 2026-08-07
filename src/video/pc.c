@@ -688,7 +688,7 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
     fprintf(stderr, "Can't create communication channel between threads\n");
     return -2;
   }
-  loop_add_fd(windowpipefd[0], &window_op_handle, EPOLLIN);
+  loop_add_fd(windowpipefd[0], &window_op_handle, 0);
   fcntl(windowpipefd[0], F_SETFL, O_NONBLOCK);
 
   memset(renderPtr->images, 0, sizeof(struct Render_Image) * MAX_FB_NUM);
@@ -755,7 +755,7 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
       fprintf(stderr, "Can't create communication channel between threads\n");
       return -2;
     }
-    loop_add_fd(pipefd[0], &frame_handle, EPOLLIN);
+    loop_add_fd(pipefd[0], &frame_handle, 0);
     fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
   }
 

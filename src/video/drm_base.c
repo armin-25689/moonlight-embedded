@@ -84,7 +84,10 @@ int drm_opt_commit (enum DrmCommitOpt opt, void *data, uint32_t device_id, uint3
   case DRM_ADD_COMMIT:
     if (commit_list.list == NULL) commit_list.list = calloc(commit_list.slot, sizeof(struct _commit_list));
     if (commit_list.count > commit_list.slot) {
-      commit_list.list = realloc(commit_list.list, sizeof(struct _commit_list) * commit_list.slot * 2);
+      struct _commit_list *tmplist = realloc(commit_list.list, sizeof(struct _commit_list) * commit_list.slot * 2);
+      if (tmplist == NULL)
+        return -1;
+      commit_list.list = tmplist;
       commit_list.slot = commit_list.slot * 2;
     }
 

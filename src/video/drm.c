@@ -163,7 +163,7 @@ static int tty_opt (struct Tty_Stat *tty, int (*change_opt) (int fd, struct Tty_
         return ret;
       }
       tty->index = index;
-      loop_add_fd1(tty->fd, &stdin_handle, EPOLLIN, tty);
+      loop_add_fd1(tty->fd, &stdin_handle, NULL, 0, tty);
     }
     ret = change_opt(tty->fd, tty);
     if (ret < 0) {

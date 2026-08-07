@@ -194,7 +194,7 @@ void x11_input_init(Display* x11_display, Window x11_window) {
 
   displayFd = ConnectionNumber(display);
   if (displayFd > -1)
-    loop_add_fd(displayFd, &x11_handler, EPOLLIN | EPOLLERR | EPOLLHUP);
+    loop_add_fd(displayFd, &x11_handler, 0);
 }
 
 void x11_input_remove () {

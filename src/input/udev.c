@@ -90,7 +90,7 @@ void udev_init(bool autoload, struct mapping* mappings, bool verbose, int rotate
   defaultMappings = mappings;
   inputRotate = rotate;
 
-  loop_add_fd(udev_monitor_get_fd(udev_mon), &udev_handle, EPOLLIN);
+  loop_add_fd(udev_monitor_get_fd(udev_mon), &udev_handle, 0);
 }
 
 void udev_destroy() {

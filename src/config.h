@@ -52,6 +52,7 @@ typedef struct _CONFIGURATION {
   bool sdlgp;
   bool swapxyab;
   bool yuv444;
+  bool disable_monitor;
   bool fakegrab;
   bool fixed_resolution;
   bool fill_resolution;
