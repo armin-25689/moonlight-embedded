@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.1...4.0)
-project(moonlight-embedded VERSION 2.7.8 LANGUAGES C)
+project(moonlight-embedded VERSION 2.7.9 LANGUAGES C)
 SET(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 SET(CMAKE_C_STANDARD 11)
 include(${CMAKE_ROOT}/Modules/GNUInstallDirs.cmake)
@@ -9,8 +9,8 @@ include(CheckCSourceCompiles)
 
 add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-pointer-sign -Wno-sign-compare -Wno-switch)
 
-aux_source_directory(./src SRC_LIST)
-list(APPEND SRC_LIST ./src/input/evdev.c ./src/input/mapping.c ./src/input/udev.c)
+aux_source_directory(./src MSRC_LIST)
+list(APPEND MSRC_LIST ./src/input/evdev.c ./src/input/mapping.c ./src/input/udev.c)
 
 set(MOONLIGHT_DEFINITIONS)
 
@@ -114,7 +114,7 @@ include_directories("${PROJECT_BINARY_DIR}")
 
 add_subdirectory(libgamestream)
 
-add_executable(moonlight ${SRC_LIST})
+add_executable(moonlight ${MSRC_LIST})
 target_link_libraries(moonlight m)
 target_link_libraries(moonlight gamestream)
 
