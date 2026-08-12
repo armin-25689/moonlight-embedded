@@ -656,8 +656,10 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   isTenBit = videoFormat & VIDEO_FORMAT_MASK_10BIT;
 
   // egl not need filter
-  if (renderPtr->render_type == EGL_RENDER || ffmpeg_decoder == VULKAN)
+  if (renderPtr->render_type == EGL_RENDER)
     ffmpeg_remove_filter(FILTER_FLAGS);
+  else if (renderPtr->render_type == DRM_RENDER)
+    ffmpeg_need_filter(FILTER_TONEMAP_FORCE_BT2020);
 
   struct Render_Init_Info renderParas = {0};
   renderParas.window = window;

@@ -167,7 +167,8 @@ static inline int deal_filters_args (AVFrame *frame, struct Ffmpeg_Filters_Args 
   colors->color_primaries = args->color_primaries == NULL ? args->color.bt2020 : args->color_primaries;
   if (colors->color_primaries == args->color.bt601 || colors->color_primaries == args->color.bt709 ||
       (colors->color_primaries == args->color.p3 && (args->action & FILTER_TONEMAP_LIGHT) == 0)) {
-    colors->tosdr = true;
+    if (args->action & FILTER_TONEMAP_COLOR_PRIMARIES)
+      colors->tosdr = true;
   }
   if ((args->action & FILTER_TONEMAP_COLOR_PRIMARIES) &&
       (args->color_primaries == args->color.p3)) {
@@ -242,8 +243,8 @@ static inline int generate_vaapi_desc (int action, struct Filter_Desc *filters_d
   int count = 0;
 
   if (colors->ishdr &&
-      ((action & FILTER_TONEMAP_COLOR_PRIMARIES) ||
-       (action & FILTER_TONEMAP_LIGHT))) {
+      ((action & FILTER_TONEMAP_LIGHT) ||
+       (action & FILTER_TONEMAP_COLOR_PRIMARIES))) {
     if (hdr_metadata_ref[0] == 0) {
       fprintf(stderr, "hdr_metadata_ref is not fill correctly.\n");
       return -1;
@@ -252,14 +253,30 @@ static inline int generate_vaapi_desc (int action, struct Filter_Desc *filters_d
     if (colors->tosdr) {
       APPEND_DESC(filters_desc[count].desc,
                   "format=%s:primaries=%s:transfer=%s",
-                  av_get_pix_fmt_name(colors->sdrfmt), colors->color_primaries, "iec61966-2-1");
-    } else {
-      APPEND_DESC(filters_desc[count].desc,
-                  "format=%s:primaries=%s:display=%d %d|%d %d|%d %d|%d %d|%d %d",
-                  av_get_pix_fmt_name(colors->srcformat), colors->color_primaries,
-                  colors->gbrw[0], colors->gbrw[1], colors->gbrw[2], colors->gbrw[3],
-                  colors->gbrw[4], colors->gbrw[5], colors->gbrw[6], colors->gbrw[7],
-                  colors->minlight, colors->maxlight * 10000);
+                  av_get_pix_fmt_name(colors->srcformat), colors->color_primaries, "iec61966-2-1");
+    }
+    else {
+      if (action & FILTER_TONEMAP_FORCE_BT2020) {
+        hdr_metadata_ref[0] = 35400;
+        hdr_metadata_ref[1] = 14600;
+        hdr_metadata_ref[2] = 8500;
+        hdr_metadata_ref[3] = 39850;
+        hdr_metadata_ref[4] = 6550;
+        hdr_metadata_ref[5] = 2300;
+        APPEND_DESC(filters_desc[count].desc,
+                    "format=%s:primaries=%s:display=%d %d|%d %d|%d %d|%d %d|%d %d",
+                    av_get_pix_fmt_name(colors->srcformat), "bt2020",
+                    8500, 39850, 6550, 2300, 35400, 14600, 15635, 16450,
+                    colors->minlight, colors->maxlight * 10000);
+      }
+      else {
+        APPEND_DESC(filters_desc[count].desc,
+                    "format=%s:primaries=%s:display=%d %d|%d %d|%d %d|%d %d|%d %d",
+                    av_get_pix_fmt_name(colors->srcformat), colors->color_primaries,
+                    colors->gbrw[0], colors->gbrw[1], colors->gbrw[2], colors->gbrw[3],
+                    colors->gbrw[4], colors->gbrw[5], colors->gbrw[6], colors->gbrw[7],
+                    colors->minlight, colors->maxlight * 10000);
+      }
       if (colors->maxcll > 0 && colors->maxfall > 0) {
         APPEND_DESC(filters_desc[count].desc,
                     "light=%d %d",
@@ -271,14 +288,18 @@ static inline int generate_vaapi_desc (int action, struct Filter_Desc *filters_d
     count++;
   }
 
-  if ((action & FILTER_SCALE_FMT) ||
-      (action & FILTER_SCALE_SIZE) || (colors->tosdr && !colors->ishdr)) {
-    enum AVPixelFormat dstfmt = (use_hdr_fmt && !colors->tosdr) ? colors->hdrfmt : colors->sdrfmt;
-    dstfmt = (action & FILTER_SCALE_FMT || (colors->tosdr && !colors->ishdr)) ? dstfmt : colors->srcformat;
+  enum AVPixelFormat dstfmt = use_hdr_fmt ? colors->hdrfmt : colors->sdrfmt;
+  if (action & FILTER_SCALE_FMT || colors->tosdr) {
     APPEND_DESC(filters_desc[count].desc,
-                "w=%d:h=%d:format=%s:mode=fast",
-                colors->width, colors->height, av_get_pix_fmt_name(dstfmt));
-
+                "format=%s:out_range=pc",
+                av_get_pix_fmt_name(dstfmt));
+  }
+  if (action & FILTER_SCALE_SIZE) {
+    APPEND_DESC(filters_desc[count].desc,
+                "w=%d:h=%d:mode=fast",
+                colors->width, colors->height);
+  }
+  if (strlen(filters_desc[count].desc) > 1) {
     filters_desc[count].name = filter_name_list[FILTER_SCALE_VAAPI];
     count++;
   }
@@ -299,20 +320,27 @@ static inline int generate_vulkan_desc (int action, struct Filter_Desc *filters_
 
     if (colors->tosdr) {
       APPEND_DESC(filters_desc[count].desc,
-                  "color_primaries=%s:color_trc=%s:range=%s:tonemapping=%s:peak_detect=true:apply_filmgrain=false",
-                  colors->color_primaries, "iec61966-2-1", "full", "bt.2390");
+                  "color_primaries=%s:color_trc=%s:tonemapping=%s:peak_detect=true:apply_filmgrain=false",
+                  colors->color_primaries, "iec61966-2-1", "bt.2390");
     } else {
+      if (action & FILTER_TONEMAP_FORCE_BT2020 && strcmp(colors->color_primaries, "bt2020") != 0) {
+        APPEND_DESC(filters_desc[count].desc,
+                    "format=%s:color_primaries=%s:color_trc=%s:range=%s:tonemapping=%s:peak_detect=true:apply_filmgrain=false",
+                    "gbrpf32le", colors->color_primaries, "linear", "full", "bt.2390");
+        filters_desc[count].name = filter_name_list[FILTER_VULKAN];
+        count++;
+      }
       APPEND_DESC(filters_desc[count].desc,
-                  "color_primaries=%s:color_trc=%s:range=%s:tonemapping=%s:peak_detect=true:apply_filmgrain=false",
-                  colors->color_primaries, "smpte2084", "full", "bt.2390");
+                  "color_primaries=%s:color_trc=%s:tonemapping=%s:peak_detect=%s:apply_filmgrain=false",
+                  count == 0 ? colors->color_primaries : "bt2020", "smpte2084", "bt.2390", count == 0 ? "true" : "false");
     }
   }
 
   if ((action & FILTER_SCALE_FMT) || (action & FILTER_TONEMAP_COLOR_PRIMARIES)) {
     enum AVPixelFormat dstfmt = use_hdr_fmt ? colors->hdrfmt : colors->sdrfmt;
     APPEND_DESC(filters_desc[count].desc,
-                "format=%s",
-                av_get_pix_fmt_name(dstfmt));
+                "format=%s:range=%s",
+                av_get_pix_fmt_name(dstfmt), "full");
   }
 
   if (action & FILTER_SCALE_SIZE) {
@@ -321,7 +349,7 @@ static inline int generate_vulkan_desc (int action, struct Filter_Desc *filters_
     colors->width, colors->height);
   }
 
-  if (action & (FILTER_SCALE_FMT | FILTER_SCALE_SIZE | FILTER_TONEMAP_COLOR_PRIMARIES)) {
+  if (strlen(filters_desc[count].desc) > 1) {
     filters_desc[count].name = filter_name_list[FILTER_VULKAN];
     count++;
   }
