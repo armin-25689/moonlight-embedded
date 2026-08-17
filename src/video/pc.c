@@ -857,10 +857,14 @@ int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   if (err < 0)
     goto decode_exit;
   else if (err > 0) {
-    if (threads.created) {
-      sem_post(&threads.decoder_sem);
+    if (err == F_TRY_AGAIN) {
+      if (threads.created) {
+        sem_post(&threads.decoder_sem);
+      }
+      return DR_OK;
     }
-    return DR_OK;
+    else
+      goto next_handle;
   }
 
   mv_vlist_decoder_to_render();

@@ -31,6 +31,8 @@ enum decoders {SOFTWARE = 0, VULKAN, VAAPI};
 // argument for render_map_buffer
 #define COMPOSE_PLANE 0
 #define SEPERATE_PLANE 1
+#define F_TRY_AGAIN 1
+#define F_RESET_TRY_AGAIN 2
 
 #define MAX_FB_NUM 3
 #define MAX_PLANE_NUM 4

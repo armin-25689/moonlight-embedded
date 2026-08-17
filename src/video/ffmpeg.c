@@ -128,14 +128,14 @@ static inline void ffmpeg_detach_hdr10_metadata (AVFrame *frame) {
 static int ffmpeg_get_frame_from_decoder(AVFrame *frame, bool native_frame) {
   int err = avcodec_receive_frame(decoder_ctx, frame);
   if (err == 0) {
-    if (frame->colorspace == AVCOL_SPC_BT2020_NCL || frame->colorspace == AVCOL_SPC_BT2020_CL)
+    if (frame->color_trc == AVCOL_TRC_SMPTE2084)
       ffmpeg_attach_hdr10_metadata(frame);
     else
       ffmpeg_detach_hdr10_metadata(frame);
     if (ffmpeg_decoder == SOFTWARE || native_frame)
       return 0;
   } else if (err == AVERROR(EAGAIN)) {
-    return 1;
+    return F_TRY_AGAIN;
   }
   char errorstring[512];
   av_strerror(err, errorstring, sizeof(errorstring));
@@ -168,7 +168,7 @@ static int ffmpeg_get_frame_chooser (AVFrame *frame, bool native_frame) {
 #ifdef HAVE_FFMPEGFILTER
   if (ffmpeg_modify_filter_action(0) > 0 && ffmpeg_decoder != SOFTWARE) {
     int err = ffmpeg_init_filter(frame, decoder_ctx, useHdr, ffmpeg_hdr_metadata, &ffmpeg_get_frame_from_decoder);
-    if (err >= 0) {
+    if (err == 0) {
       ffmpeg_get_frame_function = &ffmpeg_get_frame_from_filter;
       return 0;
     }
@@ -191,7 +191,7 @@ chooser_exit:
     return -1;
   }
 
-  return 1;
+  return F_RESET_TRY_AGAIN;
 }
 
 // This function must be called before

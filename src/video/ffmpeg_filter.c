@@ -26,6 +26,7 @@
 
 #include <stdlib.h>
 #include <stdbool.h>
+#include <unistd.h>
 
 #include <Limelight.h>
 #include "video_internal.h"
@@ -55,6 +56,7 @@ struct Filter_Desc {
 };
 static bool use_hdr_fmt = false;
 static uint16_t *hdr_metadata_ref = NULL;
+static int sink_flag = AV_BUFFERSINK_FLAG_NO_REQUEST;
 
 static inline void destroy_filter_graphs () {
   if (hdr_filter_graph->graph) {
@@ -310,6 +312,7 @@ static inline int generate_vaapi_desc (int action, struct Filter_Desc *filters_d
 
 static inline int generate_vulkan_desc (int action, struct Filter_Desc *filters_desc, int *filter_count, struct Color_Args *colors) {
   int count = 0;
+  sink_flag = 0;
 
   if (colors->ishdr &&
       (action & FILTER_TONEMAP_COLOR_PRIMARIES)) {
@@ -519,14 +522,30 @@ static inline int pass_frame_to_graph (AVFrame *inframe, AVFilterContext *src_ct
     fprintf(stderr, "Add frame to buffersrc failed: %d.\n", err);
     return err;
   }
-  static int sinkflags = AV_BUFFERSINK_FLAG_NO_REQUEST;
+  int sinkflags = sink_flag;
   err = av_buffersink_get_frame_flags(sink_ctx, outframe, sinkflags);
   if (err < 0) {
+    int times = 0;
+    while (err == AVERROR(EAGAIN) && times < 25) {
+      times++;
+      // wait for max 5000 microseconds
+      usleep(200);
+      err = av_buffersink_get_frame_flags(sink_ctx, outframe, sinkflags);
+    }
+    av_frame_unref(inframe);
+    if (err >= 0)
+      return 0;
+    else if (err == AVERROR(EAGAIN)) {
+      fprintf(stderr, "Filters is so slow.\n");
+      // let decoder try again
+      return F_RESET_TRY_AGAIN;
+    }
     if (inframe != NULL)
       fprintf(stderr, "Get frame from buffersink failed.\n");
+    return err;
   }
   av_frame_unref(inframe);
-  return err;
+  return 0;
 }
 
 static inline int ffmpeg_get_filte_frame(AVFrame *frame, AVCodecContext *decoder_ctx) {
