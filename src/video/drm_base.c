@@ -284,14 +284,11 @@ static int drm_choose_connector (int fd, uint32_t bestConn[MAX_CONNECTOR]) {
       // no connector, ignore
       continue;
     }
-    if (conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0 && conn->encoder_id != 0) {
-      if (index > MAX_CONNECTOR)
-        continue;
+    if (conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0 && conn->encoder_id != 0 && index < MAX_CONNECTOR) {
       connSize[index] = conn->mmWidth * conn->mmHeight;
       conns[index++] = conn->connector_id;
     }
     drmModeFreeConnector(conn);
-    continue;
   }
 
   memcpy(connSort, connSize, sizeof(connSize));
@@ -362,7 +359,6 @@ static int drm_choose_crtc (int fd) {
         goto found_crtc;
       }
       drmModeFreeEncoder(enc);
-      continue;
     }
     drmModeFreeConnector(conn);
   }
@@ -392,7 +388,7 @@ static int drm_choose_crtc (int fd) {
 }
 
 static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
-  int format_site;
+  int format_site = -1;
 
   if (!drm_info->have_plane) {
     drm_info->have_plane = drmSetClientCap(drm_info->fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) == 0 ? 1 : 0;
@@ -410,74 +406,67 @@ static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
 
   for (int  i = 0; i < res->count_planes; i++) {
     drmModePlane* plane = drmModeGetPlane(drm_info->fd, res->planes[i]);
-    if (!plane)
+    if (!plane || (plane->possible_crtcs & (1 << drm_info->crtc_index)) == 0)
       continue;
 
-    int formats_index = 0;
-    format_site = -1;
-    memset(drm_info->plane_formats, 0, sizeof(drm_info->plane_formats));
-    for (int j = 0; j < plane->count_formats; j++) {
-      switch (plane->formats[j]) {
-      case DRM_FORMAT_XYUV8888:
-      case DRM_FORMAT_XVYU2101010:
-      case DRM_FORMAT_YUV420:
-      case DRM_FORMAT_YUV444:
-      case DRM_FORMAT_Q410:
-      case DRM_FORMAT_NV12:
-      case DRM_FORMAT_P010:
-      case DRM_FORMAT_ARGB8888:
-      case DRM_FORMAT_XRGB8888:
-      case DRM_FORMAT_XRGB2101010:
-        drm_info->plane_formats[formats_index++] = plane->formats[j];
-        break;
-      }
-      if (format == plane->formats[j]) {
-        int findex = formats_index == 0 ? 0 : formats_index - 1;
-        if (drm_info->plane_formats[findex] != format) {
-          drm_info->plane_formats[formats_index++] = plane->formats[j];
-        }
-        format_site = formats_index - 1;
-      }
-      if (formats_index >= NEEDED_DRM_FORMAT_NUM)
-        break;
-    }
-
-    if (formats_index == 0) {
-      drmModeFreePlane(plane);
-      continue;
-    }
-
-    if ((plane->possible_crtcs & (1 << drm_info->crtc_index))) {
-      drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(drm_info->fd,res->planes[i], DRM_MODE_OBJECT_PLANE);
-      if (!props) {
-        drmModeFreePlane(plane);
-        continue;
-      }
-
+    drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(drm_info->fd,res->planes[i], DRM_MODE_OBJECT_PLANE);
+    if (props) {
       for (int j = 0; j < props->count_props; j++) {
         drmModePropertyPtr prop = drmModeGetProperty(drm_info->fd, props->props[j]);
         if (!prop)
           continue;
+
         if (strcmp(prop->name, "type") == 0 && (props->prop_values[j] == DRM_PLANE_TYPE_PRIMARY || props->prop_values[j] == DRM_PLANE_TYPE_OVERLAY)) {
-          drm_info->plane_id = plane->plane_id;
-          drmModeFreeProperty(prop);
-          break;
+          int formats_index = 0;
+          format_site = -1;
+          memset(drm_info->plane_formats, 0, sizeof(drm_info->plane_formats));
+          for (int k = 0; k < plane->count_formats; k++) {
+            switch (plane->formats[k]) {
+            case DRM_FORMAT_XYUV8888:
+            case DRM_FORMAT_XVYU2101010:
+            case DRM_FORMAT_YUV420:
+            case DRM_FORMAT_YUV444:
+            case DRM_FORMAT_Q410:
+            case DRM_FORMAT_NV12:
+            case DRM_FORMAT_P010:
+            case DRM_FORMAT_ARGB8888:
+            case DRM_FORMAT_XRGB8888:
+            case DRM_FORMAT_XRGB2101010:
+              drm_info->plane_formats[formats_index++] = plane->formats[k];
+              break;
+            }
+            if (format == plane->formats[k]) {
+              int findex = formats_index == 0 ? 0 : formats_index - 1;
+              if (drm_info->plane_formats[findex] != format) {
+                drm_info->plane_formats[formats_index++] = plane->formats[k];
+              }
+              format_site = formats_index - 1;
+            }
+            if (formats_index >= NEEDED_DRM_FORMAT_NUM)
+              break;
+          }
+
+          if (formats_index > 0) {
+            drm_info->plane_id = plane->plane_id;
+            drmModeFreeProperty(prop);
+            drmModeFreeObjectProperties(props);
+            drmModeFreePlane(plane);
+            drmModeFreePlaneResources(res);
+            goto found_plane;
+          }
         }
         drmModeFreeProperty(prop);
       }
       drmModeFreeObjectProperties(props);
     }
     drmModeFreePlane(plane);
-
-    if (format_site != -1)
-      break;
   }
   drmModeFreePlaneResources(res);
 
-  if (drm_info->plane_id == 0) {
-    fprintf(stderr, "Could not get plane info\n");
-    return -1;
-  }
+  fprintf(stderr, "Could not get plane info\n");
+  return -1;
+
+found_plane:
 
   if (drm_props.snap.props_num == 0) {
 #define CONUM 6
