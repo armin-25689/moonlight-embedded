@@ -85,7 +85,7 @@ int generate_gbm_buffer(int fd, struct _drm_buf gbm_buf[], int buffer_num, void 
     if (gbm_buf[i].modifiers[0] != DRM_FORMAT_MOD_INVALID) {
       flags = DRM_MODE_FB_MODIFIERS;
     }
-    drmModeAddFB2WithModifiers(fd, width, height, gbm_buf[i].format[0], gbm_buf[i].handle, gbm_buf[i].pitch, gbm_buf[i].offset, gbm_buf[i].modifiers, &gbm_buf[i].fb_id, flags);
+    drm_add_fb(fd, width, height, gbm_buf[i].format[0], gbm_buf[i].handle, gbm_buf[i].pitch, gbm_buf[i].offset, gbm_buf[i].modifiers, &gbm_buf[i].fb_id, flags);
     if (!gbm_buf[i].fb_id) {
       fprintf(stderr, "Failed to create framebuffer from gbm buffer object.\n");
       gbm_bo_destroy((struct gbm_bo *)gbm_buf[i].data);

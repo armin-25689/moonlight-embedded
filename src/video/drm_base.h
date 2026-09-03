@@ -103,3 +103,4 @@ int drm_set_display(int fd, uint32_t crtc_id, uint32_t src_w, uint32_t src_h, ui
 int drm_choose_color_config (enum DrmColorSpace colorspace, bool fullRange);
 int drm_apply_hdr_metadata(int fd, uint32_t conn_id, uint32_t hdr_metadata_prop_id, struct hdr_output_metadata *data);
 int drm_opt_commit (enum DrmCommitOpt opt, void *data, uint32_t device_id, uint32_t prop_id, uint64_t value);
+int drm_add_fb (int fd, uint32_t width, uint32_t height, uint32_t pixel_format, const uint32_t bo_handles[4], const uint32_t pitches[4], const uint32_t offsets[4], const uint64_t modifier[4], uint32_t *buf_id, uint32_t flags);

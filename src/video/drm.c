@@ -276,11 +276,7 @@ static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int
       drm_buf[i].modifiers[k] = DRM_FORMAT_MOD_LINEAR;
     }
     int add_flags = DRM_MODE_FB_MODIFIERS;
-#if defined(__arm__) || defined(__aarch64__)
-    drmModeAddFB2(drm_fd, width, height, format, drm_buf[i].handle, drm_buf[i].pitch, drm_buf[i].offset, &drm_buf[i].fb_id, 0);
-#else
-    drmModeAddFB2WithModifiers(drm_fd, width, height, format, drm_buf[i].handle, drm_buf[i].pitch, drm_buf[i].offset, drm_buf[i].modifiers, &drm_buf[i].fb_id, add_flags);
-#endif
+    drm_add_fb(drm_fd, width, height, format, drm_buf[i].handle, drm_buf[i].pitch, drm_buf[i].offset, drm_buf[i].modifiers, &drm_buf[i].fb_id, add_flags);
     if (!drm_buf[i].fb_id) {
       perror("Failed to create framebuffer from drm buffer object: ");
       for (int m = 0; m < handle_num; m++) {
@@ -733,7 +729,7 @@ static int drm_import_buffer (struct Source_Buffer_Info *buffer, int planes, int
   }
   uint32_t dformat = buffer->format[0] == DRM_FORMAT_Y410 ? DRM_FORMAT_XVYU2101010 : buffer->format[0];
   int flags = buffer->modifiers[0] != DRM_FORMAT_MOD_INVALID ? DRM_MODE_FB_MODIFIERS : 0;
-  drmModeAddFB2WithModifiers(drmInfoPtr->fd, buffer->width[0], buffer->height[0], dformat, handle, buffer->stride, buffer->offset, buffer->modifiers, &fb_id, flags);
+  drm_add_fb(drmInfoPtr->fd, buffer->width[0], buffer->height[0], dformat, handle, buffer->stride, buffer->offset, buffer->modifiers, &fb_id, flags);
   if (fb_id == 0) {
     perror("Failed to create framebuffer from drm buffer object: ");
     for (int i = 0; i < layers; i++) {
