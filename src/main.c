@@ -362,6 +362,12 @@ int main(int argc, char* argv[]) {
     applist(&server);
   } else if (strcmp("stream", config.action) == 0) {
     pair_check(&server);
+
+    const char *testinputname = "/dev/input/event0";
+    if (!config.viewonly && access(testinputname, F_OK) == 0 && access(testinputname, R_OK) != 0) {
+      fprintf(stderr, "No read permission of input devices: %s.\n", testinputname);
+      exit(-1);
+    }
     // set want hdr before system init,system must report hdr support by display
     wantYuv444 = config.yuv444 ? true : false;
     wantHdr = config.hdr ? true : false;
