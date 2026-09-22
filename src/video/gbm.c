@@ -32,6 +32,68 @@ static int handle_num = 0;
 static bool out_fd = true;
 static uint32_t bo_flags = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR | GBM_BO_USE_SCANOUT; // must need by egl
 
+static inline int fill_gbm_buf (struct Gbm_Bo *gbm_bo, struct gbm_bo *bo) {
+  uint64_t modifier = gbm_bo_get_modifier(bo);
+  uint32_t width = gbm_bo_get_width(bo);
+  uint32_t height = gbm_bo_get_height(bo);
+  uint32_t format = gbm_bo_get_format(bo);
+  int planes = gbm_bo_get_plane_count(bo);
+  if (planes < 1) {
+    fprintf(stderr, "Can't get info from gbm bo.\n");
+    return planes;
+  }
+
+  gbm_bo->bo = bo;
+  for (int k = 0; k < planes;  k++) {
+    gbm_bo->handle[k] = gbm_bo_get_handle_for_plane(bo, k).u32;
+    gbm_bo->pitch[k] = gbm_bo_get_stride_for_plane(bo, k);
+    gbm_bo->offset[k] = gbm_bo_get_offset(bo, k);
+    gbm_bo->width[k] = (k != 0 && (format == GBM_FORMAT_YUV420 ||
+                                     format == GBM_FORMAT_NV12)) ? (int)(width / 2) : width;
+    gbm_bo->height[k] = (k != 0 && (format == GBM_FORMAT_YUV420 ||
+                                      format == GBM_FORMAT_NV12)) ? (int)(height / 2) : height;
+    gbm_bo->format[k] = format;
+    gbm_bo->modifiers[k] = modifier;
+  }
+  return planes;
+}
+
+void* get_buffer_from_gbm_surface (int fd, struct _drm_buf *gbm_buf, void *gbm_surface) {
+  struct Gbm_Bo *gbm_bo = (struct Gbm_Bo *)gbm_buf;
+  struct gbm_surface *surface = gbm_surface;
+  struct gbm_bo *bo = gbm_surface_lock_front_buffer(surface);
+  if (bo) {
+    int planes = fill_gbm_buf(gbm_bo, bo);
+    if (planes > 0) {
+      uint32_t flags = 0;
+      if (gbm_buf->modifiers[0] != DRM_FORMAT_MOD_INVALID) {
+        flags = DRM_MODE_FB_MODIFIERS;
+      }
+      drm_add_fb(fd, gbm_buf->width[0], gbm_buf->height[0], gbm_buf->format[0], gbm_buf->handle, gbm_buf->pitch, gbm_buf->offset, gbm_buf->modifiers, &gbm_buf->fb_id, flags);
+      if (gbm_buf->fb_id > 0) {
+        return (void *)bo;
+      }
+    }
+  }
+
+  fprintf(stderr, "Can't get buffer from gbm surface.\n");
+  return NULL;
+}
+
+void release_buffer_from_gbm_surface (int fd, struct _drm_buf *gbm_buf, void *gbm_surface) {
+  struct Gbm_Bo *gbm_bo = (struct Gbm_Bo *)gbm_buf;
+  struct gbm_surface *surface = gbm_surface;
+  struct gbm_bo *bo = gbm_bo->bo;
+  if (bo) {
+    gbm_surface_release_buffer(surface, bo);
+    if (gbm_bo->fb_id != 0)
+      drmModeRmFB(fd, gbm_bo->fb_id);
+    gbm_bo->fb_id = 0;
+    gbm_bo->bo = NULL;
+  }
+  return;
+}
+
 int generate_gbm_bo(int fd, struct _drm_buf gbm_buf[], int buffer_num, void *display, int width, int height, int src_fmt, uint64_t size[MAX_PLANE_NUM]) {
   struct Gbm_Bo *gbm_bo = (struct Gbm_Bo *)gbm_buf;
   struct gbm_device *gbm_display = (struct gbm_device *)display;
@@ -61,7 +123,7 @@ int generate_gbm_bo(int fd, struct _drm_buf gbm_buf[], int buffer_num, void *dis
                                         format == GBM_FORMAT_NV12)) ? (int)(height / 2) : height;
       gbm_bo[i].format[k] = format;
       gbm_bo[i].modifiers[k] = modifier;
-      size[i] = gbm_bo[i].pitch[k] * gbm_bo[i].height[k];
+      size[i] += (gbm_bo[i].pitch[k] * gbm_bo[i].height[k]);
     }
   }
   if (gbm_bo[0].fd[0] == gbm_bo[0].fd[1])
@@ -144,7 +206,10 @@ void gbm_close_display (int gbm_fd, void *data, int buffer_num, void **display, 
           close(gbm_bo[i].fd[j]);
       }
       if (gbm_bo[i].bo != NULL) {
-        gbm_bo_destroy(gbm_bo[i].bo);
+        if (window != NULL && *window != NULL)
+          gbm_surface_release_buffer((struct gbm_surface *)*window, gbm_bo[i].bo);
+        else
+          gbm_bo_destroy(gbm_bo[i].bo);
       }
       memset(&gbm_bo[i], 0, sizeof(gbm_bo[i]));
     }

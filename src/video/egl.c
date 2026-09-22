@@ -447,12 +447,6 @@ static void egl_sync_window_size(int width, int height, bool isfullscreen) {
     // cut display area,importent for software decoder
     screen_w = (int)screen_w * (multi_w > multi_h ? (egl_base.fill_resolution ? (1 / multi) : (egl_base.width / (float)window_info.frame_width)) : (egl_base.width / (float)window_info.frame_width));
   }
-/*
-  else if (egl_base.display_buffer) {
-    window_info.view_width = width;
-    window_info.view_height = height;
-  }
-*/
 
   window_info.view_width = screen_w;
   window_info.view_height = screen_h;
@@ -475,7 +469,6 @@ static int egl_init(struct Render_Init_Info *paras) {
   egl_base.screen_width = paras->screen_width;
   egl_base.screen_height = paras->screen_height;
   bool is_full_screen = paras->is_full_screen;
-  egl_base.display_buffer = paras->use_display_buffer;
   egl_base.fixed_resolution = paras->fixed_resolution;
   egl_base.fill_resolution = paras->fill_resolution;
 
@@ -496,12 +489,19 @@ static int egl_init(struct Render_Init_Info *paras) {
   }
 
   // finally we can create a new surface using this config and window
-  if (!egl_base.display_buffer || (egl_base.display_buffer && !ExtState.eglIsSupportExtSurfaceless)) {
+  if (paras->window) {
     surface = eglCreatePlatformWindowSurface(display, config, paras->window, NULL);
     if (surface == EGL_NO_SURFACE) {
       fprintf(stderr, "EGL: couldn't get a valid egl surface\n");
       return -1;
     }
+  }
+  else if (ExtState.eglIsSupportExtSurfaceless) {
+    egl_base.display_buffer = true;
+  }
+  else {
+    fprintf(stderr, "EGL: couldn't get a valid egl surface.\n");
+    return -1;
   }
 
   eglMakeCurrent(display, surface, surface, context);
@@ -509,11 +509,11 @@ static int egl_init(struct Render_Init_Info *paras) {
   if (egl_base.display_buffer) {
     if (glEGLImageTargetTexture2DOES == NULL) {
       fprintf(stderr, "EGL: extension glEGLImageTargetTexture2DOES not found\n");
-      return -1;
+      goto init_exit;
     }
     if (map_display_buffer_framebuffer(out_fb, paras->display_exported_buffer) < 0) {
       fprintf(stderr, "EGL: map_gbm_bo_to_framebuffer failed\n");
-      return -1;
+      goto init_exit;
     }
   }
 
@@ -523,7 +523,7 @@ static int egl_init(struct Render_Init_Info *paras) {
       generate_shader(&egl_base.yuv_fragment_shader, fragment_source_3plane, GL_FRAGMENT_SHADER) < 0 ||
       generate_shader(&egl_base.nv12_fragment_shader, fragment_source_nv12, GL_FRAGMENT_SHADER) < 0 ||
       generate_shader(&egl_base.packed_fragment_shader, fragment_source_packed, GL_FRAGMENT_SHADER) < 0)
-    return -1;
+    goto init_exit;
 
   egl_base.shader_program_yuv = glCreateProgram();
   egl_base.shader_program_packed = glCreateProgram();
@@ -599,6 +599,10 @@ static int egl_init(struct Render_Init_Info *paras) {
 
   eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
   return 0;
+
+init_exit:
+  eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+  return -1;
 }
 
 static inline void draw_texture() {
@@ -645,6 +649,11 @@ static inline void egl_draw_vaapi(struct Render_Image *images) {
 }
 
 static int egl_choose_config_from_frame(struct Render_Config *config) {
+  if (config == NULL) {
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    return 0;
+  }
+
   eglMakeCurrent(display, surface, surface, context);
 
   egl_base.eglVSync = config->vsync;
@@ -730,6 +739,7 @@ static int egl_draw(struct Render_Image *images) {
 }
 
 static void egl_destroy() {
+  eglMakeCurrent(display, surface, surface, context);
   if (!egl_base.eglVSync) {
     if (eglsync != EGL_NO_SYNC) {
       eglClientWaitSync(display, eglsync, EGL_SYNC_FLUSH_COMMANDS_BIT, EGL_FOREVER);
@@ -738,7 +748,6 @@ static void egl_destroy() {
   if (eglsync != EGL_NO_SYNC)
     eglDestroySync(display, eglsync);
   if (egl_base.width != 0) {
-    eglMakeCurrent(display, surface, surface, context);
     if (egl_base.display_buffer) {
       glBindFramebuffer(GL_FRAMEBUFFER, 0);
       for (int i = 0; i < egl_base.displayBufferNum; i++) {

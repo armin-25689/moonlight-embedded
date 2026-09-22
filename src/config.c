@@ -64,7 +64,7 @@ static struct option long_options[] = {
   {"mapping", required_argument, NULL, 'k'},
   {"swapxyab", no_argument, NULL, 'K'},
   {"nosops", no_argument, NULL, 'l'},
-  {"lessthreads", no_argument, NULL, 'L'},
+  {"vrr", no_argument, NULL, 'L'},
   {"audio", required_argument, NULL, 'm'},
   {"modeset", no_argument, NULL, 'M'},
   {"localaudio", no_argument, NULL, 'n'},
@@ -207,7 +207,7 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
     config->sops = false;
     break;
   case 'L':
-    config->less_threads = true;
+    config->vrr = true;
     break;
   case 'm':
     config->audio_device = value;
@@ -462,7 +462,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->disable_monitor = false;
   config->yuv444 = false;
   config->fakegrab = false;
-  config->less_threads = false;
+  config->vrr = false;
   config->sdlgp = false;
   config->swapxyab = false;
   config->fixed_resolution = false;

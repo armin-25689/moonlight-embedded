@@ -57,11 +57,11 @@ static void* x_get_display(const char* *device) {
 }
 
 static void x_close_display(void *data) {
-  struct _WINDOW_PROPERTIES *wp = data;
-  XWindowAttributes wattr = {0};
-  XGetWindowAttributes(display, window, &wattr);
-  *(wp->configure) = (((int64_t)wattr.x) << 48) | (((int64_t)wattr.y) << 32) | (((int64_t)wattr.width) << 16) | (int64_t)wattr.height;
   if (display != NULL) {
+    struct _WINDOW_PROPERTIES *wp = data;
+    XWindowAttributes wattr = {0};
+    XGetWindowAttributes(display, window, &wattr);
+    *(wp->configure) = (((int64_t)wattr.x) << 48) | (((int64_t)wattr.y) << 32) | (((int64_t)wattr.width) << 16) | (int64_t)wattr.height;
     XCloseDisplay(display);
     display = NULL;
   }
@@ -73,8 +73,7 @@ static void x_get_resolution (int *width, int *height, bool isfullscreen) {
     *height = screen_height;
   }
   else {
-    *width = x_display_width;
-    *height = x_display_height;
+    x11_report_size(width, height);
   }
   return;
 }
@@ -86,6 +85,7 @@ static int x_setup(int width, int height, int fps, int drFlags) {
     return -1;
   }
 
+  int x_display_width, x_display_height;
   Screen* screen = DefaultScreenOfDisplay(display);
   screen_width = WidthOfScreen(screen);
   screen_height = HeightOfScreen(screen);
@@ -129,7 +129,7 @@ static int x_setup(int width, int height, int fps, int drFlags) {
   }
   XFlush(display);
 
-  x11_input_init(display, window);
+  x11_input_init(&display, window, x_display_width, x_display_height);
 
   return 0;
 }
@@ -148,6 +148,7 @@ static void x_setup_post(void *data) {
   if (offset != 0) {
     XMoveWindow(display, window, offset >> 16, offset & 0x0000FFFF);
   }
+  x11_input_receive_window_fd (wp->fd_p);
 
   return;
 }
@@ -163,11 +164,7 @@ static void x_change_cursor(struct WINDOW_OP *op, int flags) {
   return;
 }
 
-static int x_put_to_screen(int width, int height, int i) {
-// return 1 means need change window size
-  if (x_display_width != width || x_display_height != height) {
-    return NEED_CHANGE_WINDOW_SIZE;
-  }
+static int x_put_to_screen(void *data, void *i) {
   return 0;
 }
 
@@ -184,7 +181,6 @@ struct DISPLAY_CALLBACK display_callback_x11 = {
   .display_put_to_screen = x_put_to_screen,
   .display_get_resolution = x_get_resolution,
   .display_modify_window = x_change_cursor,
-  .display_vsync_loop = NULL,
   .display_exported_buffer_info = NULL,
   .renders = (EGL_RENDER | X11_RENDER),
 };

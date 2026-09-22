@@ -25,6 +25,9 @@
 #define LOOP_RETURN 1
 #define LOOP_OK 0
 
+typedef char evwcode;
+enum evWindowCode { VTF1CODE = 1, VTF2CODE, VTF3CODE, VTF4CODE, VTF5CODE, VTF6CODE, VTF7CODE, VTF8CODE, VTF9CODE, VTFACODE, VTFBCODE, VTFCCODE, QUITCODE, GRABCODE, UNGRABCODE, FAKEGRABCODE, UNFAKEGRABCODE, WINDOWSIZECHANGED, FROMDISPLAY = 128 };
+
 typedef int(*Fd_Handler)(int fd, void *data);
 typedef void(*Fd_Clear)(int fd, void *data);
 

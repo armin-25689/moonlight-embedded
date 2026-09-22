@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "display.h"
@@ -42,8 +43,8 @@ static void *gbm_display = NULL;
 static void *gbm_window = NULL;
 static bool isMaster = true;
 static uint32_t hdr_blob = 0;
-
 static uint64_t fps_time;
+static uint32_t wait_commit_flags = DRM_MODE_ATOMIC_NONBLOCK;
 
 struct _drm_render_config {
   bool full_color_range;
@@ -298,8 +299,9 @@ static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int
   return format;
 }
 
+static int gbm_display_loop(void *data, void *udata);
 static int drm_setup(int width, int height, int fps, int drFlags) {
-  fps_time = ((int)(1000000 / (fps)));
+  fps_time = 1000000000ULL / fps;
   // need to implement get screen width and height
   connPtr = drmModeGetConnector(drmInfoPtr->fd, drmInfoPtr->connector_id);
   if (connPtr == NULL) {
@@ -330,6 +332,17 @@ static int drm_setup(int width, int height, int fps, int drFlags) {
     }
   }
 
+  if (drFlags & ENABLE_VRR) {
+    uint64_t has_cap = 1;
+    drmGetCap(drmInfoPtr->fd, DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP, &has_cap);
+    if (has_cap == 1 && drmInfoPtr->conn_vrr_capable_value == 1) {
+      wait_commit_flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_ASYNC;
+      drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->crtc_id, drmInfoPtr->crtc_vrr_prop_id, 1);
+    }
+    else
+      fprintf(stderr, "DRM: Enable vrr failed.\n");
+  }
+
   uint32_t rotate = drFlags & DISPLAY_ROTATE_MASK;
   if (rotate) drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->plane_id, drmInfoPtr->plane_rotation_prop_id, (rotate >> 2));
 
@@ -342,10 +355,13 @@ static int drm_setup(int width, int height, int fps, int drFlags) {
     int planes = generate_gbm_buffer(drmInfoPtr->fd, drm_buf, MAX_FB_NUM, gbm_display, drmInfoPtr->width, drmInfoPtr->height, wantHdr ? AV_PIX_FMT_X2RGB10LE : AV_PIX_FMT_BGR0);
     if (planes < 0)
       return -1;
+/*
+    display_callback_drm.display_put_to_screen = &gbm_display_loop;
     gbm_window = gbm_get_window(drmInfoPtr->fd, gbm_display, drmInfoPtr->width, drmInfoPtr->height, format);
     if (gbm_window == NULL)
       return -1;
-    if (isMaster && drm_set_display(drmInfoPtr->fd, drmInfoPtr->crtc_id, drmInfoPtr->width, drmInfoPtr->height, drmInfoPtr->width, drmInfoPtr->height, &connPtr->connector_id, 1, connModePtr, drm_buf[0].fb_id) < 0) {
+*/
+    if (isMaster && drm_set_display(drmInfoPtr->fd, drmInfoPtr->crtc_id, drmInfoPtr->plane_id, drmInfoPtr->width, drmInfoPtr->height, drmInfoPtr->width, drmInfoPtr->height, &connPtr->connector_id, 1, connModePtr, drm_buf[0].fb_id) < 0) {
       fprintf(stderr, "Could not set fb to drm crtc.\n");
     }
   }
@@ -407,8 +423,11 @@ static void drm_cleanup (void *data) {
   if (hdr_blob > 0)
     drmModeDestroyPropertyBlob(drmInfoPtr->fd, hdr_blob);
   hdr_blob = 0;
-  if (!tty_stat.out)
+  if (!tty_stat.out) {
+    struct timespec wait = { .tv_nsec = fps_time, .tv_sec = 0 };
+    nanosleep(&wait, NULL);
     drm_restore_display();
+  }
   if (gbm_display == NULL) {
     if (drm_render.decoder_type == SOFTWARE)
       drm_clear_image_cache(drmInfoPtr->fd, drm_buf, MAX_FB_NUM);
@@ -483,30 +502,27 @@ static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, bool hdractive, u
   return 0;
 }
 
-static int drm_display_done(int width, int height, int index) {
-  return 0;
-}
-
-static int drm_display_loop(void *data, int width, int height, int index) {
+static int drm_display_loop(void *data, void *waitmode) {
   static int orig_colortrc = -1;
   static int orig_colorprimary = -1;
   static uint32_t last_fbid = 0;
+  static struct _drm_pageflip_feedback last = {0};
+  struct Render_Image *image = (struct Render_Image *)data;
+  struct timespec wait = { .tv_sec = 0 };
+  int index = image->index;
   uint32_t fb_id;
+  uint32_t flags = wait_commit_flags;
 
   fb_id = drm_buf[index].fb_id;
   if (fb_id <= 0 || data == NULL)
     return -1;
 
   if (tty_stat.out || last_fbid == fb_id) {
-    usleep(fps_time);
+    wait.tv_nsec = fps_time;
+    nanosleep(&wait, NULL);
     return 0;
   }
-  last_fbid = fb_id;
 
-  //if (last_fbid == fb_id && drmInfoPtr->have_atomic)
-  //  fb_id = 0;
-
-  struct Render_Image *image = (struct Render_Image *)data;
   AVFrame *frame = image->sframe.frame;
   if (orig_colortrc != frame->color_trc || orig_colorprimary != frame->color_primaries) {
     orig_colortrc = frame->color_trc;
@@ -525,7 +541,60 @@ static int drm_display_loop(void *data, int width, int height, int index) {
     set_hdr_metadata_blob (drmInfoPtr, ffmpeg_has_hdr_metadata(frame), &hdr_blob);
   }
 
-  return drm_flip_buffer(drmInfoPtr->fd, drmInfoPtr->crtc_id, fb_id, hdr_blob, drm_buf[index].width[0], drm_buf[index].height[0]);
+  struct _drm_pageflip_feedback feedback = {0};
+  int res = drm_flip_buffer(drmInfoPtr->fd, drmInfoPtr->crtc_id, fb_id, flags, (fps_time << 1), &feedback);
+  if (res < 0) {
+    return res;
+  }
+
+  static uint8_t presentation_times = 0;
+  static uint64_t interval = 0;
+  if (feedback.seq - last.seq == 1) {
+    presentation_times++;
+    interval += (feedback.tv_sec - last.tv_sec) * 1000000000LL + (feedback.tv_nsec - last.tv_nsec);
+    if (presentation_times == 64) {
+      fps_time = (interval >> 6);
+      interval = 0;
+      presentation_times = 0;
+    }
+  }
+/*
+  if (*waitmode == DISPLAY_MODE_PULL) {
+    wait.tv_nsec = fps_time > 2000000ULL ? (fps_time - 2000000ULL) : (fps_time >> 1);
+    nanosleep(&wait, NULL);
+  }
+*/
+
+  last.seq = feedback.seq;
+  last.tv_sec = feedback.tv_sec;
+  last.tv_nsec = feedback.tv_nsec;
+  last_fbid = fb_id;
+
+  return res;
+}
+
+static int gbm_display_loop(void *data, void *udata) {
+  static struct _drm_buf *lastbo = NULL;
+  struct Render_Image *image = (struct Render_Image *)data;
+  int index = image->index;
+
+  if (lastbo == &drm_buf[index])
+    return 0;
+
+  struct _drm_buf *nowbo = &drm_buf[index];
+  if (get_buffer_from_gbm_surface(drmInfoPtr->fd, nowbo, gbm_window) == NULL) {
+    return -1;
+  }
+  int ret = drm_display_loop(data, udata);
+  if (ret < 0) {
+    release_buffer_from_gbm_surface(drmInfoPtr->fd, nowbo, gbm_window);
+    return ret;
+  }
+  if (lastbo) {
+    release_buffer_from_gbm_surface(drmInfoPtr->fd, lastbo, gbm_window);
+  }
+  lastbo = nowbo;
+  return ret;
 }
 
 static void drm_export_buffer(struct Source_Buffer_Info buffers[MAX_FB_NUM], int *buffer_num, int *plane_num) {
@@ -537,14 +606,17 @@ static void drm_export_buffer(struct Source_Buffer_Info buffers[MAX_FB_NUM], int
 }
 
 static void drm_switch_vt(struct WINDOW_OP *op, int flags) {
+  struct timespec wait = { .tv_sec = 0 };
   if (op->switch_vt > 0) {
     if (tty_stat.index < 0) return;
     if (tty_stat.index == (op->switch_vt - 1)) {
       if (tty_stat.out) {
         if (op->from_display_server)
           usleep(1000000);
-        else
-          usleep(fps_time * 2);
+        else {
+          wait.tv_nsec = fps_time * 2;
+          nanosleep(&wait, NULL);
+        }
         if (drmSetMaster(drmInfoPtr->fd) == 0) {
           drm_opt_commit(DRM_RESTORE_COMMIT, NULL, 0, 0, 0);
           tty_stat.out = false;
@@ -558,10 +630,12 @@ static void drm_switch_vt(struct WINDOW_OP *op, int flags) {
         tty_stat.out = true;
         drmDropMaster(drmInfoPtr->fd);
         sync_input_state(false);
-        usleep(fps_time * 3);
+        wait.tv_nsec = fps_time * 3;
+        nanosleep(&wait, NULL);
         if (drmSetMaster(drmInfoPtr->fd) == 0) {
           drm_restore_display();
-          usleep(fps_time);
+          wait.tv_nsec = fps_time;
+          nanosleep(&wait, NULL);
           drmDropMaster(drmInfoPtr->fd);
         }
       }
@@ -580,15 +654,17 @@ struct DISPLAY_CALLBACK display_callback_drm = {
   .display_close_display = drm_cleanup,
   .display_setup = drm_setup,
   .display_setup_post = drm_setup_post,
-  .display_put_to_screen = drm_display_done,
+  .display_put_to_screen = drm_display_loop,
   .display_get_resolution = drm_get_resolution,
   .display_modify_window = drm_switch_vt,
-  .display_vsync_loop = drm_display_loop,
   .display_exported_buffer_info = drm_export_buffer,
   .renders = DRM_RENDER | EGL_RENDER,
 };
 
 static int get_config_from_frame(struct Render_Config *config) {
+  if (config == NULL)
+    return 0;
+
   uint32_t format = 0;
   bool need_change_color_config = false;
   drm_config.src_fmt = config->pix_fmt;
@@ -652,7 +728,7 @@ static int get_config_from_frame(struct Render_Config *config) {
 
   drm_config.need_change_color = need_change_color_config;
 
-  if (isMaster && drm_set_display(drmInfoPtr->fd, drmInfoPtr->crtc_id, config->width, config->height, drmInfoPtr->width, drmInfoPtr->height, &connPtr->connector_id, 1, connModePtr, drm_buf[0].fb_id) < 0) {
+  if (isMaster && drm_set_display(drmInfoPtr->fd, drmInfoPtr->crtc_id, drmInfoPtr->plane_id, config->width, config->height, drmInfoPtr->width, drmInfoPtr->height, &connPtr->connector_id, 1, connModePtr, drm_buf[0].fb_id) < 0) {
     fprintf(stderr, "Could not set fb to drm crtc.\n");
     return -1;
   }

@@ -6,3 +6,5 @@ void gbm_close_display (int gbm_fd, void *gbm_buf, int buffer_num, void **displa
 void* gbm_get_window(int gbm_fd, void * display, int width, int height, uint32_t format);
 void* gbm_get_display(int *gbm_fd);
 int gbm_convert_image(struct Render_Image *image, struct _drm_buf *drm_buf, int gbm_fd, int handle_num, int plane_num, int dst_fmt, uint64_t size[MAX_PLANE_NUM], uint64_t map_offset[MAX_PLANE_NUM]);
+void* get_buffer_from_gbm_surface (int fd, struct _drm_buf *gbm_buf, void *gbm_surface);
+void release_buffer_from_gbm_surface (int fd, struct _drm_buf *gbm_buf, void *gbm_surface);

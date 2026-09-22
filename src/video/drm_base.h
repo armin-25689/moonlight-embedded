@@ -44,6 +44,7 @@ struct Drm_Info {
   uint32_t conn_broadcast_rgb_prop_id;
   uint64_t conn_broadcast_rgb_prop_values[3];
   uint32_t conn_allm_prop_id;
+  uint64_t conn_vrr_capable_value;
   uint32_t encoder_id;
   uint32_t crtc_id;
   uint32_t crtc_fb_id;
@@ -89,6 +90,14 @@ struct _drm_buf {
   void *data;
 };
 
+struct _drm_pageflip_feedback {
+  uint64_t tv_sec;
+  uint64_t tv_nsec;
+  uint64_t seq;
+  uint32_t crtc_id;
+  uint8_t done;
+};
+
 // return NULL is  failed
 struct Drm_Info *drm_init (const char *device, uint32_t drmformat, bool usehdr);
 void drm_close();
@@ -96,10 +105,10 @@ void drm_restore_display();
 
 void convert_display (const uint32_t *src_w, const uint32_t *src_h, uint32_t *dst_w, uint32_t *dst_h, int *dst_x, int *dst_y);
 int get_drm_dbum_aligned (int fd, int pixfmt, int width, int height);
-int drm_flip_buffer (uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint64_t hdr_data, uint32_t width, uint32_t height);
+int drm_flip_buffer (uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint64_t flags, uint64_t timeout, struct _drm_pageflip_feedback *feedback);
 int drm_get_plane_info (struct Drm_Info *drm_info, uint32_t format);
 uint32_t translate_format_to_drm(int format, int *bpp, int *heightmulti, int *planenum);
-int drm_set_display(int fd, uint32_t crtc_id, uint32_t src_w, uint32_t src_h, uint32_t crtc_w, uint32_t crtc_h, uint32_t *connector_id, uint32_t connector_num, drmModeModeInfoPtr connModePtr, uint32_t fb_id);
+int drm_set_display(int fd, uint32_t crtc_id, uint32_t plane_id, uint32_t src_w, uint32_t src_h, uint32_t crtc_w, uint32_t crtc_h, uint32_t *connector_id, uint32_t connector_num, drmModeModeInfoPtr connModePtr, uint32_t fb_id);
 int drm_choose_color_config (enum DrmColorSpace colorspace, bool fullRange);
 int drm_apply_hdr_metadata(int fd, uint32_t conn_id, uint32_t hdr_metadata_prop_id, struct hdr_output_metadata *data);
 int drm_opt_commit (enum DrmCommitOpt opt, void *data, uint32_t device_id, uint32_t prop_id, uint64_t value);

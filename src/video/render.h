@@ -42,7 +42,6 @@ struct Render_Init_Info {
   int format;
   bool is_full_screen;
   bool is_yuv444;
-  bool use_display_buffer;
   bool fixed_resolution;
   bool fill_resolution;
   int egl_platform;
@@ -61,6 +60,8 @@ struct RENDER_CALLBACK {
   struct Render_Image images[MAX_FB_NUM];
   int (*render_create) (struct Render_Init_Info *paras);
   int (*render_init) (struct Render_Init_Info *paras);
+  // use config = NULL to unbound vars and unlock thread
+  // render_sync_config must test config is NULL
   int (*render_sync_config) (struct Render_Config *config);
   int (*render_draw) (struct Render_Image *image);
   void (*render_destroy) ();

@@ -22,6 +22,7 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "x11.h"
 #include "evdev.h"
@@ -44,13 +45,14 @@
 } while(0)
 
 static Display *display;
+static Display **dis_ptr;
 static Window window;
 static int displayFd = -1;
 static Atom wm_deletemessage;
+static int *window_fd = NULL;
 
-int x_display_width = 0;
-int x_display_height = 0;
-
+static int x_display_width = 0;
+static int x_display_height = 0;
 static int keyboard_modifiers;
 static int last_x = -1, last_y = -1;
 static int semi_width, semi_height;
@@ -74,10 +76,13 @@ static int x11_handler(int fd, void *data) {
       x_display_height = ((XConfigureEvent)event.xconfigure).height;
       semi_width = (int)x_display_width / 2;
       semi_height = (int)x_display_height / 2;
+      const evwcode window_size_changed = WINDOWSIZECHANGED;
+      if (window_fd && *window_fd >= 0)
+        write(*window_fd, &window_size_changed, sizeof(window_size_changed));
       break;
     case DestroyNotify:
       grab_window(E_UNGRAB_WINDOW);
-      break;
+      return LOOP_RETURN;
     case EnterNotify:
     case LeaveNotify:
     case FocusIn:
@@ -156,10 +161,6 @@ static int x11_handler(int fd, void *data) {
         if (last_x >= 0 && last_y >= 0 && inputing) {
           if (!grabbed)
             LiSendMouseMoveAsMousePositionEvent(motion_x, motion_y, x_display_width, x_display_height);
-/*
-          // handled by evdev instead
-          if (grabbed)
-*/
         }
 
         if (grabbed)
@@ -175,9 +176,20 @@ static int x11_handler(int fd, void *data) {
   return LOOP_OK;
 }
 
-void x11_input_init(Display* x11_display, Window x11_window) {
-  display = x11_display;
+static void x_destroy_vars (int fd, void *data) {
+  display = NULL;
+  *dis_ptr = NULL;
+  const evwcode quitcode = QUITCODE;
+  if (window_fd && *window_fd >= 0)
+    write(*window_fd, &quitcode, sizeof(quitcode));
+}
+
+void x11_input_init(Display* *x11_display, Window x11_window, int width, int height) {
+  dis_ptr = x11_display;
+  display = *x11_display;
   window = x11_window;
+  x_display_width = width;
+  x_display_height = height;
   semi_width = x_display_width > 0 ? ((int)x_display_width / 2) : 640;
   semi_height = x_display_height > 0 ? ((int)x_display_height / 2) : 360;
 
@@ -194,7 +206,7 @@ void x11_input_init(Display* x11_display, Window x11_window) {
 
   displayFd = ConnectionNumber(display);
   if (displayFd > -1)
-    loop_add_fd(displayFd, &x11_handler, 0);
+    loop_add_fd1(displayFd, &x11_handler, &x_destroy_vars, 0, NULL);
 }
 
 void x11_input_remove () {
@@ -218,4 +230,13 @@ void x11_change_input_stat (bool isinput) {
 void x11_keep_display_cursor (bool isdisplay) {
   keep_display_cursor = isdisplay;
   XDefineCursor(display, window, isdisplay ? 0 : cursor);
+}
+
+void x11_input_receive_window_fd (int *fd) {
+  window_fd = fd;
+}
+
+void x11_report_size(int *w, int *h) {
+  *w = x_display_width;
+  *h = x_display_height;
 }

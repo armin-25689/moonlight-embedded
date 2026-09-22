@@ -17,6 +17,7 @@
  * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <errno.h>
 #include <libavcodec/avcodec.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -54,7 +55,6 @@ VLIST_INIT(render, MAX_FB_NUM);
 VLIST_INIT(display, MAX_FB_NUM);
 
 static bool isTenBit;
-static bool firstDraw = true;
 
 static void* ffmpeg_buffer = NULL;
 static size_t ffmpeg_buffer_size = 0;
@@ -63,14 +63,11 @@ static struct Image_Pool image_pools = {0};
 static void *display = NULL;
 static void *window = NULL;
 
-static int pipefd[2];
 static int windowpipefd[2];
 static const evwcode quitstate = QUITCODE;
 
 static int display_width = 0, display_height = 0;
-
-static uint64_t fps_time;
-static uint64_t fps_time_10;
+static int display_feedback = 0;
 
 static struct DISPLAY_CALLBACK *disPtr = NULL;
 static struct DISPLAY_CALLBACK *displayCallbacksPtr[] = {
@@ -96,7 +93,6 @@ static struct RENDER_CALLBACK *renderCallbacksPtr[] = {
 };
 
 struct Multi_Thread {
-  bool created;
   pthread_t decoder_id;
   pthread_t render_id;
   pthread_t display_id;
@@ -104,6 +100,7 @@ struct Multi_Thread {
   void* (*frame_handler)(void *data);
   void* (*decoder_handler)(void *data);
   void* (*display_handler)(void *data);
+  sem_t display_sem;
   sem_t render_sem;
   sem_t decoder_sem;
 };
@@ -121,23 +118,20 @@ typedef struct Setupargs {
 static SetupArgs ffmpegArgs;
 
 static void clear_threads() {
-  if (threads.created) {
-    done = true;
-    LiWakeWaitForVideoFrame();
+  LiWakeWaitForVideoFrame();
 
-    usleep(fps_time);
-
-    sem_post(&threads.decoder_sem);
-    sem_post(&threads.render_sem);
-    if (threads.render_id)
-      pthread_join(threads.render_id, NULL);
-    if (threads.decoder_id)
-      pthread_join(threads.decoder_id, NULL);
-    if (threads.display_id)
-      pthread_join(threads.display_id, NULL);
-    sem_destroy(&threads.render_sem);
-    sem_destroy(&threads.decoder_sem);
-  }
+  sem_post(&threads.decoder_sem);
+  sem_post(&threads.render_sem);
+  sem_post(&threads.display_sem);
+  if (threads.decoder_id)
+    pthread_join(threads.decoder_id, NULL);
+  if (threads.render_id)
+    pthread_join(threads.render_id, NULL);
+  if (threads.display_id)
+    pthread_join(threads.display_id, NULL);
+  sem_destroy(&threads.display_sem);
+  sem_destroy(&threads.render_sem);
+  sem_destroy(&threads.decoder_sem);
   if (threads.mutex != 0)
     pthread_mutex_destroy(&threads.mutex);
   memset(&threads, 0, sizeof(threads));
@@ -153,6 +147,12 @@ static int window_op_handle (int pipefd, void *data) {
   while (read(pipefd, &getedCode, sizeof(getedCode)) > 0);
   evwcode opCode = getedCode & (~0xC0);
   switch (opCode) {
+  case WINDOWSIZECHANGED:
+    pthread_mutex_lock(&threads.mutex);
+    disPtr->display_get_resolution(&display_width, &display_height, false);
+    display_feedback = NEED_CHANGE_WINDOW_SIZE;
+    pthread_mutex_unlock(&threads.mutex);
+    return LOOP_OK;
   case QUITCODE:
     return LOOP_RETURN;
 #if defined(HAVE_WAYLAND) || defined(HAVE_X11)
@@ -195,9 +195,9 @@ static int window_op_handle (int pipefd, void *data) {
   return LOOP_OK;
 }
 
-static inline void* draw_frame (struct Render_Image *images, AVFrame* frame, int *res) {
-  if (firstDraw) {
-    firstDraw = false;
+static inline void* draw_frame (struct Render_Image *images, AVFrame* frame, int *res, bool *firstDraw) {
+  if (*firstDraw) {
+    *firstDraw = false;
     if (isYUV444 && (!(frame->linesize[0] == frame->linesize[2] && frame->linesize[1] == frame->linesize[0]))) {
       fprintf(stderr, "There is not yuv444 format. Please try remove -yuv444 option to draw video!\n");
       *res = LOOP_RETURN;
@@ -239,15 +239,11 @@ static inline void* draw_frame (struct Render_Image *images, AVFrame* frame, int
   return images;
 }
 
-static inline void mv_vlist_display_to_decoder() {
+static inline void mv_deled_display_data_todecoder (void *frame, void *image) {
   pthread_mutex_lock(&threads.mutex);
-  void *image = VLIST_GET_DATA(display);
-  VLIST_ADD(decoder, VLIST_GET_FRAME(display), image);
-  VLIST_DEL(display);
-  if (threads.created)
-    sem_post(&threads.decoder_sem);
+  VLIST_ADD(decoder, frame, image);
+  sem_post(&threads.decoder_sem);
   pthread_mutex_unlock(&threads.mutex);
-
   return;
 }
 
@@ -256,6 +252,7 @@ static inline void mv_vlist_render_to_display() {
   VLIST_ADD(display, VLIST_GET_FRAME(render), VLIST_GET_DATA(render));
   VLIST_DEL(render);
   pthread_mutex_unlock(&threads.mutex);
+  sem_post(&threads.display_sem);
   return;
 }
 
@@ -265,62 +262,49 @@ static inline void mv_vlist_decoder_to_render() {
   VLIST_ADD(render, frame, VLIST_GET_DATA(decoder));
   VLIST_DEL(decoder);
   pthread_mutex_unlock(&threads.mutex);
-  if (threads.created) {
-    sem_post(&threads.render_sem);
-  }
-  else {
-    write(pipefd[1], &frame, sizeof(void*));
-  }
+  sem_post(&threads.render_sem);
   return;
 }
 
-static int frame_handle (int pipefd, void *data) {
-  AVFrame* frame = NULL;
+#define DISCARD_FRAMES_TO(dstsem, srcsem, dstvlist, srcvlist, max_keep, frame, image) \
+  do { \
+    int snum = 0; \
+    int smax = max_keep; \
+    *frame = VLIST_GET_FRAME(srcvlist); \
+    *image = VLIST_GET_DATA(srcvlist); \
+    snum = VLIST_NUM(srcvlist); \
+    while (snum > smax && sem_trywait(srcsem) == 0) { \
+      if (*frame == NULL) { \
+        smax = 0; \
+        sem_getvalue(srcsem, &snum); \
+        continue; \
+      } \
+      VLIST_ADD(dstvlist, *frame, *image); \
+      VLIST_DEL(srcvlist); \
+      *frame = VLIST_GET_FRAME(srcvlist); \
+      *image = VLIST_GET_DATA(srcvlist); \
+      sem_post(dstsem); \
+      snum--; \
+    } \
+  } while (0)
 
-  if (done) return LOOP_RETURN;
-  while (read(pipefd, &frame, sizeof(void*)) > 0);
-  if (frame) {
-    int res;
-    pthread_mutex_lock(&threads.mutex);
-    AVFrame *vframe = VLIST_GET_FRAME(render);
-    void *image_data = VLIST_GET_DATA(render);
-    pthread_mutex_unlock(&threads.mutex);
-    if (vframe != frame) {
-      fprintf(stderr, "Get frame error.\n");
-      return LOOP_RETURN;
-    }
-    struct Render_Image *image = draw_frame((struct Render_Image *)image_data, frame, &res);
-    int dis_res = -1;
-    if (res == LOOP_RETURN) {
-      return res;
-    }
-    mv_vlist_render_to_display();
-
-    if (disPtr->display_vsync_loop) {
-      dis_res = disPtr->display_vsync_loop(image, display_width, display_height, image->index);
-    }
-    else {
-      dis_res = disPtr->display_put_to_screen(display_width, display_height, image->index);
-      if (dis_res == NEED_CHANGE_WINDOW_SIZE) {
-        if (renderPtr->render_sync_window_size) {
-          disPtr->display_get_resolution(&display_width, &display_height, false);
-          renderPtr->render_sync_window_size(display_width, display_height, false);
-        }
-      }
-    }
-    if (dis_res < 0) return LOOP_RETURN;
-
-    mv_vlist_display_to_decoder();
-
-    return res;
-  }
-
-  return LOOP_OK;
+static inline void discard_frames_from_render_todecoder (sem_t *dstsem, sem_t *srcsem, uint8_t max_keep, void **frame, void **image) {
+  DISCARD_FRAMES_TO(dstsem, srcsem, decoder, render, max_keep, frame, image);
+  return;
 }
+
+static inline void discard_frames_from_display_todecoder (sem_t *dstsem, sem_t *srcsem, uint8_t max_keep, void **frame, void **image) {
+  DISCARD_FRAMES_TO(dstsem, srcsem, decoder, display, max_keep, frame, image);
+  return;
+}
+#undef DISCARD_FRAMES_TO
 
 static void* frame_handler (void *data) {
 
   pthread_setname_np(threads.render_id, "m_render_t");
+  AVFrame *frame = NULL;
+  struct Render_Image *image_data = NULL;
+  bool firstDraw = true;
 
   while (!done) {
     sem_wait(&threads.render_sem);
@@ -328,124 +312,148 @@ static void* frame_handler (void *data) {
       break;
     }
     pthread_mutex_lock(&threads.mutex);
-    AVFrame *frame = VLIST_GET_FRAME(render);
-    void *image_data = VLIST_GET_DATA(render);
-    int renderNum = VLIST_NUM(render);
-    if (!frame) {
-      fprintf(stderr, "Error: Get NULL frame now.\n");
-      break;
-    }
-
-    int frameNums = 0;
-    sem_getvalue(&threads.render_sem, &frameNums);
-    if (renderNum > 2) {
-      if (sem_trywait(&threads.render_sem) == 0) {
-        VLIST_ADD(decoder, frame, image_data);
-        VLIST_DEL(render);
-        frame = VLIST_GET_FRAME(render);
-        image_data = VLIST_GET_DATA(render);
-        sem_post(&threads.decoder_sem);
-      }
+    discard_frames_from_render_todecoder(&threads.decoder_sem, &threads.render_sem, 1, (void **)&frame, (void **)&image_data);
+    if (display_feedback == NEED_CHANGE_WINDOW_SIZE) {
+      if (renderPtr->render_sync_window_size)
+        renderPtr->render_sync_window_size(display_width, display_height, false);
+      display_feedback = 0;
     }
     pthread_mutex_unlock(&threads.mutex);
 
+    if (!frame)
+      continue;
+
     int res;
-    draw_frame((struct Render_Image *)image_data, frame, &res);
+    draw_frame((struct Render_Image *)image_data, frame, &res, &firstDraw);
     if (res == LOOP_RETURN) {
       break;
     }
     mv_vlist_render_to_display();
-    if (disPtr->display_vsync_loop == NULL) {
-      int dis_res = disPtr->display_put_to_screen(display_width, display_height, ((struct Render_Image *)image_data)->index);
-      if (dis_res < 0) {
-        break;
-      }
-      else if (dis_res == NEED_CHANGE_WINDOW_SIZE) {
-        if (renderPtr->render_sync_window_size) {
-          disPtr->display_get_resolution(&display_width, &display_height, false);
-          renderPtr->render_sync_window_size(display_width, display_height, false);
-        }
-      }
-      mv_vlist_display_to_decoder();
-    }
   }
 
-  done = true;
-  sem_post(&threads.decoder_sem);
+  // unbound context for egl
+  if (renderPtr->render_sync_config != NULL)
+    renderPtr->render_sync_config(NULL);
+
+  pthread_mutex_lock(&threads.mutex);
   write(windowpipefd[1], &quitstate, sizeof(quitstate));
+  pthread_mutex_unlock(&threads.mutex);
 
   return NULL;
 }
 
 static void* display_handler (void *data) {
-  pthread_setname_np(threads.render_id, "m_display_t");
-
-  bool start = false;
-  // wait for render
-  while (!start && !done) {
-    usleep(fps_time_10);
-    if (VLIST_NUM(display) > 0) {
-      start = true;
-    }
-  }
+  pthread_setname_np(threads.display_id, "m_display_t");
+  AVFrame *lastframe = NULL;
+  AVFrame *frame = NULL;
+  struct Render_Image *lastimage = NULL;
+  struct Render_Image *image_data = NULL;
 
   while (!done) {
+    sem_wait(&threads.display_sem);
+
+    if (done) goto display_exit;
+
     pthread_mutex_lock(&threads.mutex);
-    AVFrame *last_frame = VLIST_GET_FRAME(display);
-    struct Render_Image *last_image_data = (struct Render_Image *)VLIST_GET_DATA(display);
-    int displayNum = VLIST_NUM(display);
-    if (displayNum > (MAX_FB_NUM - 1)) {
-      VLIST_DEL(display);
-      while (VLIST_NUM(display) > 0) {
-        AVFrame *middle_frame = VLIST_GET_FRAME(display);
-        struct Render_Image *middle_image_data = (struct Render_Image *)VLIST_GET_DATA(display);
-        VLIST_DEL(display);
-        VLIST_ADD(decoder, middle_frame, middle_image_data);
-        sem_post(&threads.decoder_sem);
-      }
-      while (VLIST_NUM(display) == 0) {
-        pthread_mutex_unlock(&threads.mutex);
-        if (done) goto display_exit;
-        usleep(fps_time_10);
-        pthread_mutex_lock(&threads.mutex);
-      }
+    discard_frames_from_display_todecoder(&threads.decoder_sem, &threads.display_sem, 1, (void **)&frame, (void **)&image_data);
+    while ((sem_trywait(&threads.display_sem)) == 0);
+    if (image_data == NULL) {
+      pthread_mutex_unlock(&threads.mutex);
+      continue;
     }
-    else if (displayNum > 1) {
-      VLIST_DEL(display);
-    }
-    struct Render_Image *image_data = (struct Render_Image *)VLIST_GET_DATA(display);
+    VLIST_DEL(display);
     pthread_mutex_unlock(&threads.mutex);
     if (image_data == NULL) {
-      fprintf(stderr, "Error: Get NULL image data.\n");
+      fprintf(stderr, "Get image error occur.\n");
       goto display_exit;
     }
-    if (disPtr->display_vsync_loop(image_data, display_width, display_height, image_data->index) < 0) {
-      fprintf(stderr, "Error: display loop failed.\n");
-      goto display_exit;
-    }
-    if (last_image_data != image_data) {
-      pthread_mutex_lock(&threads.mutex);
-      VLIST_ADD(decoder, last_frame, last_image_data);
-      pthread_mutex_unlock(&threads.mutex);
-      sem_post(&threads.decoder_sem);
-    }
-    else {
-      if (displayNum > 1) {
+
+    int dis_ret = disPtr->display_put_to_screen(image_data, NULL);
+    switch (dis_ret) {
+    case 0:
+      break;
+    case -EBUSY:
+    case -EAGAIN:
+    case -EINTR:
+      if (image_data != lastimage && lastimage != NULL) {
+        mv_deled_display_data_todecoder (frame, image_data);
+      }
+      else {
+        lastframe = frame;
+        lastimage = image_data;
+      }
+      continue;
+      break;
+    default:
+      if (dis_ret < 0) {
+        fprintf(stderr, "Error: display loop failed.\n");
         goto display_exit;
       }
+      break;
     }
+    if (image_data != lastimage && lastimage != NULL) {
+      mv_deled_display_data_todecoder (lastframe, lastimage);
+    }
+    lastframe = frame;
+    lastimage = image_data;
   }
 
 display_exit:
-  done = true;
-  sem_post(&threads.decoder_sem);
+  pthread_mutex_lock(&threads.mutex);
   write(windowpipefd[1], &quitstate, sizeof(quitstate));
+  pthread_mutex_unlock(&threads.mutex);
 
   return NULL;
 }
 
-// declare funtion here
-int x11_submit_decode_unit(PDECODE_UNIT decodeUnit);
+static int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
+  PLENTRY entry = decodeUnit->bufferList;
+  int length = 0;
+
+  ensure_buf_size(&ffmpeg_buffer, &ffmpeg_buffer_size, decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE);
+
+  while (entry != NULL) {
+    memcpy(ffmpeg_buffer+length, entry->data, entry->length);
+    length += entry->length;
+    entry = entry->next;
+  }
+
+  int err = ffmpeg_decode2(ffmpeg_buffer, length, decodeUnit->frameType == FRAME_TYPE_IDR ? AV_PKT_FLAG_KEY : 0);
+  if (done)
+    return DR_OK;
+  if (err < 0) {
+    goto next_handle;
+  }
+
+  pthread_mutex_lock(&threads.mutex);
+  struct Render_Image *image = (struct Render_Image *)VLIST_GET_DATA(decoder);
+  pthread_mutex_unlock(&threads.mutex);
+  if (image == NULL)
+    goto decode_exit;
+
+  err = ffmpeg_get_frame(image, true);
+  if (err < 0)
+    goto decode_exit;
+  else if (err > 0) {
+    if (err == F_TRY_AGAIN) {
+      sem_post(&threads.decoder_sem);
+      return DR_OK;
+    }
+    else
+      goto next_handle;
+  }
+
+  mv_vlist_decoder_to_render();
+  return DR_OK;
+
+next_handle:
+  sem_post(&threads.decoder_sem);
+  return DR_NEED_IDR;
+
+decode_exit:
+  return DR_OK;
+}
+
 static void* decoder_thread(void *data) {
   pthread_setname_np(threads.decoder_id, "m_decoder_t");
   int laststatus = -3;
@@ -494,9 +502,9 @@ static void* decoder_thread(void *data) {
     laststatus = status;
   }
 
-  done = true;
-  sem_post(&threads.render_sem);
+  pthread_mutex_lock(&threads.mutex);
   write(windowpipefd[1], &quitstate, sizeof(quitstate));
+  pthread_mutex_unlock(&threads.mutex);
 
   return NULL;
 }
@@ -611,8 +619,6 @@ int x11_init(const char *displayName, int hwType) {
 int x11_setup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
   int screen_width, screen_height;
   ffmpegArgs.drFlags = drFlags;
-  fps_time = ((int)(1000000 / (redrawRate)));
-  fps_time_10 = (int) (fps_time / 10);
 
   ensure_buf_size(&ffmpeg_buffer, &ffmpeg_buffer_size, INITIAL_DECODER_BUFFER_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
 
@@ -677,8 +683,6 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   if (renderPtr->display_name == NULL) {
     renderPtr->display_name = disPtr->name;
   }
-  if (strcmp(disPtr->name, "drm") == 0)
-    renderParas.use_display_buffer = true;
   renderParas.display_exported_buffer = disPtr->display_exported_buffer_info;
   if (renderPtr->render_init != NULL) {
     if (renderPtr->render_init(&renderParas) < 0) {
@@ -727,41 +731,23 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   pthread_mutexattr_setprotocol(&mattr, PTHREAD_PRIO_INHERIT);
   pthread_mutex_init(&threads.mutex, &mattr);
   pthread_mutexattr_destroy(&mattr);
-  if (!(CAPABILITY_DIRECT_SUBMIT & decoder_callbacks_x11.capabilities) ||
-      !(CAPABILITY_DIRECT_SUBMIT & decoder_callbacks_x11_vaapi.capabilities) ||
-      !(CAPABILITY_DIRECT_SUBMIT & decoder_callbacks_x11_vulkan.capabilities)) {
-    threads.created = true;
-    threads.frame_handler = frame_handler;
-    threads.decoder_handler = decoder_thread;
-    threads.display_handler = display_handler;
-    sem_init(&threads.render_sem, 0, 0);
-    sem_init(&threads.decoder_sem, 0, MAX_FB_NUM);
-    if (disPtr->display_vsync_loop != NULL &&
-        pthread_create(&threads.display_id, NULL, threads.display_handler, &pipefd[0]) != 0) {
-      fprintf(stderr, "Error: Cannot create dislpay thread! Please try again or try direct submit mode.\n");
-      return -1;
-    }
-    if (pthread_create(&threads.render_id, NULL, threads.frame_handler, &pipefd[0]) != 0 ||
-        pthread_create(&threads.decoder_id, NULL, threads.decoder_handler, &pipefd[0]) != 0) {
-      clear_threads();
-      fprintf(stderr, "Error: Cannot create decoder/render/dislpay thread! Please try again or try direct submit mode.\n");
-      return -1;
-    }
-    pthread_setprio(threads.render_id, 95);
-    pthread_setprio(threads.decoder_id, 94);
-    if (threads.display_id > 0) pthread_setprio(threads.display_id, 96);
+  threads.frame_handler = frame_handler;
+  threads.decoder_handler = decoder_thread;
+  threads.display_handler = display_handler;
+  sem_init(&threads.decoder_sem, 0, MAX_FB_NUM);
+  sem_init(&threads.render_sem, 0, 0);
+  sem_init(&threads.display_sem, 0, 0);
+  int p_ret = pthread_create(&threads.display_id, NULL, threads.display_handler, "display_thread");
+  p_ret += pthread_create(&threads.render_id, NULL, threads.frame_handler, "render_thread");
+  p_ret += pthread_create(&threads.decoder_id, NULL, threads.decoder_handler, "decoder_thread");
+  if (p_ret != 0) {
+    clear_threads();
+    fprintf(stderr, "Error: Cannot create decoder/render/dislpay thread!.\n");
+    return -1;
   }
-
-  if (!threads.created) {
-    if (pipe(pipefd) == -1) {
-      fprintf(stderr, "Can't create communication channel between threads\n");
-      return -2;
-    }
-    loop_add_fd(pipefd[0], &frame_handle, 0);
-    fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
-  }
-
-  firstDraw = true;
+  pthread_setprio(threads.display_id, 96);
+  pthread_setprio(threads.render_id, 95);
+  pthread_setprio(threads.decoder_id, 94);
 
   return 0;
 }
@@ -783,13 +769,6 @@ void x11_cleanup() {
     close(windowpipefd[0]);
     windowpipefd[1] = -1;
     windowpipefd[0] = -1;
-  }
-  if (pipefd[1] > 0) {
-    loop_remove_fd(pipefd[0]);
-    close(pipefd[1]);
-    close(pipefd[0]);
-    pipefd[1] = -1;
-    pipefd[0] = -1;
   }
 
   if (renderPtr) {
@@ -828,76 +807,23 @@ void x11_cleanup() {
   renderPtr = NULL;
 }
 
-int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
-  PLENTRY entry = decodeUnit->bufferList;
-  int length = 0;
-
-  ensure_buf_size(&ffmpeg_buffer, &ffmpeg_buffer_size, decodeUnit->fullLength + AV_INPUT_BUFFER_PADDING_SIZE);
-
-  while (entry != NULL) {
-    memcpy(ffmpeg_buffer+length, entry->data, entry->length);
-    length += entry->length;
-    entry = entry->next;
-  }
-
-  int err = ffmpeg_decode2(ffmpeg_buffer, length, decodeUnit->frameType == FRAME_TYPE_IDR ? AV_PKT_FLAG_KEY : 0);
-  if (done)
-    return DR_OK;
-  if (err < 0) {
-    goto next_handle;
-  }
-  
-  pthread_mutex_lock(&threads.mutex);
-  struct Render_Image *image = (struct Render_Image *)VLIST_GET_DATA(decoder);
-  pthread_mutex_unlock(&threads.mutex);
-  if (image == NULL)
-    goto decode_exit;
-
-  err = ffmpeg_get_frame(image, true);
-  if (err < 0)
-    goto decode_exit;
-  else if (err > 0) {
-    if (err == F_TRY_AGAIN) {
-      if (threads.created) {
-        sem_post(&threads.decoder_sem);
-      }
-      return DR_OK;
-    }
-    else
-      goto next_handle;
-  }
-
-  mv_vlist_decoder_to_render();
-  return DR_OK;
-
-next_handle:
-  if (threads.created) {
-    sem_post(&threads.decoder_sem);
-  }
-  return DR_NEED_IDR;
-
-decode_exit:
-  done = true;
-  return DR_OK;
-}
-
 DECODER_RENDERER_CALLBACKS decoder_callbacks_x11 = {
   .setup = x11_setup,
   .cleanup = x11_cleanup,
-  .submitDecodeUnit = x11_submit_decode_unit,
-  .capabilities = CAPABILITY_SLICES_PER_FRAME(SLICES_PER_FRAME) | CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC | CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1 | CAPABILITY_DIRECT_SUBMIT,
+  .submitDecodeUnit = NULL,
+  .capabilities = CAPABILITY_SLICES_PER_FRAME(SLICES_PER_FRAME) | CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC | CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1 | CAPABILITY_PULL_RENDERER,
 };
 
 DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vulkan = {
   .setup = x11_setup_vulkan,
   .cleanup = x11_cleanup,
-  .submitDecodeUnit = x11_submit_decode_unit,
-  .capabilities = CAPABILITY_DIRECT_SUBMIT | CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC | CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1,
+  .submitDecodeUnit = NULL,
+  .capabilities = CAPABILITY_PULL_RENDERER | CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC | CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1,
 };
 
 DECODER_RENDERER_CALLBACKS decoder_callbacks_x11_vaapi = {
   .setup = x11_setup_vaapi,
   .cleanup = x11_cleanup,
-  .submitDecodeUnit = x11_submit_decode_unit,
-  .capabilities = CAPABILITY_DIRECT_SUBMIT,
+  .submitDecodeUnit = NULL,
+  .capabilities = CAPABILITY_PULL_RENDERER,
 };

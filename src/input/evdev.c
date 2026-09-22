@@ -2611,11 +2611,16 @@ static int x11_sdl_event_handle(void *pointer) {
         write(keyboardpipefd, &quitstate, sizeof(quitstate));
       }
 #endif
-      done = true;
-      break;
+      return 0;
     default:
-      if (event.type == SDL_EVENT_QUIT)
-        done = true;
+      if (event.type == SDL_EVENT_QUIT) {
+#if defined(HAVE_X11) || defined(HAVE_WAYLAND) || defined(HAVE_DRM)
+        if (keyboardpipefd > -1) {
+          write(keyboardpipefd, &quitstate, sizeof(quitstate));
+        }
+#endif
+        return 0;
+      }
       break;
     }
   }

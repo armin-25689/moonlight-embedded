@@ -119,6 +119,8 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
     drFlags |= FILL_RESOLUTION;
   if (config->modeset)
     drFlags |= MODESET;
+  if (config->vrr)
+    drFlags |= ENABLE_VRR;
 
   switch (config->rotate) {
   case 0:
@@ -180,12 +182,11 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
 
   platform_start(system);
   PDECODER_RENDERER_CALLBACKS videoCallback = platform_get_video(system);
-
-  if (!config->less_threads && (system == X11 || system == X11_VAAPI || system == X11_VULKAN )) {
-    videoCallback->capabilities &= ~CAPABILITY_DIRECT_SUBMIT;
-    videoCallback->capabilities |= CAPABILITY_PULL_RENDERER;
-    videoCallback->submitDecodeUnit = NULL;
+  if (videoCallback == NULL) {
+    fprintf(stderr, "Can't find video callback\n");
+    exit(-1);
   }
+
   LiStartConnection(&server->serverInfo, &config->stream, &connection_callbacks, platform_get_video(system), platform_get_audio(system, config->audio_device), NULL, drFlags, config->audio_device, 0);
 
   if (IS_EMBEDDED(system)) {

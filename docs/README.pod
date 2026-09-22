@@ -146,6 +146,10 @@ Work on rk/drm/drm_vaapi platform.
 Enable modeset for drm/drm_vaapi platform.
 Change connecter resolution and fps to specified.
 
+=item B<-vrr>
+
+Enable vrr for drm's platform.
+
 =item B<-nograb>
 
 Fake grab keyboard and mouse.

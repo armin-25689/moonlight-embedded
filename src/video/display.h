@@ -51,10 +51,9 @@ struct DISPLAY_CALLBACK {
   void (*display_close_display) (void *data);
   int (*display_setup) (int width, int height, int fps, int drFlags);
   void (*display_setup_post) (void *data);
-  int (*display_put_to_screen) (int width, int height, int index);
+  int (*display_put_to_screen) (void *data, void *udata);
   void (*display_get_resolution) (int* width, int* height, bool isfullscreen);
   void (*display_modify_window) (struct WINDOW_OP *oprate, int flags);
-  int (*display_vsync_loop) (void *data, int width, int height, int index);
   void (*display_exported_buffer_info) (struct Source_Buffer_Info *buffer, int *buffersNum, int *planesNum);
   int renders;
 };

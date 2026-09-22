@@ -2,8 +2,10 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext_drm.h>
 #include <libdrm/drm_fourcc.h>
+#include <sys/timespec.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -46,9 +48,9 @@ struct _commit_list {
   uint64_t value;
 };
 
-static int (*drmpageflip) (uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint64_t hdr_blob, uint32_t width, uint32_t height, void *data);
-static int drmpageflip_legacy(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint64_t hdr_blob, uint32_t width, uint32_t height, void *data);
-static int drmpageflip_atomic(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint64_t hdr_blob, uint32_t width, uint32_t height, void *data);
+static int (*drmpageflip) (uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, void *data);
+static int drmpageflip_legacy(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, void *data);
+static int drmpageflip_atomic(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, void *data);
 static int (*drm_add_fb_func) (int fd, uint32_t width, uint32_t height, uint32_t pixel_format, const uint32_t bo_handles[4], const uint32_t pitches[4], const uint32_t offsets[4], const uint64_t modifier[4], uint32_t *buf_id, uint32_t flags);
 static int drm_add_fb_legacy (int fd, uint32_t width, uint32_t height, uint32_t pixel_format, const uint32_t bo_handles[4], const uint32_t pitches[4], const uint32_t offsets[4], const uint64_t modifier[4], uint32_t *buf_id, uint32_t flags) {
   return drmModeAddFB2(fd, width, height, pixel_format, bo_handles, pitches, offsets, buf_id, (flags &= ~DRM_MODE_FB_MODIFIERS));
@@ -383,6 +385,12 @@ static int drm_choose_crtc (int fd) {
   current_drm_info.width = current_drm_info.crtc_mode.hdisplay;
   current_drm_info.height = current_drm_info.crtc_mode.vdisplay;
   drmModeFreeCrtc(crtc);
+  uint32_t vrr_prop;
+  uint32_t *sprops = &vrr_prop;
+  uint64_t *svalues = &current_drm_info.conn_vrr_capable_value;
+  const char *snames[] = { "vrr_capable" };
+  struct _props_ptr stores = { .props = &sprops, .props_value = &svalues, .props_num = 0 };
+  drm_get_props(fd, current_drm_info.connector_id, DRM_MODE_OBJECT_CONNECTOR, snames, &stores, 1);
   if (current_drm_info.width <= 0 || current_drm_info.height <= 0) {
     fprintf(stderr, "Could not get width and height from crtc\n");
     return -1;
@@ -649,9 +657,9 @@ struct Drm_Info * drm_init (const char *device, uint32_t drmformat, bool usehdr)
 
   current_drm_info.have_atomic = drmSetClientCap(current_drm_info.fd, DRM_CLIENT_CAP_ATOMIC, 1) == 0 ? 1 : 0;
   drm_add_fb_func = &drmModeAddFB2WithModifiers;
-  uint64_t has_fbmodifiers = 1;
-  drmGetCap(current_drm_info.fd, DRM_CAP_ADDFB2_MODIFIERS, &has_fbmodifiers);
-  if (has_fbmodifiers == 0)
+  uint64_t has_cap = 1;
+  drmGetCap(current_drm_info.fd, DRM_CAP_ADDFB2_MODIFIERS, &has_cap);
+  if (has_cap == 0)
     drm_add_fb_func = &drm_add_fb_legacy;
 
   if (drm_choose_crtc(current_drm_info.fd) < 0) {
@@ -859,69 +867,76 @@ void printf_props () {
   continue;
 }
 */
-static void page_flip_handler(int fd, unsigned int frame, unsigned int sec,
-                              unsigned int usec, void *data) {
-  int *done = data;
-  *done = 1;
+static void page_flip_handler(int fd, unsigned int seq, unsigned int sec,
+                              unsigned int usec, unsigned int crtc_id, void *data) {
+  struct _drm_pageflip_feedback *feedback = data;
+  if (crtc_id == feedback->crtc_id) {
+    feedback->done = 1;
+    feedback->tv_sec = sec;
+    feedback->tv_nsec = usec * 1000ULL;
+    feedback->seq = seq;
+  }
+  return;
 }
 
 static drmEventContext evctx = {
   .version = DRM_EVENT_CONTEXT_VERSION,
-  .page_flip_handler = page_flip_handler,
+  .page_flip_handler2 = page_flip_handler,
 };
 
-static int drmpageflip_legacy(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint64_t hdr_blob, uint32_t width, uint32_t height, void *data) {
+static int drmpageflip_legacy(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, void *data) {
   return drmModePageFlip(fd, crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, data);
 }
 
-static int drmpageflip_atomic(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint64_t hdr_data, uint32_t width, uint32_t height, void *data) {
+static int drmpageflip_atomic(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, void *data) {
   int ret = -1;
-  uint32_t flags = DRM_MODE_PAGE_FLIP_EVENT;
-  // | DRM_MODE_ATOMIC_NONBLOCK;
+  uint32_t cflags = flags | DRM_MODE_PAGE_FLIP_EVENT;
   drmModeAtomicReq *req = drmModeAtomicAlloc();
 
   if (!req)
     return -1;
 
-  if (drm_opt_commit (DRM_APPLY_COMMIT, req, 0, 0, 0) > 0) flags = (flags & ~DRM_MODE_ATOMIC_NONBLOCK) | DRM_MODE_ATOMIC_ALLOW_MODESET;
+  if (drm_opt_commit (DRM_APPLY_COMMIT, req, 0, 0, 0) > 0) cflags = (cflags & ~(DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_ASYNC)) | DRM_MODE_ATOMIC_ALLOW_MODESET;
   if (fb_id > 0)
     drmModeAtomicAddProperty(req, current_drm_info.plane_id, current_drm_info.plane_fb_id_prop_id, fb_id);
-  drmModeAtomicAddProperty(req, current_drm_info.plane_id, current_drm_info.plane_crtc_prop_id, crtc_id);
-  drmModeAtomicAddProperty(req, current_drm_info.plane_id, current_drm_info.plane_src_x_prop_id, 0 << 16);
-  drmModeAtomicAddProperty(req, current_drm_info.plane_id, current_drm_info.plane_src_y_prop_id, 0 << 16);
-  drmModeAtomicAddProperty(req, current_drm_info.plane_id, current_drm_info.plane_src_w_prop_id, width << 16);
-  drmModeAtomicAddProperty(req, current_drm_info.plane_id, current_drm_info.plane_src_h_prop_id, height << 16);
-  drmModeAtomicAddProperty(req, current_drm_info.plane_id, current_drm_info.plane_crtc_x_prop_id, dst_site.x);
-  drmModeAtomicAddProperty(req, current_drm_info.plane_id, current_drm_info.plane_crtc_y_prop_id, dst_site.y);
-  drmModeAtomicAddProperty(req, current_drm_info.plane_id, current_drm_info.plane_crtc_w_prop_id, dst_site.width);
-  drmModeAtomicAddProperty(req, current_drm_info.plane_id, current_drm_info.plane_crtc_h_prop_id, dst_site.height);
 
-  ret = drmModeAtomicCommit(fd, req, flags, data);
-  drmModeAtomicFree(req);
-  if (ret < 0)
+  ret = drmModeAtomicCommit(fd, req, cflags, data);
+  if (ret < 0) {
+    ret = -errno;
     perror("Drm cannot atomic page flip: ");
+  }
+  drmModeAtomicFree(req);
 
   return ret;
 }
 
-int drm_flip_buffer(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint64_t hdr_blob, uint32_t width, uint32_t height) {
-  int done = 0;
-  struct pollfd pfd = { .fd = fd, .events = POLLIN };
-
-  int res = drmpageflip(fd, crtc_id, fb_id, hdr_blob, width, height, &done);
-  if (res < 0) {
-    fprintf(stderr, "drmModePageFlip() failed: %d", res);
+int drm_flip_buffer(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint64_t flags, uint64_t timeout, struct _drm_pageflip_feedback *feedback) {
+  if (feedback == NULL) {
+    fprintf(stderr, "DRM: feedback is NULL.\n");
     return -1;
   }
+  feedback->crtc_id = crtc_id;
 
-  while (!done && (poll(&pfd, 1, 100)) > 0) {
-    drmHandleEvent(fd, &evctx);
+  struct pollfd pfd = { .fd = fd, .events = POLLIN };
+
+  int res = drmpageflip(fd, crtc_id, fb_id, flags, feedback);
+  if (res < 0) {
+    fprintf(stderr, "drmModePageFlip() failed: %d\n", res);
+    return res;
   }
 
-  return 0;
+  struct timespec wait = { .tv_sec = 0, .tv_nsec = timeout };
+  while ((ppoll(&pfd, 1, &wait, NULL)) > 0) {
+    drmHandleEvent(fd, &evctx);
+    if (feedback->done != 0) {
+      return 0;
+    }
+  }
+
+  return -EAGAIN;
 }
 
-int drm_set_display(int fd, uint32_t crtc_id, uint32_t src_width, uint32_t src_height, uint32_t crtc_w, uint32_t crtc_h, uint32_t *connector_id, uint32_t connector_num, drmModeModeInfoPtr connModePtr, uint32_t fb_id) {
+int drm_set_display(int fd, uint32_t crtc_id, uint32_t plane_id, uint32_t src_width, uint32_t src_height, uint32_t crtc_w, uint32_t crtc_h, uint32_t *connector_id, uint32_t connector_num, drmModeModeInfoPtr connModePtr, uint32_t fb_id) {
   if (current_drm_info.have_atomic) {
     dst_site.width = crtc_w;
     dst_site.height = crtc_h;
@@ -935,8 +950,17 @@ int drm_set_display(int fd, uint32_t crtc_id, uint32_t src_width, uint32_t src_h
     }
     
     drm_opt_commit (DRM_ADD_COMMIT, NULL, *connector_id, current_drm_info.conn_crtc_prop_id, crtc_id);
-    drm_opt_commit (DRM_ADD_COMMIT, NULL, current_drm_info.crtc_id, current_drm_info.crtc_prop_mode_id, current_drm_info.crtc_mode_blob_id);
-    drm_opt_commit (DRM_ADD_COMMIT, NULL, current_drm_info.crtc_id, current_drm_info.crtc_prop_active, 1);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, crtc_id, current_drm_info.crtc_prop_mode_id, current_drm_info.crtc_mode_blob_id);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, crtc_id, current_drm_info.crtc_prop_active, 1);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_crtc_prop_id, crtc_id);
+    //drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_src_x_prop_id, 0 << 16);
+    //drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_src_y_prop_id, 0 << 16);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_src_w_prop_id, src_width << 16);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_src_h_prop_id, src_height << 16);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_crtc_x_prop_id, dst_site.x);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_crtc_y_prop_id, dst_site.y);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_crtc_w_prop_id, dst_site.width);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_crtc_h_prop_id, dst_site.height);
 
     return 0;
   } else {

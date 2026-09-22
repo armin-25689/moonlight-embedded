@@ -225,7 +225,7 @@ void loop_main() {
       if (errno == EINTR)
         continue;
       else
-        done = true;
+        goto failed;
       break;
     }
     for (int i = 0 ;i < fd_events; i++) {

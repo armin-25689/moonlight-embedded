@@ -56,7 +56,7 @@ typedef struct _CONFIGURATION {
   bool fakegrab;
   bool fixed_resolution;
   bool fill_resolution;
-  bool less_threads;
+  bool vrr;
   bool modeset;
 } CONFIGURATION, *PCONFIGURATION;
 

@@ -39,12 +39,14 @@
 #include "drm.h"
 #include "ffmpeg.h"
 #include "gbm.h"
+#include "../loop.h"
 
 #include <Limelight.h>
 
 #include <libavutil/pixfmt.h>
 
 #include <sys/mman.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <math.h>
 #include <stdbool.h>
@@ -104,9 +106,10 @@ static struct zwp_locked_pointer_v1 *zwp_locked_pointer = NULL;
 static struct zwp_relative_pointer_manager_v1 *zwp_relative_pointer_manager = NULL;
 static struct zwp_relative_pointer_v1 *zwp_relative_pointer = NULL;
 // for render
-#define COMMIT_TIME 2000000
+#define COMMIT_TIME 2000000ULL
 struct _wl_render {
   struct wp_presentation *wp_presentation;
+  struct wl_event_queue *presentation_queue;
   struct wp_color_representation_manager_v1 *wp_color_representation;
   struct wp_color_representation_surface_v1 *wp_representation_surface;
   struct wp_color_manager_v1 *wp_color_manager;
@@ -128,9 +131,9 @@ struct _wl_render {
   struct {
     uint64_t refresh;
     uint64_t fps_ntime;
+    uint64_t range;
     struct timespec time_ns;
     uint64_t seq;
-    bool done;
   } presentation;
   uint64_t size[MAX_PLANE_NUM];
   uint32_t *supported_format;
@@ -141,26 +144,38 @@ struct _wl_render {
   int plane_num;
   int lastcolorspace;
   int filter_action;
+  int vrr;
 } static wl_render_base = {0};
 struct _dm_table {
   uint32_t format;
   uint32_t unuse;
   uint64_t modifier;
 };
-static int wl_commit_loop(void *data, int width, int height, int index);
+struct _presentation_feedback {
+  uint64_t tv_sec;
+  uint64_t tv_nsec;
+  bool done;
+  bool discard;
+};
+static int wl_commit_loop(void *data, void *udata);
 // render
+
+struct m_ratio {
+  uint32_t num;
+  uint32_t den;
+};
 
 static int offset_x = 0, offset_y = 0;
 static int display_width = 0, display_height = 0;
 static int output_width = 0, output_height = 0;
 static int *window_op_fd_p = NULL;
-static int32_t outputScaleFactor = 0;
 static uint32_t pointerSerial = 0;
-static double scale_factor = 1.0;
-static double fractionalScale = 0;
+static struct m_ratio scale_factor = { .num = 1, .den = 1 };
+static struct m_ratio fractionalScale = {0};
 static bool isFullscreen = false;
 static bool inWindowP = false;
 static bool inWindowK = true;
+static bool needAdviceSize = false;
 
 static bool firstHide = true;
 static bool isGrabing = false;
@@ -179,7 +194,10 @@ static void wl_output_get_mode (void *data, struct wl_output *wl_output, uint32_
 }
 
 static void wl_output_get_scale (void *data, struct wl_output *wl_output, int32_t factor) {
-  outputScaleFactor = factor;
+  if (fractionalScale.den == 0 && factor > 0) {
+    scale_factor.num = factor;
+    scale_factor.den = 1;
+  }
 }
 
 static const struct wl_output_listener wl_output_listener = {
@@ -464,11 +482,6 @@ static void window_configure(void *data,
                             struct xdg_toplevel *xdg_toplevel,
                             int32_t width, int32_t height,
                             struct wl_array *states) {
-/*
-  int *pos;
-  wl_array_for_each(pos, states) {
-  }
-*/
   if (width != 0 && height != 0) {
     wp_viewport_set_destination(wp_viewport, width, height);
     display_width = width;
@@ -487,11 +500,10 @@ static const struct xdg_surface_listener xdg_surface_listener = {
 
 static void get_surface_scale (void *data, struct wp_fractional_scale_v1 *wp_fractional_scale_v1,
                               uint32_t scale) {
-  fractionalScale = scale / 120.0;
-  display_width = display_width * scale_factor / fractionalScale;
-  display_height = display_height * scale_factor / fractionalScale;
-  wp_viewport_set_destination(wp_viewport, display_width, display_height);
-  scale_factor = fractionalScale;
+  fractionalScale.num = scale;
+  fractionalScale.den = 120;
+  scale_factor.num = fractionalScale.num;
+  scale_factor.den = fractionalScale.den;
   return;
 }
 
@@ -500,6 +512,7 @@ static const struct wp_fractional_scale_v1_listener wp_fracscale_listener = {
 };
 
 static int wayland_setup(int width, int height, int fps, int drFlags) {
+  int dw, dh;
 
   if (!wl_display) {
     fprintf(stderr, "Error: failed to open WL display.\n");
@@ -515,15 +528,19 @@ static int wayland_setup(int width, int height, int fps, int drFlags) {
  
   isFullscreen = ((drFlags & DISPLAY_FULLSCREEN) == DISPLAY_FULLSCREEN);
   if (!isFullscreen && width > 0 && height > 0) {
-    display_width = width;
-    display_height = height;
+    dw = width;
+    dh = height;
   } else if (output_width > 0 && output_height > 0) {
-    display_width = output_width;
-    display_height = output_height;
+    dw = output_width;
+    dh = output_height;
     isFullscreen = true;
   }
-  uint64_t fps_time = 1000000000 / fps;
+  uint64_t fps_time = 1000000000ULL / fps;
   wl_render_base.presentation.fps_ntime = fps_time;
+  wl_render_base.presentation.range = fps_time >> 1;
+
+  if (drFlags & ENABLE_VRR)
+    wl_render_base.vrr = 1;
 
   if (compositor == NULL || xdg_wm_base == NULL || wp_viewporter == NULL) {
     fprintf(stderr, "Can't find compositor or xdg_wm_base or wp_viewporter\n");
@@ -542,33 +559,10 @@ static int wayland_setup(int width, int height, int fps, int drFlags) {
     return -1;
   }
 
-  if (wp_fracscale) {
-    wp_fscale = wp_fractional_scale_manager_v1_get_fractional_scale(wp_fracscale, wlsurface);
-    if (wp_fscale) {
-      wp_fractional_scale_v1_add_listener(wp_fscale, &wp_fracscale_listener, NULL);
-      wl_surface_commit(wlsurface);
-      wl_display_dispatch(wl_display);
-      wl_display_roundtrip(wl_display);
-    }
-  }
-
-  if (fractionalScale > 0 ) {
-    scale_factor = fractionalScale;
-  } else if (outputScaleFactor > 0) {
-    scale_factor = outputScaleFactor;
-  } else {
-    fprintf(stderr, "Can't get scale from wayland server\n");
-    return -1;
-  }
-  display_width = (int)display_width / scale_factor;
-  display_height = (int)display_height / scale_factor;
-  wp_viewport_set_destination(wp_viewport, display_width, display_height);
-  wl_surface_commit(wlsurface);
-
   xdg_surface = xdg_wm_base_get_xdg_surface(xdg_wm_base, wlsurface);
   xdg_toplevel = xdg_surface_get_toplevel(xdg_surface);
   if (xdg_surface == NULL || xdg_toplevel == NULL) {
-    fprintf(stderr, "Can't create xdg surface or toplevel");
+    fprintf(stderr, "Can't create xdg surface or toplevel\n");
     return -1;
   }
   xdg_toplevel_set_app_id(xdg_toplevel, "moonlight");
@@ -580,14 +574,30 @@ static int wayland_setup(int width, int height, int fps, int drFlags) {
   if (isFullscreen)
     xdg_toplevel_set_fullscreen(xdg_toplevel, NULL);
 
+  if (wp_fracscale) {
+    wp_fscale = wp_fractional_scale_manager_v1_get_fractional_scale(wp_fracscale, wlsurface);
+    if (wp_fscale) {
+      wp_fractional_scale_v1_add_listener(wp_fscale, &wp_fracscale_listener, NULL);
+    }
+  }
+  wl_surface_commit(wlsurface);
+  wl_display_dispatch(wl_display);
+  wl_display_roundtrip(wl_display);
+
   if (drFlags & WAYLAND_RENDER) {
-    display_callback_wayland.display_vsync_loop = &wl_commit_loop;
+    display_callback_wayland.display_put_to_screen = &wl_commit_loop;
     wl_render_base.hdr_support.support = wl_render_base.hdr_support.set_luminances && wl_render_base.hdr_support.set_primaries && wl_render_base.hdr_support.bt2020;
     display_callback_wayland.hdr_support = wl_render_base.hdr_support.support;
+    wl_render_base.presentation_queue = wl_display_create_queue(wl_display);
+    if (wl_render_base.presentation_queue == NULL) {
+      fprintf(stderr, "Can't create presentation queue\n");
+      return -1;
+    }
+    wl_proxy_set_queue((struct wl_proxy *)wl_render_base.wp_presentation, wl_render_base.presentation_queue);
   } else {
     if (wantHdr)
       printf("WARNING: NO HDR support!\n");
-    wl_window = wl_egl_window_create(wlsurface, (int)(display_width * scale_factor), (int)(display_height * scale_factor));
+    wl_window = wl_egl_window_create(wlsurface, dw, dh);
     if (wl_window == NULL) {
       fprintf(stderr, "Can't create wayland window");
       return -1;
@@ -595,6 +605,11 @@ static int wayland_setup(int width, int height, int fps, int drFlags) {
     display_callback_wayland.hdr_support = false;
   }
 
+  if (display_width == 0) {
+    needAdviceSize = true;
+    display_width = dw * scale_factor.den / scale_factor.num;
+    display_height = dh * scale_factor.den / scale_factor.num;
+  }
 
   return 0;
 }
@@ -604,8 +619,13 @@ static void wl_setup_post(void *data) {
 
   int32_t size = *wp->configure & 0x00000000FFFFFFFF;
   int32_t offset = (*wp->configure & 0xFFFFFFFF00000000) >> 32;
-  if (size != 0) {
-    //XResizeWindow(display, window, size >> 16, size & 0x0000FFFF);
+  if (needAdviceSize) {
+    if (size != 0) {
+      display_width = size >> 16;
+      display_height = size & 0x0000FFFF;
+    }
+    if (!isFullscreen)
+      wp_viewport_set_destination(wp_viewport, display_width, display_height);
   }
   if (offset != 0) {
     //XMoveWindow(display, window, offset >> 16, offset & 0x0000FFFF);
@@ -646,6 +666,8 @@ static void wl_close_display(void *data) {
       zwp_linux_dmabuf_feedback_v1_destroy(wl_render_base.feedback);
     if (wl_render_base.zwp_linux_dmabuf)
       zwp_linux_dmabuf_v1_destroy(wl_render_base.zwp_linux_dmabuf);
+    if (wl_render_base.presentation_queue)
+      wl_event_queue_destroy(wl_render_base.presentation_queue);
 
     if (wp_fscale) {
       wp_fractional_scale_v1_destroy(wp_fscale);
@@ -712,7 +734,7 @@ static void wl_close_display(void *data) {
   }
 }
 
-static int wl_dispatch_event(int width, int height, int index) {
+static int wl_dispatch_event(void *data, void *udata) {
   while(wl_display_prepare_read(wl_display) != 0)
     wl_display_dispatch_pending(wl_display);
   wl_display_flush(wl_display);
@@ -728,8 +750,8 @@ static void wl_get_resolution(int *width, int *height, bool isfullscreen) {
     *height = output_height;
   }
   else {
-    *width = (int)(display_width * scale_factor);
-    *height = (int)(display_height * scale_factor);
+    *width = (int)(display_width * scale_factor.num / scale_factor.den);
+    *height = (int)(display_height * scale_factor.num / scale_factor.den);
   }
 
   return;
@@ -772,7 +794,6 @@ struct DISPLAY_CALLBACK display_callback_wayland = {
   .display_put_to_screen = wl_dispatch_event,
   .display_get_resolution = wl_get_resolution,
   .display_modify_window = wl_change_cursor,
-  .display_vsync_loop = NULL,
   .display_exported_buffer_info = NULL,
   .renders = EGL_RENDER | WAYLAND_RENDER,
 };
@@ -945,96 +966,66 @@ static const struct wp_image_description_info_v1_listener output_description_inf
 static void surface_presentation (void *data, struct wp_presentation_feedback *wp_presentation_feedback,
                                   uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec, uint32_t refresh,
                                   uint32_t seq_hi, uint32_t seq_lo, uint32_t flags) {
+  struct _presentation_feedback *feedback = data;
   uint64_t seq = ((uint64_t)seq_hi << 32) | seq_lo;
   uint64_t now_tv_sec = ((uint64_t) tv_sec_hi << 32) | tv_sec_lo;
-  if ((wl_render_base.presentation.seq - seq) == 1) {
-    wl_render_base.presentation.fps_ntime = (tv_nsec - wl_render_base.presentation.time_ns.tv_nsec) + ((now_tv_sec - wl_render_base.presentation.time_ns.tv_sec) * 1000000000LL);
-    wl_render_base.presentation.done = true;
-  }
+  if (refresh > 0)
+    wl_render_base.presentation.fps_ntime = refresh;
   wl_render_base.presentation.refresh = refresh;
   wl_render_base.presentation.time_ns.tv_sec =  now_tv_sec;
   wl_render_base.presentation.time_ns.tv_nsec =  tv_nsec;
   wl_render_base.presentation.seq  = seq;
-  wp_presentation_feedback_destroy(wp_presentation_feedback);
+  feedback->done = true;
   return;
 }
 
-static void surface_discarded (void *data, struct wp_presentation_feedback *wp_feedback) {
-  wp_presentation_feedback_destroy(wp_feedback);
+static void surface_discard (void *data, struct wp_presentation_feedback *wp_presentation_feedback) {
+  struct _presentation_feedback *feedback = data;
+  feedback->done = true;
+  feedback->discard = true;
   return;
 }
 
 static const struct wp_presentation_feedback_listener presentation_feedback = {
   .presented = surface_presentation,
-  .discarded = surface_discarded,
+  .discarded = surface_discard,
   .sync_output = noop,
 };
 
+/*
 static void inline wait_to_commit() {
-  struct timespec now;
-
-  if (wl_render_base.presentation.done) {
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    uint64_t interval = (now.tv_sec - wl_render_base.presentation.time_ns.tv_sec) * 1000000000LL + (now.tv_nsec - wl_render_base.presentation.time_ns.tv_nsec);
-    uint64_t rem = interval % wl_render_base.presentation.fps_ntime;
-    // 2ms to left
-    uint64_t commit = wl_render_base.presentation.refresh - COMMIT_TIME;
-    uint64_t wait_time = commit < rem ? (wl_render_base.presentation.fps_ntime - rem + commit) : commit - rem;
-    wl_render_base.presentation.done = false;
-
-    now.tv_sec = 0;
-    now.tv_nsec = wait_time;
-  }
-  else {
-    now.tv_sec = 0;
-    now.tv_nsec = wl_render_base.presentation.fps_ntime;
-  }
-
-  static const struct timespec wait_flip = { .tv_sec = 0, .tv_nsec = COMMIT_TIME * 2 };
-  if (now.tv_nsec > wait_flip.tv_nsec) {
-    now.tv_nsec = now.tv_nsec - wait_flip.tv_nsec;
-    nanosleep(&wait_flip, NULL);
-    wl_dispatch_event(0, 0, 0);
-    nanosleep(&now, NULL);
-  }
-  else {
-    nanosleep(&now, NULL);
-  }
-
+  struct timespec wait_commit = { .tv_sec = 0 };
+  wait_commit.tv_nsec = wl_render_base.presentation.fps_ntime > COMMIT_TIME ? (wl_render_base.presentation.fps_ntime - COMMIT_TIME) : (wl_render_base.presentation.fps_ntime >> 1);
+  nanosleep(&wait_commit, NULL);
+  wl_dispatch_event(NULL, NULL);
   return;
 }
+*/
 
-static int wl_commit_loop(void *data, int width, int height, int index) {
+static int wl_commit_loop(void *data, void *udata) {
   struct Render_Image *image = (struct Render_Image *)data;
-  static uint32_t time = 0;
-  struct wp_presentation_feedback *pr = NULL;
+  struct _presentation_feedback feedback = {0};
+  int index = image->index;
 
   if (image == NULL)
     return -1;
 
-  time++;
+  struct wp_presentation_feedback *pr = wp_presentation_feedback(wl_render_base.wp_presentation, wlsurface);
+  wp_presentation_feedback_add_listener(pr, &presentation_feedback, &feedback);
 
   int ret = commit_surface(index, wl_render_base.drm_buf[index].width[0], wl_render_base.drm_buf[index].height[0], image->sframe.frame);
   if (ret < 0)
     return -1;
 
-  wl_dispatch_event(width, height, index);
-  wait_to_commit();
-
-  switch (time) {
-  case 30:
-    time = 0;
-    break;
-  case 1:
-  case 2:
-  case 3:
-  case 4:
-    pr = wp_presentation_feedback(wl_render_base.wp_presentation, wlsurface);
-    wp_presentation_feedback_add_listener(pr, &presentation_feedback, NULL);
-    break;
+  struct timespec timeout = {0};
+  timeout.tv_nsec = (wl_render_base.presentation.fps_ntime << 1);
+  while (!feedback.done && (ret = wl_display_dispatch_queue_timeout(wl_display, wl_render_base.presentation_queue, &timeout)) > 0);
+  wl_dispatch_event(NULL, NULL);
+  if (feedback.discard || ret <= 0) {
+    return -EAGAIN;
   }
 
-  return ret;
+  return 0;
 }
 
 static int wl_render_init(struct Render_Init_Info *paras) { 
@@ -1117,6 +1108,10 @@ static inline struct wl_buffer *wl_import_dmabuf(struct _drm_buf *drm_buf) {
 }
 
 static int wl_sync_frame_config(struct Render_Config *config) {
+
+  if (config == NULL)
+    return 0;
+
   int dst_fmt = -1;
   int colorspace = config->color_space;
   wl_render_base.lastcolorspace = -1;
