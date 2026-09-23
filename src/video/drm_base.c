@@ -15,15 +15,8 @@
 
 #include "drm_base.h"
 
-static struct Drm_Info current_drm_info = {0},old_drm_info = {0};
 static const char *drm_device = "/dev/dri/card0";
-
-struct {
-  int x;
-  int y;
-  uint32_t width;
-  uint32_t height;
-} static dst_site = {0};
+static uint8_t have_atomic = 0;
 
 struct _props_ptr {
   uint32_t **ids;
@@ -40,7 +33,7 @@ struct _props {
 
 struct _snap_props {
   struct _props snap;
-} static drm_props = {0};
+};
 
 struct _commit_list {
   uint32_t device_id;
@@ -48,9 +41,9 @@ struct _commit_list {
   uint64_t value;
 };
 
-static int (*drmpageflip) (uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, void *data);
-static int drmpageflip_legacy(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, void *data);
-static int drmpageflip_atomic(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, void *data);
+static int (*drmpageflip) (uint32_t fd, struct _pageflip_prop *props, uint32_t fb_id, uint32_t flags, void *data);
+static int drmpageflip_legacy(uint32_t fd, struct _pageflip_prop *props, uint32_t fb_id, uint32_t flags, void *data);
+static int drmpageflip_atomic(uint32_t fd, struct _pageflip_prop *props, uint32_t fb_id, uint32_t flags, void *data);
 static int (*drm_add_fb_func) (int fd, uint32_t width, uint32_t height, uint32_t pixel_format, const uint32_t bo_handles[4], const uint32_t pitches[4], const uint32_t offsets[4], const uint64_t modifier[4], uint32_t *buf_id, uint32_t flags);
 static int drm_add_fb_legacy (int fd, uint32_t width, uint32_t height, uint32_t pixel_format, const uint32_t bo_handles[4], const uint32_t pitches[4], const uint32_t offsets[4], const uint64_t modifier[4], uint32_t *buf_id, uint32_t flags) {
   return drmModeAddFB2(fd, width, height, pixel_format, bo_handles, pitches, offsets, buf_id, (flags &= ~DRM_MODE_FB_MODIFIERS));
@@ -78,18 +71,19 @@ static int num_compare (const void *a, const void *b) {
 
 int drm_opt_commit (enum DrmCommitOpt opt, void *data, uint32_t device_id, uint32_t prop_id, uint64_t value) {
   #define MAX_PROP_SLOT_NUM 99
+  #define INITIAL_SLOT 20
   // opt 0 is add, 1 is get, 2 is clear;
   struct {
     struct _commit_list *list;
     uint32_t count;
     size_t slot;
-  } static commit_list = { .list = NULL, .count = 0, .slot = 10, },
+  } static commit_list = { .list = NULL, .count = 0, .slot = INITIAL_SLOT, },
            restore_list = { 0 };
 
   switch (opt) {
   case DRM_ADD_COMMIT:
     if (commit_list.list == NULL) commit_list.list = calloc(commit_list.slot, sizeof(struct _commit_list));
-    if (commit_list.count > commit_list.slot) {
+    if (commit_list.count >= commit_list.slot) {
       struct _commit_list *tmplist = realloc(commit_list.list, sizeof(struct _commit_list) * commit_list.slot * 2);
       if (tmplist == NULL)
         return -1;
@@ -152,7 +146,7 @@ int drm_opt_commit (enum DrmCommitOpt opt, void *data, uint32_t device_id, uint3
     if (restore_list.list != NULL) free(restore_list.list);
     free(commit_list.list);
     commit_list.list = NULL;
-    commit_list.slot = 10;
+    commit_list.slot = INITIAL_SLOT;
     commit_list.count = 0;
     restore_list.list = NULL;
     restore_list.count = 0;
@@ -160,6 +154,7 @@ int drm_opt_commit (enum DrmCommitOpt opt, void *data, uint32_t device_id, uint3
   }
 
   #undef MAX_PROP_SLOT_NUM
+  #undef INITIAL_SLOT
   return -1;
 }
 
@@ -211,7 +206,7 @@ static int drm_get_props (int fd, uint32_t object_id, uint32_t object_type, cons
 
 static int drm_set_props (int fd, uint32_t *ids, uint32_t *prop_id, uint64_t *prop_value, int props_num, uint32_t flags, uint32_t object_type, void *data) {
   int ret = 0;
-  if (current_drm_info.have_atomic) {
+  if (have_atomic) {
     drmModeAtomicReq *req = drmModeAtomicAlloc();
     if (!req)
       return -1;
@@ -235,11 +230,11 @@ static int drm_set_props (int fd, uint32_t *ids, uint32_t *prop_id, uint64_t *pr
 }
 
 static void drm_clear_snap (struct _props *prop_copy) {
-   if (prop_copy->ids)
+  if (prop_copy->ids)
     free(prop_copy->ids);
-   if (prop_copy->props)
+  if (prop_copy->props)
     free(prop_copy->props);
-   if (prop_copy->props_value)
+  if (prop_copy->props_value)
     free(prop_copy->props_value);
   memset(prop_copy, 0, sizeof(struct _props));
 
@@ -312,7 +307,8 @@ static int drm_choose_connector (int fd, uint32_t bestConn[MAX_CONNECTOR]) {
   return index > 0 ? index : -1;
 }
 
-static int drm_choose_crtc (int fd) {
+static int drm_choose_crtc (struct Drm_Info *info) {
+  int fd = info->fd;
   drmModeRes* drmres = drmModeGetResources(fd);
   if (!drmres) {
     perror("Could not get drm resources\n");
@@ -333,7 +329,7 @@ static int drm_choose_crtc (int fd) {
       continue;
     }
     if (conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0 && conn->encoder_id != 0) {
-      memcpy(&current_drm_info.crtc_mode,&conn->modes[0],sizeof(conn->modes[0]));
+      memcpy(&info->crtc_mode,&conn->modes[0],sizeof(conn->modes[0]));
     }
     else {
       drmModeFreeConnector(conn);
@@ -357,11 +353,11 @@ static int drm_choose_crtc (int fd) {
 
         drmModeFreeEncoder(enc);
         drmModeFreeConnector(conn);
-        current_drm_info.crtc_index = k;
-        current_drm_info.connector_id = conn->connector_id;
-        current_drm_info.connector_type = conn->connector_type;
-        current_drm_info.encoder_id = enc->encoder_id;
-        current_drm_info.crtc_id = enc->crtc_id;
+        info->crtc_index = k;
+        info->connector_id = conn->connector_id;
+        info->connector_type = conn->connector_type;
+        info->encoder_id = enc->encoder_id;
+        info->crtc_id = enc->crtc_id;
         goto found_crtc;
       }
       drmModeFreeEncoder(enc);
@@ -372,26 +368,24 @@ static int drm_choose_crtc (int fd) {
  found_crtc:
   drmModeFreeResources(drmres);
     
-  if (current_drm_info.connector_id == 0 || current_drm_info.encoder_id == 0 || current_drm_info.crtc_id == 0) {
+  if (info->connector_id == 0 || info->encoder_id == 0 || info->crtc_id == 0) {
     fprintf(stderr, "Not found connector or encoder for drm.\n");
     return -1;
   }
 
-  drmModeCrtc* crtc = drmModeGetCrtc(fd, current_drm_info.crtc_id);
-  memcpy(&old_drm_info.crtc_mode,&crtc->mode,sizeof(crtc->mode));
-  old_drm_info.crtc_fb_id = crtc->buffer_id;
-  old_drm_info.width = crtc->width;
-  old_drm_info.height = crtc->height;
-  current_drm_info.width = current_drm_info.crtc_mode.hdisplay;
-  current_drm_info.height = current_drm_info.crtc_mode.vdisplay;
+  info->width = info->crtc_mode.hdisplay;
+  info->height = info->crtc_mode.vdisplay;
+  drmModeCrtc* crtc = drmModeGetCrtc(fd, info->crtc_id);
+  memcpy(&info->old_info.crtc_mode,&crtc->mode,sizeof(crtc->mode));
+  info->old_info.fb_id = crtc->buffer_id;
   drmModeFreeCrtc(crtc);
   uint32_t vrr_prop;
   uint32_t *sprops = &vrr_prop;
-  uint64_t *svalues = &current_drm_info.conn_vrr_capable_value;
+  uint64_t *svalues = &info->conn_vrr_capable_value;
   const char *snames[] = { "vrr_capable" };
   struct _props_ptr stores = { .props = &sprops, .props_value = &svalues, .props_num = 0 };
-  drm_get_props(fd, current_drm_info.connector_id, DRM_MODE_OBJECT_CONNECTOR, snames, &stores, 1);
-  if (current_drm_info.width <= 0 || current_drm_info.height <= 0) {
+  drm_get_props(fd, info->connector_id, DRM_MODE_OBJECT_CONNECTOR, snames, &stores, 1);
+  if (info->width <= 0 || info->height <= 0) {
     fprintf(stderr, "Could not get width and height from crtc\n");
     return -1;
   }
@@ -440,6 +434,13 @@ static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
             case DRM_FORMAT_YUV444:
             case DRM_FORMAT_Q410:
             case DRM_FORMAT_NV12:
+            #ifdef DRM_FORMAT_NV24
+            case DRM_FORMAT_NV24:
+            #endif
+            #ifdef DRM_FORMAT_NV30
+            case DRM_FORMAT_NV15:
+            case DRM_FORMAT_NV30:
+            #endif
             case DRM_FORMAT_P010:
             case DRM_FORMAT_ARGB8888:
             case DRM_FORMAT_XRGB8888:
@@ -480,7 +481,13 @@ static int drm_get_plane (struct Drm_Info *drm_info, uint32_t format) {
 
 found_plane:
 
-  if (drm_props.snap.props_num == 0) {
+  if (drm_info->old_info.props_list == NULL) {
+    struct _snap_props *drm_props = calloc(1, sizeof(struct _snap_props));
+    if (drm_props == NULL) {
+      fprintf(stderr, "Alloc drm snapshot props failed.\n");
+      return -1;
+    }
+    drm_info->old_info.props_list = drm_props;
 #define CONUM 6
 #define CRNUM 4
 #define PNUM 14
@@ -526,10 +533,10 @@ found_plane:
     drm_get_props(drm_info->fd, drm_info->plane_id, DRM_MODE_OBJECT_PLANE, pnames, &p_stores, PNUM);
 
     int add_count = 0;
-    drm_props.snap.ids = calloc(NUMS, sizeof(uint32_t));
-    drm_props.snap.props = calloc(NUMS, sizeof(uint32_t));
-    drm_props.snap.props_value = calloc(NUMS, sizeof(uint64_t));
-    if (drm_props.snap.props != NULL && drm_props.snap.props_value != NULL) {
+    drm_props->snap.ids = calloc(NUMS, sizeof(uint32_t));
+    drm_props->snap.props = calloc(NUMS, sizeof(uint32_t));
+    drm_props->snap.props_value = calloc(NUMS, sizeof(uint64_t));
+    if (drm_props->snap.props != NULL && drm_props->snap.props_value != NULL) {
       for (int i = 0; i < NUMS; i++) {
         if (*props_list[i] != 0) {
           if (*props_list[i] == drm_info->plane_fb_id_prop_id && *values_list[i] == 0 ) {
@@ -539,24 +546,24 @@ found_plane:
               *props_list[i] == drm_info->plane_eotf_prop_id) {
             continue;
           }
-          drm_props.snap.ids[add_count] = ids[i];
-          drm_props.snap.props[add_count] = *props_list[i];
-          drm_props.snap.props_value[add_count] = *values_list[i];
+          drm_props->snap.ids[add_count] = ids[i];
+          drm_props->snap.props[add_count] = *props_list[i];
+          drm_props->snap.props_value[add_count] = *values_list[i];
           if (*props_list[i] == drm_info->conn_hdr_metadata_prop_id ||
               *props_list[i] == drm_info->crtc_gammalut_prop_id)
-            drm_props.snap.props_value[add_count] = 0;
+            drm_props->snap.props_value[add_count] = 0;
           if (*props_list[i] == drm_info->crtc_prop_mode_id) {
             drmModePropertyBlobPtr blob = drmModeGetPropertyBlob(drm_info->fd, *values_list[i]);
             drmModeModeInfo *mode = (drmModeModeInfo *)blob->data;
-            drmModeCreatePropertyBlob(drm_info->fd, mode, sizeof(*mode), &old_drm_info.crtc_mode_blob_id);
-            drm_props.snap.props_value[add_count] = (uint64_t)old_drm_info.crtc_mode_blob_id;
+            drmModeCreatePropertyBlob(drm_info->fd, mode, sizeof(*mode), &drm_info->old_info.crtc_mode_blob_id);
+            drm_props->snap.props_value[add_count] = (uint64_t)drm_info->old_info.crtc_mode_blob_id;
             drmModeFreePropertyBlob(blob);
           }
           add_count++;
         }
       }
     }
-    drm_props.snap.props_num = add_count;
+    drm_props->snap.props_num = add_count;
 #undef CONUM
 #undef CRNUM
 #undef PNUM
@@ -568,13 +575,19 @@ found_plane:
   drm_get_prop_enum (drm_info->fd, color_space_name, 3, drm_info->plane_color_encoding_prop_id, drm_info->plane_color_encoding_prop_values);
   const char *colorange_name[3] = { "YCbCr limited range", "YCbCr full range", "nonono"};
   drm_get_prop_enum (drm_info->fd, colorange_name, 3, drm_info->plane_color_range_prop_id, drm_info->plane_color_range_prop_values);
-  const char *colorspace_name[6] = { "Default", "BT2020_RGB", "BT2020_YCC", "BT601_YCC", "BT709_YCC", "DCI-P3_RGB_D65" };
-  drm_get_prop_enum (drm_info->fd, colorspace_name, 6, drm_info->conn_colorspace_prop_id, drm_info->conn_colorspace_values);
+  const char *colorspace_name[] = { "Default", "BT2020_RGB", "BT2020_YCC", "BT601_YCC", "BT709_YCC", "DCI-P3_RGB_D65", "SMPTE_170M_YCC" };
+  drm_get_prop_enum (drm_info->fd, colorspace_name, 7, drm_info->conn_colorspace_prop_id, drm_info->conn_colorspace_values);
   const char *broadcast_rgb_name[3] = { "Automatic", "Full", "Limited 16:235" };
   drm_get_prop_enum (drm_info->fd, broadcast_rgb_name, 3, drm_info->conn_broadcast_rgb_prop_id, drm_info->conn_broadcast_rgb_prop_values);
   if (drm_info->conn_colorspace_values[D2020YCC] == 0) drm_info->conn_colorspace_values[D2020YCC] = drm_info->conn_colorspace_values[D2020RGB];
-  if (drm_info->conn_colorspace_values[D601YCC] == 0) drm_info->conn_colorspace_values[D601YCC] = drm_info->conn_colorspace_values[DEFAULTCOLOR];
+  if (drm_info->conn_colorspace_values[D601YCC] == 0 && drm_info->conn_colorspace_values[SMPTE170YCC] == 0) drm_info->conn_colorspace_values[D601YCC] = drm_info->conn_colorspace_values[DEFAULTCOLOR];
   if (drm_info->conn_colorspace_values[D709YCC] == 0) drm_info->conn_colorspace_values[D709YCC] = drm_info->conn_colorspace_values[DEFAULTCOLOR];
+  if (drm_info->conn_colorspace_values[D601YCC] > 0 && drm_set_props(drm_info->fd, &drm_info->connector_id, &drm_info->conn_colorspace_prop_id, &drm_info->conn_colorspace_values[D601YCC], 1, DRM_MODE_ATOMIC_TEST_ONLY, DRM_MODE_OBJECT_CONNECTOR, NULL) < 0)
+    drm_info->conn_colorspace_values[D601YCC] = drm_info->conn_colorspace_values[DEFAULTCOLOR];
+  if (drm_info->conn_colorspace_values[SMPTE170YCC] > 0 && drm_info->conn_colorspace_values[D601YCC] == 0) {
+    if (drm_set_props(drm_info->fd, &drm_info->connector_id, &drm_info->conn_colorspace_prop_id, &drm_info->conn_colorspace_values[SMPTE170YCC], 1, DRM_MODE_ATOMIC_TEST_ONLY, DRM_MODE_OBJECT_CONNECTOR, NULL) >= 0)
+    drm_info->conn_colorspace_values[D601YCC] = drm_info->conn_colorspace_values[SMPTE170YCC];
+  }
 
   if (format_site < 0)
     fprintf(stderr, "No matched plane format!\n");
@@ -582,12 +595,8 @@ found_plane:
   return format_site;
 }
 
-static int drm_choose_plane (int fd, uint32_t format) {
-  return drm_get_plane (&current_drm_info, format);
-}
-
-static int drm_get_connector_hdr_props (int fd) {
-  if (current_drm_info.conn_hdr_metadata_prop_id == 0 || current_drm_info.plane_color_encoding_prop_id == 0) {
+static int drm_get_connector_hdr_props (struct Drm_Info *info) {
+  if (info->conn_hdr_metadata_prop_id == 0 || info->plane_color_encoding_prop_id == 0) {
     fprintf(stderr, "Could not get hdr property for connector\n");
     return -1;
   }
@@ -595,46 +604,43 @@ static int drm_get_connector_hdr_props (int fd) {
   return 0;
 }
 
-static int drm_set_connector_hdr_mode (int fd, uint32_t flags) {
+static int drm_set_connector_hdr_mode (struct Drm_Info *info) {
   int ret = -1;
 
-  if (current_drm_info.conn_colorspace_prop_id != 0) {
+  if (info->conn_colorspace_prop_id != 0) {
     uint32_t list[3] = { 16, 12, 10 };
-    uint64_t values[] = { 0, (current_drm_info.conn_colorspace_values[D2020YCC] > 0) ? current_drm_info.conn_colorspace_values[D2020YCC] : current_drm_info.conn_colorspace_values[D2020RGB] };
-    uint32_t ids[] = { current_drm_info.connector_id, current_drm_info.connector_id };
-    uint32_t props[] = { current_drm_info.conn_max_bpc_prop_id, current_drm_info.conn_colorspace_prop_id };
+    uint64_t values[] = { 0, (info->conn_colorspace_values[D2020YCC] > 0) ? info->conn_colorspace_values[D2020YCC] : info->conn_colorspace_values[D2020RGB] };
+    uint32_t ids[] = { info->connector_id, info->connector_id };
+    uint32_t props[] = { info->conn_max_bpc_prop_id, info->conn_colorspace_prop_id };
 
-    switch (current_drm_info.connector_type) {
+    switch (info->connector_type) {
     case DRM_MODE_CONNECTOR_HDMIA:
     case DRM_MODE_CONNECTOR_HDMIB:
     case DRM_MODE_CONNECTOR_eDP:
     case DRM_MODE_CONNECTOR_DisplayPort:
+    case DRM_MODE_CONNECTOR_USB:
       for (int i = 0; i < 3; i++) {
         values[0] = list[i];
         fprintf(stderr, "Try enabled %lu-bit HDMI Deep Color: ", values[0] * 3);
-        ret = drm_set_props(current_drm_info.fd, ids, props, values, 2, flags | DRM_MODE_ATOMIC_ALLOW_MODESET, DRM_MODE_OBJECT_CONNECTOR, NULL) * ret;
+        ret = drm_set_props(info->fd, ids, props, values, 2, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, DRM_MODE_OBJECT_CONNECTOR, NULL) * ret;
         if (ret == 0) {
           printf("Has enabled %lu-bit HDMI Deep Color.\n", values[0] * 3);
-          if (current_drm_info.have_atomic) {
+          if (info->have_atomic) {
             drm_opt_commit (DRM_ADD_COMMIT, NULL, ids[0], props[0], values[0]);
             drm_opt_commit (DRM_ADD_COMMIT, NULL, ids[1], props[1], values[1]);
-          } else {
-            drm_set_props(current_drm_info.fd, ids, props, values, 2, DRM_MODE_ATOMIC_ALLOW_MODESET, DRM_MODE_OBJECT_CONNECTOR, NULL);
           }
           break;
         }
       }
   
       if (ret != 0) {
-        uint64_t default_color[1] = { current_drm_info.conn_colorspace_values[DEFAULTCOLOR] };
-        drm_set_props(current_drm_info.fd, ids, &props[1], default_color, 1, DRM_MODE_ATOMIC_TEST_ONLY, DRM_MODE_OBJECT_CONNECTOR, NULL);
+        if (!info->have_atomic) {
+          uint64_t default_color[1] = { info->conn_colorspace_values[DEFAULTCOLOR] };
+          drm_set_props(info->fd, ids, &props[1], default_color, 1, DRM_MODE_ATOMIC_TEST_ONLY, DRM_MODE_OBJECT_CONNECTOR, NULL);
+        }
         fprintf(stderr, "Could not set hdr property for connector\n");
       }
       break;
-/*
-      ret = drm_set_props(current_drm_info.fd, &ids[1], &props[1], &values[1], 1, DRM_MODE_ATOMIC_ALLOW_MODESET, DRM_MODE_OBJECT_CONNECTOR, NULL);
-      break;
-*/
     }
   }
 
@@ -644,51 +650,58 @@ static int drm_set_connector_hdr_mode (int fd, uint32_t flags) {
 struct Drm_Info * drm_init (const char *device, uint32_t drmformat, bool usehdr) {
   if (device != NULL)
     drm_device = device;
-  if (access("/dev/dri/card0", F_OK) == -1) {
-    fprintf(stderr, "No /dev/dri/card0 device.\n");
+  if (access(drm_device, F_OK) == -1) {
+    fprintf(stderr, "No %s device.\n", drm_device);
     return NULL;
   }
-  current_drm_info.fd = -1;
-  current_drm_info.fd = open(drm_device, O_RDWR | O_CLOEXEC);
-  if (current_drm_info.fd < 0) {
-    perror("Could not open /dev/dri/card0");
+  int fd = open(drm_device, O_RDWR | O_CLOEXEC);
+  if (fd < 0) {
+    perror("Could not open drm_device: ");
+    return NULL;
+  }
+  struct Drm_Info *drm_info = calloc(1, sizeof(struct Drm_Info));
+  if (drm_info == NULL) {
+    perror("Alloc drm_info ptr failed. ");
+    close(fd);
     return NULL;
   }
 
-  current_drm_info.have_atomic = drmSetClientCap(current_drm_info.fd, DRM_CLIENT_CAP_ATOMIC, 1) == 0 ? 1 : 0;
+  have_atomic = drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1) == 0 ? 1 : 0;
   drm_add_fb_func = &drmModeAddFB2WithModifiers;
   uint64_t has_cap = 1;
-  drmGetCap(current_drm_info.fd, DRM_CAP_ADDFB2_MODIFIERS, &has_cap);
+  drmGetCap(fd, DRM_CAP_ADDFB2_MODIFIERS, &has_cap);
   if (has_cap == 0)
     drm_add_fb_func = &drm_add_fb_legacy;
 
-  if (drm_choose_crtc(current_drm_info.fd) < 0) {
+  drm_info->fd = fd;
+  drm_info->have_atomic = have_atomic;
+
+  if (drm_choose_crtc(drm_info) < 0) {
     goto exit;
   }
 
-  if (drmformat > 0 && drm_choose_plane(current_drm_info.fd, drmformat) < 0) {
+  if (drmformat > 0 && drm_get_plane(drm_info, drmformat) < 0) {
     goto exit;
   }
 
   if (usehdr) {
-    if (drm_get_connector_hdr_props(current_drm_info.fd) < 0)
+    if (drm_get_connector_hdr_props(drm_info) < 0)
       goto exit;
-    if (drm_set_connector_hdr_mode(current_drm_info.fd, DRM_MODE_ATOMIC_TEST_ONLY) < 0)
+    if (drm_set_connector_hdr_mode(drm_info) < 0)
       goto exit;
   }
 
-  if (current_drm_info.have_atomic) {
+  if (have_atomic) {
     drmpageflip = &drmpageflip_atomic;
   }
   else {
     drmpageflip = &drmpageflip_legacy;
   }
 
-  return &current_drm_info;
+  return drm_info;
 
 exit:
-  close(current_drm_info.fd);
-  current_drm_info.fd = -1;
+  drm_close(&drm_info);
   return NULL;
 }
 
@@ -702,27 +715,36 @@ int drm_get_plane_info (struct Drm_Info *drm_info, uint32_t format) {
   return drm_get_plane(drm_info, format);
 }
 
-void drm_close() {
+void drm_close(struct Drm_Info **drm_info_ptr) {
+  if (drm_info_ptr == NULL) return;
+  struct Drm_Info *info = *drm_info_ptr;
+  if (info == NULL || info->fd < 0) return;
   drm_opt_commit(DRM_CLEAR_LIST, NULL, 0, 0, 0);
-  drm_clear_snap(&drm_props.snap);
-  if (current_drm_info.crtc_mode_blob_id != 0)
-    drmModeDestroyPropertyBlob(current_drm_info.fd, current_drm_info.crtc_mode_blob_id);
-  if (old_drm_info.crtc_mode_blob_id != 0)
-    drmModeDestroyPropertyBlob(current_drm_info.fd, old_drm_info.crtc_mode_blob_id);
-  close(current_drm_info.fd);
-  memset(&current_drm_info, 0, sizeof(current_drm_info));
-  current_drm_info.fd = -1;
+  if (info->old_info.props_list) {
+    struct _snap_props *drm_props = info->old_info.props_list;
+    drm_clear_snap(&drm_props->snap);
+    free(info->old_info.props_list);
+  }
+  if (info->crtc_mode_blob_id != 0)
+    drmModeDestroyPropertyBlob(info->fd, info->crtc_mode_blob_id);
+  if (info->old_info.crtc_mode_blob_id != 0)
+    drmModeDestroyPropertyBlob(info->fd, info->old_info.crtc_mode_blob_id);
+  close(info->fd);
+  memset(info, 0, sizeof(struct Drm_Info));
+  free(info);
+  *drm_info_ptr = NULL;
 }
 
-void drm_restore_display() {
-  if (current_drm_info.connector_id != 0) {
-    if (current_drm_info.have_atomic && drm_props.snap.props_num > 0) {
-      if (drm_set_props(current_drm_info.fd, drm_props.snap.ids, drm_props.snap.props, drm_props.snap.props_value, drm_props.snap.props_num, DRM_MODE_ATOMIC_ALLOW_MODESET, 0, NULL) < 0) {
+void drm_restore_display(struct Drm_Info *info) {
+  if (info->old_info.props_list != NULL) {
+    struct _snap_props *drm_props = info->old_info.props_list;
+    if (info->have_atomic && drm_props->snap.props_num > 0) {
+      if (drm_set_props(info->fd, drm_props->snap.ids, drm_props->snap.props, drm_props->snap.props_value, drm_props->snap.props_num, DRM_MODE_ATOMIC_ALLOW_MODESET, 0, NULL) < 0) {
        perror("Restore display failed: ");
       }
     }
     else {
-      drmModeSetCrtc(current_drm_info.fd, current_drm_info.crtc_id, old_drm_info.crtc_fb_id, 0, 0, &current_drm_info.connector_id, 1, &old_drm_info.crtc_mode);
+      drmModeSetCrtc(info->fd, info->crtc_id, info->old_info.fb_id, 0, 0, &info->connector_id, 1, &info->old_info.crtc_mode);
     }
   }
 }
@@ -793,6 +815,18 @@ uint32_t translate_format_to_drm(int format, int *bpp, int *heightmulti, int *pl
     *heightmulti = 2;
     *planenum = 2;
     return DRM_FORMAT_NV12;
+  case AV_PIX_FMT_NV24:
+    *bpp = 16;
+    *heightmulti = 2;
+    *planenum = 2;
+    return DRM_FORMAT_NV24;
+#if defined(DRM_FORMAT_P410)
+  case AV_PIX_FMT_P410:
+    *bpp = 32;
+    *heightmulti = 2;
+    *planenum = 2;
+    return DRM_FORMAT_P410;
+#endif
   }
   return 0;
 }
@@ -870,7 +904,7 @@ void printf_props () {
 static void page_flip_handler(int fd, unsigned int seq, unsigned int sec,
                               unsigned int usec, unsigned int crtc_id, void *data) {
   struct _drm_pageflip_feedback *feedback = data;
-  if (crtc_id == feedback->crtc_id) {
+  if (crtc_id == feedback->props->crtc_id) {
     feedback->done = 1;
     feedback->tv_sec = sec;
     feedback->tv_nsec = usec * 1000ULL;
@@ -884,21 +918,28 @@ static drmEventContext evctx = {
   .page_flip_handler2 = page_flip_handler,
 };
 
-static int drmpageflip_legacy(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, void *data) {
-  return drmModePageFlip(fd, crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, data);
+static int drmpageflip_legacy(uint32_t fd, struct _pageflip_prop *props, uint32_t fb_id, uint32_t flags, void *data) {
+  return drmModePageFlip(fd, props->crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, data);
 }
 
-static int drmpageflip_atomic(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, void *data) {
+static int drmpageflip_atomic(uint32_t fd, struct _pageflip_prop *props, uint32_t fb_id, uint32_t flags, void *data) {
   int ret = -1;
   uint32_t cflags = flags | DRM_MODE_PAGE_FLIP_EVENT;
+
+  if (fb_id == 0)
+    return -1;
+
   drmModeAtomicReq *req = drmModeAtomicAlloc();
 
   if (!req)
     return -1;
 
-  if (drm_opt_commit (DRM_APPLY_COMMIT, req, 0, 0, 0) > 0) cflags = (cflags & ~(DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_ASYNC)) | DRM_MODE_ATOMIC_ALLOW_MODESET;
-  if (fb_id > 0)
-    drmModeAtomicAddProperty(req, current_drm_info.plane_id, current_drm_info.plane_fb_id_prop_id, fb_id);
+  if (drm_opt_commit (DRM_APPLY_COMMIT, req, 0, 0, 0) > 0) {
+    cflags = (cflags & ~(DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_ASYNC)) | DRM_MODE_ATOMIC_ALLOW_MODESET;
+    ((struct _drm_pageflip_feedback *)data)->timeout_sec = 6;
+  }
+
+  drmModeAtomicAddProperty(req, props->plane_id, props->plane_fb_prop, fb_id);
 
   ret = drmModeAtomicCommit(fd, req, cflags, data);
   if (ret < 0) {
@@ -910,22 +951,22 @@ static int drmpageflip_atomic(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uin
   return ret;
 }
 
-int drm_flip_buffer(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint64_t flags, uint64_t timeout, struct _drm_pageflip_feedback *feedback) {
-  if (feedback == NULL) {
+int drm_flip_buffer(uint32_t fd, uint32_t fb_id, uint64_t flags, struct _drm_pageflip_feedback *feedback) {
+  if (feedback == NULL || feedback->props == NULL) {
     fprintf(stderr, "DRM: feedback is NULL.\n");
     return -1;
   }
-  feedback->crtc_id = crtc_id;
 
-  struct pollfd pfd = { .fd = fd, .events = POLLIN };
-
-  int res = drmpageflip(fd, crtc_id, fb_id, flags, feedback);
+  int res = drmpageflip(fd, feedback->props, fb_id, flags, feedback);
   if (res < 0) {
     fprintf(stderr, "drmModePageFlip() failed: %d\n", res);
     return res;
   }
 
-  struct timespec wait = { .tv_sec = 0, .tv_nsec = timeout };
+  struct pollfd pfd = { .fd = fd, .events = POLLIN };
+  struct timespec wait = {0};
+  wait.tv_sec = feedback->timeout_sec;
+  wait.tv_nsec = feedback->timeout_nsec;
   while ((ppoll(&pfd, 1, &wait, NULL)) > 0) {
     drmHandleEvent(fd, &evctx);
     if (feedback->done != 0) {
@@ -936,53 +977,57 @@ int drm_flip_buffer(uint32_t fd, uint32_t crtc_id, uint32_t fb_id, uint64_t flag
   return -EAGAIN;
 }
 
-int drm_set_display(int fd, uint32_t crtc_id, uint32_t plane_id, uint32_t src_width, uint32_t src_height, uint32_t crtc_w, uint32_t crtc_h, uint32_t *connector_id, uint32_t connector_num, drmModeModeInfoPtr connModePtr, uint32_t fb_id) {
-  if (current_drm_info.have_atomic) {
-    dst_site.width = crtc_w;
-    dst_site.height = crtc_h;
-    convert_display(&src_width, &src_height, &dst_site.width, &dst_site.height, &dst_site.x, &dst_site.y);
+int drm_set_display(struct Drm_Info *info, uint32_t src_width, uint32_t src_height, drmModeModeInfoPtr connModePtr, uint32_t fb_id) {
+  if (info->have_atomic) {
+    int dst_site_x = 0;
+    int dst_site_y = 0;
+    uint32_t dst_site_width = info->width;
+    uint32_t dst_site_height = info->height;
+    convert_display(&src_width, &src_height, &dst_site_width, &dst_site_height, &dst_site_x, &dst_site_y);
 
-    if (current_drm_info.crtc_mode_blob_id == 0) {
-      if (drmModeCreatePropertyBlob(fd, connModePtr, sizeof(*connModePtr), &current_drm_info.crtc_mode_blob_id) != 0) {
+    if (info->crtc_mode_blob_id == 0) {
+      if (drmModeCreatePropertyBlob(info->fd, connModePtr, sizeof(*connModePtr), &info->crtc_mode_blob_id) != 0) {
         perror("Cannot create blob for mode: ");
         return -1;
       }
     }
     
-    drm_opt_commit (DRM_ADD_COMMIT, NULL, *connector_id, current_drm_info.conn_crtc_prop_id, crtc_id);
-    drm_opt_commit (DRM_ADD_COMMIT, NULL, crtc_id, current_drm_info.crtc_prop_mode_id, current_drm_info.crtc_mode_blob_id);
-    drm_opt_commit (DRM_ADD_COMMIT, NULL, crtc_id, current_drm_info.crtc_prop_active, 1);
-    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_crtc_prop_id, crtc_id);
-    //drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_src_x_prop_id, 0 << 16);
-    //drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_src_y_prop_id, 0 << 16);
-    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_src_w_prop_id, src_width << 16);
-    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_src_h_prop_id, src_height << 16);
-    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_crtc_x_prop_id, dst_site.x);
-    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_crtc_y_prop_id, dst_site.y);
-    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_crtc_w_prop_id, dst_site.width);
-    drm_opt_commit (DRM_ADD_COMMIT, NULL, plane_id, current_drm_info.plane_crtc_h_prop_id, dst_site.height);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->connector_id, info->conn_crtc_prop_id, info->crtc_id);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->crtc_id, info->crtc_prop_active, 1);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->crtc_id, info->crtc_prop_mode_id, info->crtc_mode_blob_id);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->crtc_id, info->crtc_gammalut_prop_id, 0);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->plane_id, info->plane_crtc_prop_id, info->crtc_id);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->plane_id, info->plane_src_x_prop_id, 0 << 16);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->plane_id, info->plane_src_y_prop_id, 0 << 16);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->plane_id, info->plane_src_w_prop_id, src_width << 16);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->plane_id, info->plane_src_h_prop_id, src_height << 16);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->plane_id, info->plane_crtc_x_prop_id, dst_site_x);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->plane_id, info->plane_crtc_y_prop_id, dst_site_y);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->plane_id, info->plane_crtc_w_prop_id, dst_site_width);
+    drm_opt_commit (DRM_ADD_COMMIT, NULL, info->plane_id, info->plane_crtc_h_prop_id, dst_site_height);
 
     return 0;
   } else {
-    if (drmModeSetCrtc(fd, crtc_id, fb_id, 0, 0, connector_id, connector_num, connModePtr) < 0) {
+    int ret = drmModeSetCrtc(info->fd, info->crtc_id, fb_id, 0, 0, &info->connector_id, 1, connModePtr);
+    if (ret < 0) {
       fprintf(stderr, "Could not set fb to drm crtc.\n");
-      return -1;
+      return ret;
     }
   }
 
   return 0;
 }
 
-int drm_choose_color_config (enum DrmColorSpace colorspace, bool fullRange) {
-  uint32_t ids[] = { current_drm_info.plane_id, current_drm_info.plane_id };
-  uint32_t props[] = { current_drm_info.plane_color_encoding_prop_id, current_drm_info.plane_color_range_prop_id };
-  uint64_t values[] = { current_drm_info.plane_color_encoding_prop_values[colorspace], current_drm_info.plane_color_range_prop_values[fullRange ? 1 : 0] };
+int drm_choose_color_config (struct Drm_Info *info, enum DrmColorSpace colorspace, bool fullRange) {
+  uint32_t ids[] = { info->plane_id, info->plane_id };
+  uint32_t props[] = { info->plane_color_encoding_prop_id, info->plane_color_range_prop_id };
+  uint64_t values[] = { info->plane_color_encoding_prop_values[colorspace], info->plane_color_range_prop_values[fullRange ? 1 : 0] };
 
-  if (current_drm_info.have_atomic) {
+  if (info->have_atomic) {
     drm_opt_commit (DRM_ADD_COMMIT, NULL, ids[0], props[0], values[0]);
     drm_opt_commit (DRM_ADD_COMMIT, NULL, ids[1], props[1], values[1]);
   } else {
-    if (drm_set_props(current_drm_info.fd, ids, props, values, 2, 0, DRM_MODE_OBJECT_PLANE, NULL) < 0) {
+    if (drm_set_props(info->fd, ids, props, values, 2, 0, DRM_MODE_OBJECT_PLANE, NULL) < 0) {
       perror("Set plane color space and range failed.");
       return -1;
     }
@@ -991,6 +1036,7 @@ int drm_choose_color_config (enum DrmColorSpace colorspace, bool fullRange) {
   return 0;
 }
 
+/*
 int drm_apply_hdr_metadata(int fd, uint32_t conn_id, uint32_t hdr_metadata_prop_id, struct hdr_output_metadata *data) {
   uint32_t blob_id;
   if (drmModeCreatePropertyBlob(fd, data, sizeof(struct hdr_output_metadata), &blob_id) < 0) {
@@ -1008,6 +1054,7 @@ int drm_apply_hdr_metadata(int fd, uint32_t conn_id, uint32_t hdr_metadata_prop_
   drmModeDestroyPropertyBlob(fd, blob_id);
   return 0;
 }
+*/
 
 int drm_add_fb (int fd, uint32_t width, uint32_t height, uint32_t pixel_format, const uint32_t bo_handles[4], const uint32_t pitches[4], const uint32_t offsets[4], const uint64_t modifier[4], uint32_t *buf_id, uint32_t flags) {
   return drm_add_fb_func(fd, width, height, pixel_format, bo_handles, pitches, offsets, modifier, buf_id, flags);

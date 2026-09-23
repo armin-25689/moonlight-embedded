@@ -37,14 +37,16 @@
 static struct _drm_buf drm_buf[MAX_FB_NUM] = {0};
 static uint8_t* drm_buf_dataptr[MAX_FB_NUM][MAX_PLANE_NUM] = {0};
 static struct Drm_Info *drmInfoPtr;
+static int drm_fd = -1;
 static drmModeConnectorPtr connPtr;
 static drmModeModeInfoPtr connModePtr;
 static void *gbm_display = NULL;
 static void *gbm_window = NULL;
-static bool isMaster = true;
 static uint32_t hdr_blob = 0;
 static uint64_t fps_time;
-static uint32_t wait_commit_flags = DRM_MODE_ATOMIC_NONBLOCK;
+static uint32_t commit_flags = DRM_MODE_ATOMIC_NONBLOCK;
+static uint32_t buffer_width, buffer_height;
+static bool commited_display = false;
 
 struct _drm_render_config {
   bool full_color_range;
@@ -299,11 +301,11 @@ static uint32_t drm_generate_drm_buf (int drm_fd, int src_format, int width, int
   return format;
 }
 
-static int gbm_display_loop(void *data, void *udata);
+//static int gbm_display_loop(void *data, void *udata);
 static int drm_setup(int width, int height, int fps, int drFlags) {
   fps_time = 1000000000ULL / fps;
   // need to implement get screen width and height
-  connPtr = drmModeGetConnector(drmInfoPtr->fd, drmInfoPtr->connector_id);
+  connPtr = drmModeGetConnector(drm_fd, drmInfoPtr->connector_id);
   if (connPtr == NULL) {
     fprintf(stderr, "Could not get connector from drm.\n");
     return -1;
@@ -331,12 +333,15 @@ static int drm_setup(int width, int height, int fps, int drFlags) {
       fprintf(stderr, "\n");
     }
   }
+  else if (fps > (drmInfoPtr->crtc_mode.vrefresh + 3))
+    fprintf(stderr, "WARNNING: Wanted fps(%d) is faster than device's modesetting(%d).Please use '-modeset' to switch connector's mode.\n", fps, drmInfoPtr->crtc_mode.vrefresh);
+
 
   if (drFlags & ENABLE_VRR) {
     uint64_t has_cap = 1;
-    drmGetCap(drmInfoPtr->fd, DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP, &has_cap);
+    drmGetCap(drm_fd, DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP, &has_cap);
     if (has_cap == 1 && drmInfoPtr->conn_vrr_capable_value == 1) {
-      wait_commit_flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_ASYNC;
+      commit_flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_ASYNC;
       drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->crtc_id, drmInfoPtr->crtc_vrr_prop_id, 1);
     }
     else
@@ -350,21 +355,22 @@ static int drm_setup(int width, int height, int fps, int drFlags) {
     gbm_close_display (-1, NULL, MAX_FB_NUM, &gbm_display, NULL);
   } else {
     if ((drFlags & EGL_RENDER) == 0) return -1;
-    uint32_t format = wantHdr ? DEFAULT_FORMAT_10BIT : DEFAULT_FORMAT;
     display_callback_drm.hdr_support = false;
-    int planes = generate_gbm_buffer(drmInfoPtr->fd, drm_buf, MAX_FB_NUM, gbm_display, drmInfoPtr->width, drmInfoPtr->height, wantHdr ? AV_PIX_FMT_X2RGB10LE : AV_PIX_FMT_BGR0);
+    int planes = generate_gbm_buffer(drm_fd, drm_buf, MAX_FB_NUM, gbm_display, drmInfoPtr->width, drmInfoPtr->height, wantHdr ? AV_PIX_FMT_X2RGB10LE : AV_PIX_FMT_BGR0);
     if (planes < 0)
       return -1;
 /*
     display_callback_drm.display_put_to_screen = &gbm_display_loop;
-    gbm_window = gbm_get_window(drmInfoPtr->fd, gbm_display, drmInfoPtr->width, drmInfoPtr->height, format);
+    uint32_t format = wantHdr ? DEFAULT_FORMAT_10BIT : DEFAULT_FORMAT;
+    gbm_window = gbm_get_window(drm_fd, gbm_display, drmInfoPtr->width, drmInfoPtr->height, format);
     if (gbm_window == NULL)
       return -1;
 */
-    if (isMaster && drm_set_display(drmInfoPtr->fd, drmInfoPtr->crtc_id, drmInfoPtr->plane_id, drmInfoPtr->width, drmInfoPtr->height, drmInfoPtr->width, drmInfoPtr->height, &connPtr->connector_id, 1, connModePtr, drm_buf[0].fb_id) < 0) {
-      fprintf(stderr, "Could not set fb to drm crtc.\n");
-    }
   }
+
+  buffer_width = drmInfoPtr->width;
+  buffer_height = drmInfoPtr->height;
+  commited_display = false;
 
   tty_opt (&tty_stat, &set_new_tty);
 
@@ -387,16 +393,17 @@ static void* drm_get_display(const char* *device) {
     fprintf(stderr, "Could not init drm device.\n");
     return NULL;
   }
+  drm_fd = drmInfoPtr->fd;
   if (!drmInfoPtr->have_atomic)
     display_callback_drm.hdr_support = false;
 
-  if (drmSetMaster(drmInfoPtr->fd) < 0) {
+  if (drmSetMaster(drm_fd) < 0) {
     fprintf(stderr, "DRM: drmSetMaster() failed.\n");
     return NULL;
   }
 
   *device = "/dev/dri/renderD128";
-  gbm_display = gbm_get_display(&drmInfoPtr->fd);
+  gbm_display = gbm_get_display(&drm_fd);
 
   return gbm_display;
 }
@@ -420,23 +427,27 @@ static void drm_clear_image_cache (int drm_fd, struct _drm_buf *drm_buf, int buf
 }
 
 static void drm_cleanup (void *data) {
+  if (drmInfoPtr == NULL) return;
   if (hdr_blob > 0)
-    drmModeDestroyPropertyBlob(drmInfoPtr->fd, hdr_blob);
+    drmModeDestroyPropertyBlob(drm_fd, hdr_blob);
   hdr_blob = 0;
   if (!tty_stat.out) {
-    struct timespec wait = { .tv_nsec = fps_time, .tv_sec = 0 };
+    struct timespec wait;
+    wait.tv_nsec = fps_time;
+    wait.tv_sec = 0;
     nanosleep(&wait, NULL);
-    drm_restore_display();
+    drm_restore_display(drmInfoPtr);
   }
   if (gbm_display == NULL) {
     if (drm_render.decoder_type == SOFTWARE)
-      drm_clear_image_cache(drmInfoPtr->fd, drm_buf, MAX_FB_NUM);
+      drm_clear_image_cache(drm_fd, drm_buf, MAX_FB_NUM);
   }
   else
-    gbm_close_display (drmInfoPtr->fd, drm_buf, MAX_FB_NUM, &gbm_display, &gbm_window);
+    gbm_close_display (drm_fd, drm_buf, MAX_FB_NUM, &gbm_display, &gbm_window);
   if (connPtr != NULL)
     drmModeFreeConnector(connPtr);
-  drm_close();
+  drm_close(&drmInfoPtr);
+  drm_fd = -1;
 
   tty_opt (&tty_stat, &set_orig_tty);
 
@@ -489,9 +500,9 @@ static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, bool hdractive, u
   data.hdmi_metadata_type1.max_fall = ffmpeg_hdr_metadata[11];
 
   if (*hdr_blob > 0)
-    drmModeDestroyPropertyBlob(drmInfoPtr->fd, *hdr_blob);
+    drmModeDestroyPropertyBlob(drm_fd, *hdr_blob);
   *hdr_blob = 0;
-  if (drmModeCreatePropertyBlob(drmInfoPtr->fd, &data, sizeof(struct hdr_output_metadata), hdr_blob) < 0) {
+  if (drmModeCreatePropertyBlob(drm_fd, &data, sizeof(struct hdr_output_metadata), hdr_blob) < 0) {
     perror("Failed to create hdr metadata blob: ");
     return -1;
   }
@@ -502,22 +513,26 @@ static int set_hdr_metadata_blob (struct Drm_Info *drmInfoPtr, bool hdractive, u
   return 0;
 }
 
-static int drm_display_loop(void *data, void *waitmode) {
+static int drm_display_loop(void *data, void *udata) {
+  struct {
+    uint32_t fbid;
+    uint64_t seq;
+    uint64_t tv_sec;
+    uint64_t tv_nsec;
+  } static last = {0};
+  static struct _pageflip_prop drm_pageflip_props = {0};
   static int orig_colortrc = -1;
   static int orig_colorprimary = -1;
-  static uint32_t last_fbid = 0;
-  static struct _drm_pageflip_feedback last = {0};
   struct Render_Image *image = (struct Render_Image *)data;
   struct timespec wait = { .tv_sec = 0 };
   int index = image->index;
   uint32_t fb_id;
-  uint32_t flags = wait_commit_flags;
 
   fb_id = drm_buf[index].fb_id;
   if (fb_id <= 0 || data == NULL)
     return -1;
 
-  if (tty_stat.out || last_fbid == fb_id) {
+  if (tty_stat.out || last.fbid == fb_id) {
     wait.tv_nsec = fps_time;
     nanosleep(&wait, NULL);
     return 0;
@@ -525,24 +540,43 @@ static int drm_display_loop(void *data, void *waitmode) {
 
   AVFrame *frame = image->sframe.frame;
   if (orig_colortrc != frame->color_trc || orig_colorprimary != frame->color_primaries) {
-    orig_colortrc = frame->color_trc;
-    orig_colorprimary = frame->color_primaries;
     drm_config.full_color_range = ffmpeg_is_frame_full_range(frame);
     drm_config.colorspace = ffmpeg_get_frame_colorspace(frame);
-    if (drm_config.need_change_color) {
-      enum DrmColorSpace colorspace = drm_config.colorspace == COLORSPACE_REC_2020 ? DBT2020 : (drm_config.colorspace == COLORSPACE_REC_709 ? DBT709 : DBT601);
-      drm_choose_color_config(colorspace, drm_config.full_color_range);
-    }
-    drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, 
+    drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id,
                    !drm_config.need_change_color ? drmInfoPtr->conn_colorspace_values[(drm_config.colorspace == COLORSPACE_REC_2020 || frame->color_trc == AVCOL_TRC_SMPTE2084) ? D2020RGB : DEFAULTCOLOR] : drmInfoPtr->conn_colorspace_values[drm_config.colorspace == COLORSPACE_REC_2020 ? D2020YCC : (drm_config.colorspace == COLORSPACE_REC_709 ? D709YCC : D601YCC)]);
     if (frame->color_primaries == AVCOL_PRI_SMPTE432 && drmInfoPtr->conn_colorspace_values[D65P3] != 0 && frame->color_trc != AVCOL_TRC_SMPTE2084) {
       drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->connector_id, drmInfoPtr->conn_colorspace_prop_id, drmInfoPtr->conn_colorspace_values[D65P3]);
     }
     set_hdr_metadata_blob (drmInfoPtr, ffmpeg_has_hdr_metadata(frame), &hdr_blob);
+    if (!commited_display) {
+      drm_pageflip_props.crtc_id = drmInfoPtr->crtc_id;
+      drm_pageflip_props.plane_id = drmInfoPtr->plane_id;
+      drm_pageflip_props.plane_fb_prop = drmInfoPtr->plane_fb_id_prop_id;
+      if (drm_set_display(drmInfoPtr, buffer_width, buffer_height, connModePtr, fb_id) < 0) {
+        fprintf(stderr, "Could not set fb to drm crtc.\n");
+        return -1;
+      }
+      commited_display = true;
+      if (!drmInfoPtr->have_atomic) {
+        last.fbid = fb_id;
+        wait.tv_nsec = fps_time;
+        nanosleep(&wait, NULL);
+        return 0;
+      }
+    }
+    orig_colortrc = frame->color_trc;
+    orig_colorprimary = frame->color_primaries;
+    if (drm_config.need_change_color) {
+      enum DrmColorSpace colorspace = drm_config.colorspace == COLORSPACE_REC_2020 ? DBT2020 : (drm_config.colorspace == COLORSPACE_REC_709 ? DBT709 : DBT601);
+      drm_choose_color_config(drmInfoPtr, colorspace, drm_config.full_color_range);
+    }
   }
 
   struct _drm_pageflip_feedback feedback = {0};
-  int res = drm_flip_buffer(drmInfoPtr->fd, drmInfoPtr->crtc_id, fb_id, flags, (fps_time << 1), &feedback);
+  feedback.timeout_nsec = (fps_time << 1);
+  feedback.props = &drm_pageflip_props;
+  // use drm_pageflip_props to commit new fb
+  int res = drm_flip_buffer(drm_fd, fb_id, commit_flags, &feedback);
   if (res < 0) {
     return res;
   }
@@ -558,21 +592,16 @@ static int drm_display_loop(void *data, void *waitmode) {
       presentation_times = 0;
     }
   }
-/*
-  if (*waitmode == DISPLAY_MODE_PULL) {
-    wait.tv_nsec = fps_time > 2000000ULL ? (fps_time - 2000000ULL) : (fps_time >> 1);
-    nanosleep(&wait, NULL);
-  }
-*/
 
   last.seq = feedback.seq;
   last.tv_sec = feedback.tv_sec;
   last.tv_nsec = feedback.tv_nsec;
-  last_fbid = fb_id;
+  last.fbid = fb_id;
 
   return res;
 }
 
+/*
 static int gbm_display_loop(void *data, void *udata) {
   static struct _drm_buf *lastbo = NULL;
   struct Render_Image *image = (struct Render_Image *)data;
@@ -582,20 +611,21 @@ static int gbm_display_loop(void *data, void *udata) {
     return 0;
 
   struct _drm_buf *nowbo = &drm_buf[index];
-  if (get_buffer_from_gbm_surface(drmInfoPtr->fd, nowbo, gbm_window) == NULL) {
+  if (get_buffer_from_gbm_surface(drm_fd, nowbo, gbm_window) == NULL) {
     return -1;
   }
   int ret = drm_display_loop(data, udata);
   if (ret < 0) {
-    release_buffer_from_gbm_surface(drmInfoPtr->fd, nowbo, gbm_window);
+    release_buffer_from_gbm_surface(drm_fd, nowbo, gbm_window);
     return ret;
   }
   if (lastbo) {
-    release_buffer_from_gbm_surface(drmInfoPtr->fd, lastbo, gbm_window);
+    release_buffer_from_gbm_surface(drm_fd, lastbo, gbm_window);
   }
   lastbo = nowbo;
   return ret;
 }
+*/
 
 static void drm_export_buffer(struct Source_Buffer_Info buffers[MAX_FB_NUM], int *buffer_num, int *plane_num) {
   *buffer_num = MAX_FB_NUM;
@@ -617,7 +647,7 @@ static void drm_switch_vt(struct WINDOW_OP *op, int flags) {
           wait.tv_nsec = fps_time * 2;
           nanosleep(&wait, NULL);
         }
-        if (drmSetMaster(drmInfoPtr->fd) == 0) {
+        if (drmSetMaster(drm_fd) == 0) {
           drm_opt_commit(DRM_RESTORE_COMMIT, NULL, 0, 0, 0);
           tty_stat.out = false;
           sync_input_state(true);
@@ -628,15 +658,15 @@ static void drm_switch_vt(struct WINDOW_OP *op, int flags) {
       //out
       if (!tty_stat.out) {
         tty_stat.out = true;
-        drmDropMaster(drmInfoPtr->fd);
+        drmDropMaster(drm_fd);
         sync_input_state(false);
         wait.tv_nsec = fps_time * 3;
         nanosleep(&wait, NULL);
-        if (drmSetMaster(drmInfoPtr->fd) == 0) {
-          drm_restore_display();
+        if (drmSetMaster(drm_fd) == 0) {
+          drm_restore_display(drmInfoPtr);
           wait.tv_nsec = fps_time;
           nanosleep(&wait, NULL);
-          drmDropMaster(drmInfoPtr->fd);
+          drmDropMaster(drm_fd);
         }
       }
     }
@@ -669,6 +699,8 @@ static int get_config_from_frame(struct Render_Config *config) {
   bool need_change_color_config = false;
   drm_config.src_fmt = config->pix_fmt;
   drm_config.colorspace = -1;
+  buffer_width = config->width;
+  buffer_height = config->height;
 
   if (drm_render.decoder_type == SOFTWARE) {
     switch (config->pix_fmt) {
@@ -702,8 +734,8 @@ static int get_config_from_frame(struct Render_Config *config) {
     }
 
     int flags = 0;
-    drm_clear_image_cache(drmInfoPtr->fd, drm_buf, MAX_FB_NUM);
-    format = drm_generate_drm_buf(drmInfoPtr->fd, drm_config.dst_fmt, config->width, config->height, flags, drm_buf, MAX_FB_NUM);
+    drm_clear_image_cache(drm_fd, drm_buf, MAX_FB_NUM);
+    format = drm_generate_drm_buf(drm_fd, drm_config.dst_fmt, config->width, config->height, flags, drm_buf, MAX_FB_NUM);
   }
   else {
     switch (config->pix_fmt) {
@@ -727,12 +759,6 @@ static int get_config_from_frame(struct Render_Config *config) {
   }
 
   drm_config.need_change_color = need_change_color_config;
-
-  if (isMaster && drm_set_display(drmInfoPtr->fd, drmInfoPtr->crtc_id, drmInfoPtr->plane_id, config->width, config->height, drmInfoPtr->width, drmInfoPtr->height, &connPtr->connector_id, 1, connModePtr, drm_buf[0].fb_id) < 0) {
-    fprintf(stderr, "Could not set fb to drm crtc.\n");
-    return -1;
-  }
-  drm_opt_commit(DRM_ADD_COMMIT, NULL, drmInfoPtr->crtc_id, drmInfoPtr->crtc_gammalut_prop_id, 0);
 
   return 0;
 }
@@ -790,11 +816,11 @@ static int drm_import_buffer (struct Source_Buffer_Info *buffer, int planes, int
   uint32_t fb_id = 0;
   uint32_t handle[MAX_PLANE_NUM] = {0};
   for (int i = 0; i < layers; i++) {
-    if (drmPrimeFDToHandle(drmInfoPtr->fd, buffer->fd[i], &handle[i]) < 0) {
+    if (drmPrimeFDToHandle(drm_fd, buffer->fd[i], &handle[i]) < 0) {
       for (int k = 0; k < i; k++) {
-        drmCloseBufferHandle(drmInfoPtr->fd, handle[k]);
+        drmCloseBufferHandle(drm_fd, handle[k]);
       }
-      fprintf(stderr, "Could not success drmPrimeFDToHandle(%d, %d, %d)\n", drmInfoPtr->fd, buffer->fd[i], i);
+      fprintf(stderr, "Could not success drmPrimeFDToHandle(%d, %d, %d)\n", drm_fd, buffer->fd[i], i);
       return -1;
     }
   }
@@ -805,12 +831,12 @@ static int drm_import_buffer (struct Source_Buffer_Info *buffer, int planes, int
   }
   uint32_t dformat = buffer->format[0] == DRM_FORMAT_Y410 ? DRM_FORMAT_XVYU2101010 : buffer->format[0];
   int flags = buffer->modifiers[0] != DRM_FORMAT_MOD_INVALID ? DRM_MODE_FB_MODIFIERS : 0;
-  drm_add_fb(drmInfoPtr->fd, buffer->width[0], buffer->height[0], dformat, handle, buffer->stride, buffer->offset, buffer->modifiers, &fb_id, flags);
+  drm_add_fb(drm_fd, buffer->width[0], buffer->height[0], dformat, handle, buffer->stride, buffer->offset, buffer->modifiers, &fb_id, flags);
   if (fb_id == 0) {
     perror("Failed to create framebuffer from drm buffer object: ");
     for (int i = 0; i < layers; i++) {
       if (handle[i] > 0)
-        drmCloseBufferHandle(drmInfoPtr->fd, handle[i]);
+        drmCloseBufferHandle(drm_fd, handle[i]);
     }
     return -1;
   }
@@ -826,7 +852,7 @@ static int drm_import_buffer (struct Source_Buffer_Info *buffer, int planes, int
 }
 
 static void drm_free_buffer (void* *image, int handles) {
-  drm_free_hw_buffer(drmInfoPtr->fd, image, handles);
+  drm_free_hw_buffer(drm_fd, image, handles);
   return;
 }
 

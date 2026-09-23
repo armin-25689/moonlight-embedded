@@ -279,7 +279,7 @@ static int monitor_dir_handle (int fd, void *data) {
     while ((dp = readdir(dir)) != NULL) {
       int device_num = -1;
       if (sscanf(dp->d_name, "%*[^0-9]%d", &device_num) == 1 && device_num >= 0) {
-        if (device_num > imonitor.max_count) {
+        if (device_num >= imonitor.max_count) {
           uint8_t *tmplist = realloc(imonitor.input_stat, imonitor.max_count * 2 * sizeof(uint8_t));
           if (tmplist == NULL)
             return LOOP_RETURN;
