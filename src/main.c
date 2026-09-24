@@ -186,8 +186,15 @@ static void stream(PSERVER_DATA server, PCONFIGURATION config, enum platform sys
     fprintf(stderr, "Can't find video callback\n");
     exit(-1);
   }
+  unsigned char cnum = config->cpu_num < 0 ? 0 : (config->cpu_num > 15 ? 15 : config->cpu_num);
+  int testcap = videoCallback->capabilities & ~CAPABILITY_SLICES_PER_FRAME(0xF);
+  if (cnum > 0 && testcap != videoCallback->capabilities) {
+    videoCallback->capabilities &= ~CAPABILITY_SLICES_PER_FRAME(0xF);
+    videoCallback->capabilities |= CAPABILITY_SLICES_PER_FRAME(cnum);
+    drFlags |= ((cnum << CPU_NUM_BIT) & CPU_NUM_FLAG);
+  }
 
-  LiStartConnection(&server->serverInfo, &config->stream, &connection_callbacks, platform_get_video(system), platform_get_audio(system, config->audio_device), NULL, drFlags, config->audio_device, 0);
+  LiStartConnection(&server->serverInfo, &config->stream, &connection_callbacks, videoCallback, platform_get_audio(system, config->audio_device), NULL, drFlags, config->audio_device, 0);
 
   if (IS_EMBEDDED(system)) {
     if (!config->viewonly)

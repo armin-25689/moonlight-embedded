@@ -54,6 +54,7 @@ static struct option long_options[] = {
   {"4k", no_argument, NULL, '0'},
   {"width", required_argument, NULL, 'c'},
   {"height", required_argument, NULL, 'd'},
+  {"cpu", required_argument, NULL, 'C'},
   {"yuv444", no_argument, NULL, 'f'},
   {"filters", required_argument, NULL, 'F'},
   {"bitrate", required_argument, NULL, 'g'},
@@ -159,6 +160,9 @@ static void parse_argument(int c, char* value, PCONFIGURATION config) {
   case '0':
     config->stream.width = 3840;
     config->stream.height = 2160;
+    break;
+  case 'C':
+    config->cpu_num = atoi(value);
     break;
   case 'c':
     config->stream.width = atoi(value);
@@ -458,6 +462,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->pin = 0;
   config->port = 47989;
 
+  config->cpu_num = 0;
   config->inputsCount = 0;
   config->disable_monitor = false;
   config->yuv444 = false;

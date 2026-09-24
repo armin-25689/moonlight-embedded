@@ -48,6 +48,7 @@ typedef struct _CONFIGURATION {
   enum codecs codec;
   bool hdr;
   int pin;
+  int cpu_num;
   unsigned short port;
   bool sdlgp;
   bool swapxyab;

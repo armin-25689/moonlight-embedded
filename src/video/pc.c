@@ -375,15 +375,8 @@ static void* display_handler (void *data) {
     case -EBUSY:
     case -EAGAIN:
     case -EINTR:
-      if (image_data != lastimage && lastimage != NULL) {
-        mv_deled_display_data_todecoder (frame, image_data);
-      }
-      else {
-        lastframe = frame;
-        lastimage = image_data;
-      }
+      mv_deled_display_data_todecoder (frame, image_data);
       continue;
-      break;
     default:
       if (dis_ret < 0) {
         fprintf(stderr, "Error: display loop failed.\n");
@@ -648,7 +641,14 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   }
   avc_flags |= renderPtr->render_type;
 
-  if (ffmpeg_init(videoFormat, width, height, avc_flags, MAX_FB_NUM, SLICES_PER_FRAME) < 0) {
+  int slices;
+  if (drFlags & CPU_NUM_FLAG) {
+    slices = ((drFlags & CPU_NUM_FLAG) >> CPU_NUM_BIT);
+  }
+  else
+    slices = SLICES_PER_FRAME;
+
+  if (ffmpeg_init(videoFormat, width, height, avc_flags, MAX_FB_NUM, slices) < 0) {
     fprintf(stderr, "Couldn't initialize video decoding\n");
     return -1;
   }
@@ -657,7 +657,7 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
   ffmpegArgs.height = height;
   ffmpegArgs.avc_flags = avc_flags;
   ffmpegArgs.buffer_count = MAX_FB_NUM;
-  ffmpegArgs.thread_count = SLICES_PER_FRAME;
+  ffmpegArgs.thread_count = slices;
 
   isTenBit = videoFormat & VIDEO_FORMAT_MASK_10BIT;
 
