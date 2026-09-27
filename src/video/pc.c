@@ -242,8 +242,8 @@ static inline void* draw_frame (struct Render_Image *images, AVFrame* frame, int
 static inline void mv_deled_display_data_todecoder (void *frame, void *image) {
   pthread_mutex_lock(&threads.mutex);
   VLIST_ADD(decoder, frame, image);
-  sem_post(&threads.decoder_sem);
   pthread_mutex_unlock(&threads.mutex);
+  sem_post(&threads.decoder_sem);
   return;
 }
 
@@ -306,9 +306,9 @@ static void* frame_handler (void *data) {
   struct Render_Image *image_data = NULL;
   bool firstDraw = true;
 
-  while (!done) {
+  while (!atomic_load_explicit(&done, memory_order_relaxed)) {
     sem_wait(&threads.render_sem);
-    if (done) {
+    if (atomic_load_explicit(&done, memory_order_relaxed)) {
       break;
     }
     pthread_mutex_lock(&threads.mutex);
@@ -335,6 +335,8 @@ static void* frame_handler (void *data) {
   if (renderPtr->render_sync_config != NULL)
     renderPtr->render_sync_config(NULL);
 
+  done = true;
+  sem_post(&threads.display_sem);
   pthread_mutex_lock(&threads.mutex);
   write(windowpipefd[1], &quitstate, sizeof(quitstate));
   pthread_mutex_unlock(&threads.mutex);
@@ -349,10 +351,10 @@ static void* display_handler (void *data) {
   struct Render_Image *lastimage = NULL;
   struct Render_Image *image_data = NULL;
 
-  while (!done) {
+  while (!atomic_load_explicit(&done, memory_order_relaxed)) {
     sem_wait(&threads.display_sem);
 
-    if (done) goto display_exit;
+    if (atomic_load_explicit(&done, memory_order_relaxed)) goto display_exit;
 
     pthread_mutex_lock(&threads.mutex);
     discard_frames_from_display_todecoder(&threads.decoder_sem, &threads.display_sem, 1, (void **)&frame, (void **)&image_data);
@@ -392,6 +394,8 @@ static void* display_handler (void *data) {
   }
 
 display_exit:
+  done = true;
+  sem_post(&threads.decoder_sem);
   pthread_mutex_lock(&threads.mutex);
   write(windowpipefd[1], &quitstate, sizeof(quitstate));
   pthread_mutex_unlock(&threads.mutex);
@@ -412,7 +416,7 @@ static int x11_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   }
 
   int err = ffmpeg_decode2(ffmpeg_buffer, length, decodeUnit->frameType == FRAME_TYPE_IDR ? AV_PKT_FLAG_KEY : 0);
-  if (done)
+  if (atomic_load_explicit(&done, memory_order_relaxed))
     return DR_OK;
   if (err < 0) {
     goto next_handle;
@@ -452,10 +456,10 @@ static void* decoder_thread(void *data) {
   int laststatus = -3;
   int times = 0;
 
-  while (!done) {
+  while (!atomic_load_explicit(&done, memory_order_relaxed)) {
 
     sem_wait(&threads.decoder_sem);
-    if (done)
+    if (atomic_load_explicit(&done, memory_order_relaxed))
       break;
 
     pthread_mutex_lock(&threads.mutex);
@@ -474,7 +478,7 @@ static void* decoder_thread(void *data) {
       break;
     }
 
-    if (done) {
+    if (atomic_load_explicit(&done, memory_order_relaxed)) {
       LiCompleteVideoFrame(handle, DR_OK);
       break;
     }
@@ -495,6 +499,8 @@ static void* decoder_thread(void *data) {
     laststatus = status;
   }
 
+  done = true;
+  sem_post(&threads.render_sem);
   pthread_mutex_lock(&threads.mutex);
   write(windowpipefd[1], &quitstate, sizeof(quitstate));
   pthread_mutex_unlock(&threads.mutex);

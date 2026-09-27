@@ -37,7 +37,7 @@ static struct head_of_list first_node;
 static struct head_of_list *head_node = &first_node;
 static int kqueue_fd = -1;
 static bool exitnow = false;
-bool done = false;
+atomic_bool done = false;
 
 static int loop_sig_handler(int fd, void *data) {
   switch (fd) {
@@ -117,7 +117,7 @@ static inline struct FD_Function *create_kqueue_data (int fd, void *data, Fd_Han
 }
 
 static inline void fd_ctl(int fd, void *data, Fd_Handler handler, Fd_Clear clean, int events, int opt) {
-  if (done)
+  if (atomic_load_explicit(&done, memory_order_relaxed))
     return;
 
   struct kevent event_data = {0};
@@ -218,7 +218,7 @@ void loop_create() {
 void loop_main() {
   int maxEvents = 300;
 
-  while (!done) {
+  while (!atomic_load_explicit(&done, memory_order_relaxed)) {
     struct kevent events[300] = {0};
     int fd_events = kevent(kqueue_fd, NULL, 0, events, maxEvents, NULL);
     if (fd_events < 0) {

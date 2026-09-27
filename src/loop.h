@@ -19,7 +19,7 @@
 
 #include <sys/event.h>
 #include <sys/queue.h>
-#include <stdbool.h>
+#include <stdatomic.h>
 
 #define LOOP_REMOVE 2
 #define LOOP_RETURN 1
@@ -44,7 +44,7 @@ struct List_Node {
   void *data;
 };
 
-extern bool done;
+extern atomic_bool done;
 
 void loop_add_fd(int fd, Fd_Handler handler, int events);
 void loop_add_fd1(int fd, Fd_Handler handler, Fd_Clear clean, int events, void *data);
