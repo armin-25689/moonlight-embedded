@@ -83,7 +83,7 @@ static inline void clear_tty (struct Tty_Stat *tty) {
   tty->fd = -1;
 }
 
-static int stdin_handle (int fd, void *data) {
+static int stdin_handle (uintptr_t fd, void *data) {
   unsigned char key;
   int ret;
 

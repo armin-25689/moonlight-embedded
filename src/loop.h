@@ -20,23 +20,26 @@
 #include <sys/event.h>
 #include <sys/queue.h>
 #include <stdatomic.h>
+#include <stdint.h>
 
 #define LOOP_REMOVE 2
 #define LOOP_RETURN 1
 #define LOOP_OK 0
 
-typedef char evwcode;
+typedef unsigned char evwcode;
 enum evWindowCode { VTF1CODE = 1, VTF2CODE, VTF3CODE, VTF4CODE, VTF5CODE, VTF6CODE, VTF7CODE, VTF8CODE, VTF9CODE, VTFACODE, VTFBCODE, VTFCCODE, QUITCODE, GRABCODE, UNGRABCODE, FAKEGRABCODE, UNFAKEGRABCODE, WINDOWSIZECHANGED, FROMDISPLAY = 128 };
 
-typedef int(*Fd_Handler)(int fd, void *data);
-typedef void(*Fd_Clear)(int fd, void *data);
+typedef int(*Fd_Handler_Legacy)(int fd, void *data);
+typedef int(*Fd_Handler)(uintptr_t fd, void *data);
+typedef void(*Fd_Clear)(uintptr_t fd, void *data);
 
-struct FD_Function {
+struct Event_Handle_Info {
   Fd_Handler func;
-  Fd_Clear clean;
-  void*   data;
-  int     fd;
-  int     events;
+  Fd_Clear   clean;
+  void*      data;
+  uintptr_t  fd;
+  int        events;
+  uint32_t   id;
 };
 
 struct List_Node {
@@ -46,11 +49,20 @@ struct List_Node {
 
 extern atomic_bool done;
 
-void loop_add_fd(int fd, Fd_Handler handler, int events);
-void loop_add_fd1(int fd, Fd_Handler handler, Fd_Clear clean, int events, void *data);
-void loop_mod_fd(int fd, Fd_Handler handler, Fd_Clear clean, int events, void *data);
+// no use
+void loop_add_fd(int fd, Fd_Handler_Legacy handler, int events);
+// use add_fd0 instead add_fd
+void loop_add_fd0(uintptr_t fd, Fd_Handler handler, int events);
+void loop_add_fd1(uintptr_t fd, Fd_Handler handler, Fd_Clear clean, int events, void *data);
+void loop_add_timer(uintptr_t *fd_ptr, Fd_Handler handler, uint32_t time_flag, int64_t time, void *data);
+void loop_add_timer_oneshot(Fd_Handler handler, uint32_t time_flag, int64_t time, void *data);
+void loop_add_notify(uintptr_t *fd_ptr, Fd_Handler handler);
+void loop_notify(uintptr_t ident, uint32_t udata);
+void loop_add_window_notify(Fd_Handler handler);
+void loop_notify_window(uint32_t udata);
+void loop_active_poll();
 void loop_remove_fd(int fd);
-void loop_remove_ident(int fd, int event);
+void loop_remove_ident(uintptr_t fd, int event);
 
 void loop_create();
 void loop_start();

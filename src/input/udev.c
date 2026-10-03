@@ -37,7 +37,7 @@ static struct udev *udev;
 static struct udev_monitor *udev_mon;
 static int inputRotate;
 
-static int udev_handle(int fd, void *data) {
+static int udev_handle(uintptr_t fd, void *data) {
   struct udev_device *dev = udev_monitor_receive_device(udev_mon);
   const char *action = udev_device_get_action(dev);
   if (action != NULL) {
@@ -90,7 +90,7 @@ void udev_init(bool autoload, struct mapping* mappings, bool verbose, int rotate
   defaultMappings = mappings;
   inputRotate = rotate;
 
-  loop_add_fd(udev_monitor_get_fd(udev_mon), &udev_handle, 0);
+  loop_add_fd0(udev_monitor_get_fd(udev_mon), &udev_handle, 0);
 }
 
 void udev_destroy() {

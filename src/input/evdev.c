@@ -218,7 +218,7 @@ int evdev_gamepads = 0;
 #define QUIT_BUTTONS (PLAY_FLAG|BACK_FLAG|LB_FLAG|RB_FLAG)
 
 static bool (*handler) (struct input_event*, struct input_device*);
-static int evdev_handle(int fd, void *data);
+static int evdev_handle(uintptr_t fd, void *data);
 static int mt_evdev_handle(int fd, void *data, int interval, uint32_t event, int slot);
 
 struct {
@@ -227,7 +227,7 @@ struct {
   int max_count;
   struct mapping *mapping;
   int rotate;
-  int key;
+  uintptr_t key;
 } static imonitor = {0};
 
 static int evdev_get_map(int* map, int length, int value) {
@@ -264,7 +264,7 @@ static void freeallkey () {
   }
 }
 
-static int monitor_dir_handle (int fd, void *data) {
+static int monitor_dir_handle (uintptr_t fd, void *data) {
   static int max_count = 100000;
   DIR *dir = (DIR *)data;
   struct dirent *entry = NULL;
@@ -324,7 +324,7 @@ static int monitor_input_dir_start (bool isinputadded, struct mapping *mappings,
     return -1;
   }
 
-  loop_add_fd1(imonitor.key, &monitor_dir_handle, NULL, EVFILT_TIMER, (void *)imonitor.dir);
+  loop_add_timer(&imonitor.key, &monitor_dir_handle, NOTE_MSECONDS, imonitor.key, (void *)imonitor.dir);
   return 0;
 }
 
@@ -355,67 +355,64 @@ static bool evdev_init_parms(struct input_device *dev, struct input_abs_parms *p
   return true;
 }
 
-static void evdev_remove_device(struct input_device *dis_device, const char *path, int opt) {
-  // opt is 1 means remove all device
-  struct List_Node *nodePtr = NULL;
-  LIST_FOREACH(nodePtr, head_device, node) {
-    struct input_device *device = (struct input_device*)nodePtr->data;
-    if(((device) == dis_device && dis_device != NULL) || opt == 1 || (path != NULL && strcmp(device->path, path) == 0)) {  
-      numDevices--;
-      if (verboseMe || opt != 1)
-        printf("Input device removed: %s (player %d)\n", libevdev_get_name(device->dev), device->controllerId + 1);
-
-      // remove from loop first
-      loop_remove_fd(device->fd);
-
-      // drain all event
-      struct input_event ev;
-      while (libevdev_next_event(device->dev, LIBEVDEV_READ_FLAG_NORMAL, &ev) >= 0);
-
-      // clear device
-      if (device->controllerId >= 0) {
-        gpNumForCheck--;
-        evdev_gamepads--;
-        assignedControllerIds &= ~(1 << device->controllerId);
-        LiSendMultiControllerEvent(device->controllerId, assignedControllerIds, 0, 0, 0, 0, 0, 0, 0);
-      }
-      if (device->mouseEmulation) {
-        device->mouseEmulation = false;
-        pthread_join(device->meThread, NULL);
-      }
-
-      if (imonitor.input_stat) {
-        int device_num = -1;
-        if (device->path && sscanf(device->path, "%*[^0-9]%d", &device_num) == 1 && device_num >= 0 && device_num < imonitor.max_count) {
-          imonitor.input_stat[device_num] = 0;
-        }
-      }
-
-      free(device->path);
-      libevdev_free(device->dev);
-      close(device->fd);
-
-      // remove device
-      LIST_REMOVE(nodePtr, node);
-      free(nodePtr->data);
-      free(nodePtr);
-
-      if (opt != 1)
-        break;
-    }
-  }
+static inline bool test_evdevice_node (struct input_device *list_device, struct input_device *src_device) {
+  return (list_device == src_device);
 }
+
+static inline bool test_evdevice_node_path (struct input_device *list_device, const char *src_path) {
+  return (src_path && strcmp(list_device->path, src_path) == 0);
+}
+
+#define EVDEV_REMOVE_DEVICE(loop_expression, test_conditions, exit_expression, print_test) \
+  do { \
+  struct List_Node *nodePtr = NULL; \
+  loop_expression { \
+    struct input_device *device = nodePtr->data; \
+    if((test_conditions)) { \
+      numDevices--; \
+      if ((print_test)) \
+        printf("Input device removed: %s (player %d)\n", libevdev_get_name(device->dev), device->controllerId + 1); \
+      loop_remove_fd(device->fd); \
+      struct input_event ev; \
+      while (libevdev_next_event(device->dev, LIBEVDEV_READ_FLAG_NORMAL, &ev) >= 0); \
+      if (device->controllerId >= 0) { \
+        gpNumForCheck--; \
+        evdev_gamepads--; \
+        assignedControllerIds &= ~(1 << device->controllerId); \
+        LiSendMultiControllerEvent(device->controllerId, assignedControllerIds, 0, 0, 0, 0, 0, 0, 0); \
+      } \
+      if (device->mouseEmulation) { \
+        device->mouseEmulation = false; \
+        pthread_join(device->meThread, NULL); \
+      } \
+      if (imonitor.input_stat) { \
+        int device_num = -1; \
+        if (device->path && sscanf(device->path, "%*[^0-9]%d", &device_num) == 1 && device_num >= 0 && device_num < imonitor.max_count) { \
+          imonitor.input_stat[device_num] = 0; \
+        } \
+      } \
+      free(device->path); \
+      libevdev_free(device->dev); \
+      close(device->fd); \
+      LIST_REMOVE(nodePtr, node); \
+      free(nodePtr->data); \
+      free(nodePtr); \
+      exit_expression; \
+    } \
+  } \
+  } while(0)
+
 
 static void evdev_remove_all(void) {
-  evdev_remove_device(NULL, NULL, 1);
+  EVDEV_REMOVE_DEVICE(while((nodePtr = LIST_FIRST(head_device))), true, continue, false);
 }
 
-static void evdev_remove(struct input_device *device) {
-  evdev_remove_device(device, NULL, 0);
+static void evdev_remove(struct input_device *src_device) {
+  EVDEV_REMOVE_DEVICE(LIST_FOREACH(nodePtr, head_device, node), test_evdevice_node(device, src_device), break, verboseMe);
 }
 
 void evdev_remove_from_path(const char* path) {
-  evdev_remove_device(NULL, path, 0);
+  EVDEV_REMOVE_DEVICE(LIST_FOREACH(nodePtr, head_device, node), test_evdevice_node_path(device, path), break, verboseMe);
 }
 
 static short evdev_convert_value(struct input_event *ev, struct input_device *dev, struct input_abs_parms *parms, bool reverse) {
@@ -1702,13 +1699,13 @@ direct_exit:
 #undef FAILED_RES
 }
 
-static void evdev_remove_handle(int fd, void *data) {
+static void evdev_remove_handle(uintptr_t fd, void *data) {
   if (data == NULL) return;
   struct input_device *device = (struct input_device *)data;
   return evdev_remove(device);
 }
 
-static int evdev_handle(int fd, void *data) {
+static int evdev_handle(uintptr_t fd, void *data) {
   struct input_device *device = (struct input_device *)data;
   int rc;
   struct input_event ev;

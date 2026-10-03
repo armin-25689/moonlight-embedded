@@ -64,7 +64,7 @@ static bool inputing = True;
 static bool wait_key_release = false;
 static bool keep_display_cursor = false;
 
-static int x11_handler(int fd, void *data) {
+static int x11_handler(uintptr_t fd, void *data) {
   XEvent event;
   int motion_x, motion_y;
 
@@ -176,7 +176,7 @@ static int x11_handler(int fd, void *data) {
   return LOOP_OK;
 }
 
-static void x_destroy_vars (int fd, void *data) {
+static void x_destroy_vars (uintptr_t fd, void *data) {
   display = NULL;
   *dis_ptr = NULL;
   const evwcode quitcode = QUITCODE;

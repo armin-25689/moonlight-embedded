@@ -139,7 +139,7 @@ static void clear_threads() {
   return;
 }
 
-static int window_op_handle (int pipefd, void *data) {
+static int window_op_handle (uintptr_t pipefd, void *data) {
   evwcode getedCode = 0;
   struct WINDOW_OP op = {0};
   int flags = 0;
@@ -700,7 +700,7 @@ int x11_setup(int videoFormat, int width, int height, int redrawRate, void* cont
     fprintf(stderr, "Can't create communication channel between threads\n");
     return -2;
   }
-  loop_add_fd(windowpipefd[0], &window_op_handle, 0);
+  loop_add_fd0(windowpipefd[0], &window_op_handle, 0);
   fcntl(windowpipefd[0], F_SETFL, O_NONBLOCK);
 
   memset(renderPtr->images, 0, sizeof(struct Render_Image) * MAX_FB_NUM);

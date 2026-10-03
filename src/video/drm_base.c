@@ -586,7 +586,7 @@ found_plane:
     drm_info->conn_colorspace_values[D601YCC] = drm_info->conn_colorspace_values[DEFAULTCOLOR];
   if (drm_info->conn_colorspace_values[SMPTE170YCC] > 0 && drm_info->conn_colorspace_values[D601YCC] == 0) {
     if (drm_set_props(drm_info->fd, &drm_info->connector_id, &drm_info->conn_colorspace_prop_id, &drm_info->conn_colorspace_values[SMPTE170YCC], 1, DRM_MODE_ATOMIC_TEST_ONLY, DRM_MODE_OBJECT_CONNECTOR, NULL) >= 0)
-    drm_info->conn_colorspace_values[D601YCC] = drm_info->conn_colorspace_values[SMPTE170YCC];
+      drm_info->conn_colorspace_values[D601YCC] = drm_info->conn_colorspace_values[SMPTE170YCC];
   }
 
   if (format_site < 0)
