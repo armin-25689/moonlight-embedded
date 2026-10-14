@@ -295,9 +295,8 @@ void loop_add_timer(uintptr_t *fd_ptr, Fd_Handler handler, uint32_t time_flag, i
   return fd_ctl((uintptr_t)fd_ptr, data, handler, NULL, EVFILT_TIMER, EV_ADD, time_flag, time, POLL_CTL_ADD | POLL_FLAGS_MOD_EVENT);
 }
 
-void loop_add_timer_oneshot(Fd_Handler handler, uint32_t time_flag, int64_t time, void *data) {
-  uintptr_t fd = 0;
-  return fd_ctl((uintptr_t)(&fd), data, handler, NULL, EVFILT_TIMER, EV_ADD | EV_ONESHOT, time_flag, time, POLL_CTL_ADD | POLL_FLAGS_ONESHOT_ADD);
+void loop_add_timer_oneshot(uintptr_t *fd_ptr, Fd_Handler handler, uint32_t time_flag, int64_t time, void *data) {
+  return fd_ctl((uintptr_t)(fd_ptr), data, handler, NULL, EVFILT_TIMER, EV_ADD | EV_ONESHOT, time_flag, time, POLL_CTL_ADD | POLL_FLAGS_ONESHOT_ADD);
 }
 
 void loop_add_notify(uintptr_t *fd_ptr, Fd_Handler handler) {

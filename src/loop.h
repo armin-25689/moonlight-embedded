@@ -55,7 +55,7 @@ void loop_add_fd(int fd, Fd_Handler_Legacy handler, int events);
 void loop_add_fd0(uintptr_t fd, Fd_Handler handler, int events);
 void loop_add_fd1(uintptr_t fd, Fd_Handler handler, Fd_Clear clean, int events, void *data);
 void loop_add_timer(uintptr_t *fd_ptr, Fd_Handler handler, uint32_t time_flag, int64_t time, void *data);
-void loop_add_timer_oneshot(Fd_Handler handler, uint32_t time_flag, int64_t time, void *data);
+void loop_add_timer_oneshot(uintptr_t *fd_ptr, Fd_Handler handler, uint32_t time_flag, int64_t time, void *data);
 void loop_add_notify(uintptr_t *fd_ptr, Fd_Handler handler);
 void loop_notify(uintptr_t ident, uint32_t udata);
 void loop_add_window_notify(Fd_Handler handler);
