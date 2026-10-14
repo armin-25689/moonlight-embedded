@@ -80,18 +80,16 @@ bool has_fast_aes() {
     return false;
   #endif
 #elif (defined(__arm__) || defined(__aarch64__)) && (defined(__FreeBSD__) || defined(__OpenBSD__))
-  unsigned long hwcap2 = 0;
-  elf_aux_info(AT_HWCAP2, &hwcap2, sizeof(hwcap2));
-  if (hwcap2 & HWCAP2_AES)
-    return (hwcap2 & HWCAP2_AES);
-  #ifdef HWCAP_AES
-  unsigned long hwcap = 0;
-  elf_aux_info(AT_HWCAP, &hwcap, sizeof(hwcap));
-  if (hwcap & HWCAP_AES)
-    return (hwcap & HWCAP_AES);
-  #endif
   #if __SIZEOF_SIZE_T__ == 4
-  return false;
+  unsigned long hwcap2 = 0;
+  if (elf_aux_info(AT_HWCAP2, &hwcap2, sizeof(hwcap2)) != 0)
+    hwcap2 = 0;
+  return (hwcap2 & HWCAP2_AES);
+  #elif __SIZEOF_SIZE_T__ == 8
+  unsigned long hwcap = 0;
+  if (elf_aux_info(AT_HWCAP, &hwcap, sizeof(hwcap)) != 0)
+    hwcap = 0;
+  return (hwcap & HWCAP_AES);
   #else
   return true;
   #endif
