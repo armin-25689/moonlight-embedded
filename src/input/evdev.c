@@ -107,7 +107,7 @@ struct input_device {
   struct libevdev *dev;
   bool is_keyboard;
   bool is_mouse;
-  bool is_touchscreen;
+  bool is_touchdevice;
   int rotate;
   struct mapping* map;
   int key_map[KEY_CNT];
@@ -139,6 +139,7 @@ struct input_device {
     uint32_t down_finger_num;
   } mt_info; // precision touchpda
   struct {
+    bool is_touchpad;
     int mtPalm;
     int mtXMax;
     int mtYMax;
@@ -176,7 +177,7 @@ struct input_device {
     struct List_Node *nodePtr = NULL; \
     LIST_FOREACH(nodePtr, head_device, node) { \
       struct input_device *device = nodePtr->data; \
-      if (device->mtYMax > 0 && !device->is_touchscreen) { \
+      if (device->is_touchpad) { \
         if (device->mtVirtualBoundaryY == 0) \
           device->mtVirtualBoundaryY = (device->mtYMax * 14) >> 6; \
         else \
@@ -1176,7 +1177,9 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
         dev->events &= ~MT_EVENT_FLAG_LPRESS;
         if (ev->value)
           dev->events |= (MT_EVENT_FLAG_BUTTON << MT_EVENT_BIT_LPRESS);
-        if (!(ev->value && (events & MT_EVENT_FLAG_LPRESS)))
+        if (ev->value && (events & MT_EVENT_FLAG_LPRESS))
+          return true;
+        else
           mouseCode = BUTTON_LEFT;
         break;
       case BTN_MIDDLE:
@@ -1186,7 +1189,9 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
         dev->events &= ~MT_EVENT_FLAG_RPRESS;
         if (ev->value)
           dev->events |= (MT_EVENT_FLAG_BUTTON << MT_EVENT_BIT_RPRESS);
-        if (!(ev->value && (events & MT_EVENT_FLAG_RPRESS)))
+        if (ev->value && (events & MT_EVENT_FLAG_RPRESS))
+          return true;
+        else
           mouseCode = BUTTON_RIGHT;
         break;
       case BTN_SIDE:
@@ -1196,7 +1201,7 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
         mouseCode = BUTTON_X2;
         break;
       case BTN_TOUCH:
-        if (dev->is_touchscreen && dev->mtPalm == 0) {
+        if (dev->is_touchdevice && dev->mtPalm == 0) {
           if (ev->value == 1) {
             dev->touchDownTime.tv_sec = ev->input_event_sec;
             dev->touchDownTime.tv_usec = ev->input_event_usec;
@@ -1223,12 +1228,13 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
             dev->touchDownY = TOUCH_UP;
           }
         }
-        break;
+        return true;
       default:
-        gamepadModified = true;
         if (dev->map == NULL)
           break;
-        else if (index == dev->map->btn_a) {
+        gamepadModified = true;
+
+        if (index == dev->map->btn_a) {
           if (!swapXYAB)
             gamepadCode = A_FLAG;
           else
@@ -1371,111 +1377,115 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
   case EV_ABS:
     if (ev->code > ABS_MAX)
       return true;
-    if (dev->is_touchscreen && dev->mtPalm == 0) {
-      switch (ev->code) {
-      case ABS_X:
-        if (dev->touchDownX == TOUCH_UP) {
-          dev->touchDownX = ev->value;
-          dev->touchX = ev->value;
-        } else {
-          dev->mouseDeltaX += (ev->value - dev->touchX);
-          dev->touchX = ev->value;
+    if (dev->is_touchdevice) {
+      if (dev->mtPalm == 0) {
+        switch (ev->code) {
+        case ABS_X:
+          if (dev->touchDownX == TOUCH_UP) {
+            dev->touchDownX = ev->value;
+            dev->touchX = ev->value;
+          } else {
+            dev->mouseDeltaX += (ev->value - dev->touchX);
+            dev->touchX = ev->value;
+          }
+          break;
+        case ABS_Y:
+          if (dev->touchDownY == TOUCH_UP) {
+            dev->touchDownY = ev->value;
+            dev->touchY = ev->value;
+          } else {
+            dev->mouseDeltaY += (ev->value - dev->touchY);
+            dev->touchY = ev->value;
+          }
+          break;
         }
-        break;
-      case ABS_Y:
-        if (dev->touchDownY == TOUCH_UP) {
-          dev->touchDownY = ev->value;
-          dev->touchY = ev->value;
-        } else {
-          dev->mouseDeltaY += (ev->value - dev->touchY);
-          dev->touchY = ev->value;
-        }
-        break;
-      }
-      break;
-    }
-    switch (ev->code) {
-    case ABS_MT_TRACKING_ID:;
-      uint32_t index = dev->mt_info.mtSlot;
-      dev->mt_info.mtChangeSlot = index;
-      // record touch time
-      dev->last_change_time[index].tv_sec = dev->change_time[index].tv_sec;
-      dev->last_change_time[index].tv_usec = dev->change_time[index].tv_usec;
-      dev->change_time[index].tv_sec = ev->input_event_sec;
-      dev->change_time[index].tv_usec = ev->input_event_usec;
-      if ((dev->mt_info.slotValueX[index] & dev->mt_info.slotValueY[index]) == 0)
-        dev->events |= MT_EVENT_FLAG_CORRUPT;
-      if (ev->value == -1) {
-        // clean var
-        dev->mt_info.slotValueX[index] = 0;
-        dev->mt_info.slotValueY[index] = 0;
-        dev->mt_info.up_finger_num++;
-        if (dev->mt_info.fingersNum > 0)
-          dev->mt_info.fingersNum--;
-        if (dev->mt_info.fingersNum == 0)
-          mt_up_event_trigger_handle(dev->event_id, dev);
-        else
-          loop_add_timer_oneshot(&dev->event_id, &mt_up_event_trigger_handle, NOTE_USECONDS, MT_TOUCH_EVENT_DELAY, dev);
       }
       else {
-        if (dev->mt_info.fingerMaxNum == 0)
-          dev->mt_info.fingerMaxNum = 1;
-        dev->mt_info.fingersNum++;
-        dev->mt_info.down_finger_num++;
-        loop_add_timer_oneshot(&dev->event_id, &mt_down_event_trigger_handle, NOTE_USECONDS, MT_TOUCH_EVENT_DELAY, dev);
-
-        // for game mode
-        {
-          if (MT_TEST_IN_VIRTUAL_AREA(dev, dev->mt_info.slotValueY[index]) && dev->mt_info.slotValueX[index] != 0) {
+        switch (ev->code) {
+        case ABS_MT_TRACKING_ID:;
+          uint32_t index = dev->mt_info.mtSlot;
+          dev->mt_info.mtChangeSlot = index;
+          // record touch time
+          dev->last_change_time[index].tv_sec = dev->change_time[index].tv_sec;
+          dev->last_change_time[index].tv_usec = dev->change_time[index].tv_usec;
+          dev->change_time[index].tv_sec = ev->input_event_sec;
+          dev->change_time[index].tv_usec = ev->input_event_usec;
+          if ((dev->mt_info.slotValueX[index] & dev->mt_info.slotValueY[index]) == 0)
             dev->events |= MT_EVENT_FLAG_CORRUPT;
-            dev->events &= ~MT_EVENT_FLAG_CORRUPT_CANCEL;
-            if (dev->mt_info.slotValueX[index] > (dev->mtVirtualBoundaryX)) {
-              if ((events & MT_EVENT_FLAG_RPRESS) != (MT_EVENT_FLAG_BUTTON << MT_EVENT_BIT_RPRESS)) {
-                dev->events &= ~MT_EVENT_FLAG_RPRESS;
-                if ((events & MT_EVENT_FLAG_RPRESS) == 0) {
-                  EVDEV_MT_SEND_RPRESS(dev, dev->events);
+          if (ev->value == -1) {
+            // clean var
+            dev->mt_info.slotValueX[index] = 0;
+            dev->mt_info.slotValueY[index] = 0;
+            dev->mt_info.up_finger_num++;
+            if (dev->mt_info.fingersNum > 0)
+              dev->mt_info.fingersNum--;
+            if (dev->mt_info.fingersNum == 0)
+              mt_up_event_trigger_handle(dev->event_id, dev);
+            else
+              loop_add_timer_oneshot(&dev->event_id, &mt_up_event_trigger_handle, NOTE_USECONDS, MT_TOUCH_EVENT_DELAY, dev);
+          }
+          else {
+            if (dev->mt_info.fingerMaxNum == 0)
+              dev->mt_info.fingerMaxNum = 1;
+            dev->mt_info.fingersNum++;
+            dev->mt_info.down_finger_num++;
+            loop_add_timer_oneshot(&dev->event_id, &mt_down_event_trigger_handle, NOTE_USECONDS, MT_TOUCH_EVENT_DELAY, dev);
+
+            // for game mode
+            {
+              if (MT_TEST_IN_VIRTUAL_AREA(dev, dev->mt_info.slotValueY[index]) && dev->mt_info.slotValueX[index] != 0) {
+                dev->events |= MT_EVENT_FLAG_CORRUPT;
+                dev->events &= ~MT_EVENT_FLAG_CORRUPT_CANCEL;
+                if (dev->mt_info.slotValueX[index] > (dev->mtVirtualBoundaryX)) {
+                  if ((events & MT_EVENT_FLAG_RPRESS) != (MT_EVENT_FLAG_BUTTON << MT_EVENT_BIT_RPRESS)) {
+                    dev->events &= ~MT_EVENT_FLAG_RPRESS;
+                    if ((events & MT_EVENT_FLAG_RPRESS) == 0) {
+                      EVDEV_MT_SEND_RPRESS(dev, dev->events);
+                    }
+                    else
+                      dev->events |= (((index ^ MT_EVENT_FLAG_MASK) << MT_EVENT_BIT_RPRESS) & MT_EVENT_FLAG_RPRESS);
+                  }
                 }
-                else
-                  dev->events |= (((index ^ MT_EVENT_FLAG_MASK) << MT_EVENT_BIT_RPRESS) & MT_EVENT_FLAG_RPRESS);
-              }
-            }
-            else {
-              if ((events & MT_EVENT_FLAG_LPRESS) != (MT_EVENT_FLAG_BUTTON << MT_EVENT_BIT_LPRESS)) {
-                dev->events &= ~MT_EVENT_FLAG_LPRESS;
-                if ((events & MT_EVENT_FLAG_LPRESS) == 0) {
-                  EVDEV_MT_SEND_LPRESS(dev, dev->events);
+                else {
+                  if ((events & MT_EVENT_FLAG_LPRESS) != (MT_EVENT_FLAG_BUTTON << MT_EVENT_BIT_LPRESS)) {
+                    dev->events &= ~MT_EVENT_FLAG_LPRESS;
+                    if ((events & MT_EVENT_FLAG_LPRESS) == 0) {
+                      EVDEV_MT_SEND_LPRESS(dev, dev->events);
+                    }
+                    else
+                      dev->events |= (((index ^ MT_EVENT_FLAG_MASK) << MT_EVENT_BIT_LPRESS) & MT_EVENT_FLAG_LPRESS);
+                  }
                 }
-                else
-                  dev->events |= (((index ^ MT_EVENT_FLAG_MASK) << MT_EVENT_BIT_LPRESS) & MT_EVENT_FLAG_LPRESS);
               }
             }
           }
+
+          for (int i = 0; i < dev->mt_info.fingerMaxNum; i++) {
+            dev->mt_info.distanceX[i] = 0;
+            dev->mt_info.distanceY[i] = 0;
+            dev->mt_info.lastX[i] = dev->mt_info.slotValueX[i];
+            dev->mt_info.lastY[i] = dev->mt_info.slotValueY[i];
+          }
+          break;
+        case ABS_MT_SLOT:
+          if (dev->mt_info.fingerMaxNum < (ev->value + 1)) {
+            dev->mt_info.fingerMaxNum = (ev->value + 1);
+          }
+          dev->mt_info.mtSlot = ev->value;
+          break;
+        case ABS_MT_POSITION_X:
+          if (abs(ev->value) > dev->mtXMax)
+            break;
+          dev->mt_info.slotValueX[dev->mt_info.mtSlot] = ev->value;
+          break;
+        case ABS_MT_POSITION_Y:
+          if (abs(ev->value) > dev->mtYMax)
+            break;
+          dev->mt_info.slotValueY[dev->mt_info.mtSlot] = ev->value;
+          break;
         }
       }
-
-      for (int i = 0; i < dev->mt_info.fingerMaxNum; i++) {
-        dev->mt_info.distanceX[i] = 0;
-        dev->mt_info.distanceY[i] = 0;
-        dev->mt_info.lastX[i] = dev->mt_info.slotValueX[i];
-        dev->mt_info.lastY[i] = dev->mt_info.slotValueY[i];
-      }
-      break;
-    case ABS_MT_SLOT:
-      if (dev->mt_info.fingerMaxNum < (ev->value + 1)) {
-        dev->mt_info.fingerMaxNum = (ev->value + 1);
-      }
-      dev->mt_info.mtSlot = ev->value;
-      break;
-    case ABS_MT_POSITION_X:
-      if (abs(ev->value) > dev->mtXMax)
-        break;
-      dev->mt_info.slotValueX[dev->mt_info.mtSlot] = ev->value;
-      break;
-    case ABS_MT_POSITION_Y:
-      if (abs(ev->value) > dev->mtYMax)
-        break;
-      dev->mt_info.slotValueY[dev->mt_info.mtSlot] = ev->value;
-      break;
+      return true;
     }
 
     if (dev->map == NULL)
@@ -1757,10 +1767,13 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
   bool is_keyboard = libevdev_has_event_code(evdev, EV_KEY, KEY_Q);
   bool is_mouse = libevdev_has_event_type(evdev, EV_REL) || 
                   libevdev_has_event_code(evdev, EV_KEY, BTN_LEFT);
-  bool is_touchscreen = !is_mouse && ((libevdev_has_event_code(evdev, EV_KEY, BTN_TOUCH) &&
-                                       !libevdev_has_event_code(evdev, EV_KEY, BTN_TOOL_DOUBLETAP)) ||
-                                      libevdev_has_property(evdev, INPUT_PROP_DIRECT));
-
+  bool is_mtouchdevice = libevdev_has_event_code(evdev, EV_ABS, ABS_MT_SLOT) &&
+                         libevdev_has_event_code(evdev, EV_ABS, ABS_MT_TRACKING_ID) &&
+                         libevdev_has_event_code(evdev, EV_ABS, ABS_MT_POSITION_X);
+  bool is_onetouch = libevdev_has_event_code(evdev, EV_KEY, BTN_TOUCH) &&
+                     libevdev_has_event_code(evdev, EV_ABS, ABS_X) &&
+                     libevdev_has_event_code(evdev, EV_ABS, ABS_Y) &&
+                     !libevdev_has_event_code(evdev, EV_ABS, ABS_MT_SLOT);
   // This classification logic comes from SDL
   bool hasaccel =
     libevdev_has_event_code(evdev, EV_ABS, ABS_X) &&
@@ -1788,6 +1801,10 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
      libevdev_has_event_code(evdev, EV_ABS, ABS_WHEEL) ||
      libevdev_has_event_code(evdev, EV_ABS, ABS_GAS) ||
      libevdev_has_event_code(evdev, EV_ABS, ABS_BRAKE));
+  bool is_touchscreen = !is_mouse && ((is_mtouchdevice &&
+                                       (!libevdev_has_event_code(evdev, EV_KEY, BTN_TOOL_DOUBLETAP) ||
+                                       libevdev_has_property(evdev, INPUT_PROP_DIRECT))) ||
+                                      (is_onetouch && !is_gamepad));
   bool is_acpibutton =
     strcmp(name, "Sleep Button") == 0 ||
     strcmp(name, "Power Button") == 0;
@@ -1887,14 +1904,12 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
   memset(&dev->abs_map, -2, sizeof(dev->abs_map));
   dev->is_keyboard = is_keyboard;
   dev->is_mouse = is_mouse;
-  dev->is_touchscreen = is_touchscreen;
+  dev->is_touchdevice = is_touchscreen || is_mtouchdevice || (is_onetouch && !is_gamepad);
+  dev->is_touchpad = is_mtouchdevice && !is_touchscreen;
   dev->rotate = rotate;
   dev->touchDownX = TOUCH_UP;
   dev->touchDownY = TOUCH_UP;
-  if (!is_gamepad &&
-      (libevdev_has_event_code(evdev, EV_ABS, ABS_MT_SLOT) && 
-       libevdev_has_event_code(evdev, EV_ABS, ABS_MT_TRACKING_ID) &&
-       libevdev_has_event_code(evdev, EV_ABS, ABS_MT_POSITION_X))) {
+  if (is_mtouchdevice) {
     const struct input_absinfo *info = libevdev_get_abs_info(evdev, ABS_MT_SLOT);
     if (info && info->maximum < MAX_MT_TOUCH_FINGER && info->maximum > 0) {
       dev->mtPalm = (int)(libevdev_get_abs_resolution(evdev, ABS_X) * 0.6f);
@@ -1911,6 +1926,7 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
         dev->mtPalm = 0;
         dev->mtXMax = 0;
         dev->mtYMax = 0;
+        dev->is_touchpad = false;
       }
     }
   }
@@ -1959,7 +1975,7 @@ void evdev_create(const char* device, struct mapping* mappings, bool verbose, in
       fprintf(stderr, "Mapping for %s (%s) on %s is incorrect\n", name, str_guid, device);
   }
 
-  if (grabbingDevices && !fakeGrab && (is_keyboard || is_mouse || is_touchscreen)) {
+  if (grabbingDevices && !fakeGrab && (is_keyboard || is_mouse || is_mtouchdevice || (is_onetouch && !is_gamepad))) {
     if (libevdev_grab(dev->dev, LIBEVDEV_GRAB) < 0) {
       fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
     }
@@ -2164,7 +2180,7 @@ void sync_input_state(bool isinputing) {
     struct List_Node *nodePtr = NULL;
     LIST_FOREACH(nodePtr, head_device, node) {
       struct input_device *device = (struct input_device *)nodePtr->data;
-      if (device->is_keyboard || device->is_mouse || device->is_touchscreen) {
+      if (device->is_keyboard || device->is_mouse || device->is_touchdevice) {
         if (libevdev_grab(device->dev, LIBEVDEV_UNGRAB) < 0)
           fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
       }
@@ -2194,7 +2210,7 @@ void grab_window(enum grabWindowRequest grabstat) {
     struct List_Node *nodePtr = NULL;
     LIST_FOREACH(nodePtr, head_device, node) {
       struct input_device *device = (struct input_device *)nodePtr->data;
-      if (device->is_keyboard || device->is_mouse || device->is_touchscreen) {
+      if (device->is_keyboard || device->is_mouse || device->is_touchdevice) {
         if (libevdev_grab(device->dev, grabmode) < 0)
           fprintf(stderr, "EVIOCGRAB failed with error %d\n", errno);
       }
