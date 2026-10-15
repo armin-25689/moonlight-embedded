@@ -279,7 +279,7 @@ static void freeallkey () {
   for (int i=0;i<0xFF;i++) {
     if (keystatlist[i] == 1) {
       keystatlist[i] = 0;
-      LiSendKeyboardEvent(0x80 << 8 | keyCodes[i], KEY_ACTION_UP, 0);
+      LiSendKeyboardEvent2((0x80 << 8) | keyCodes[i], KEY_ACTION_UP, (i >= KEY_KPENTER ? MODIFIER_EXTENDED : 0), 0);
     }
   }
 }
@@ -1161,7 +1161,8 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
       else
         keyrelease(ev->code);
       short code = 0x80 << 8 | keyCodes[ev->code];
-      LiSendKeyboardEvent(code, ev->value?KEY_ACTION_DOWN:KEY_ACTION_UP, dev->modifiers);
+      char extended_modi = ev->code >= KEY_KPENTER ? MODIFIER_EXTENDED : 0;
+      LiSendKeyboardEvent2(code, ev->value?KEY_ACTION_DOWN:KEY_ACTION_UP, dev->modifiers | extended_modi, 0);
 
     } else {
       if (!isInputing)

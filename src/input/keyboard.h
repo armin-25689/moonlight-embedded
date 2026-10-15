@@ -145,5 +145,5 @@ static const short keyCodes[] = {
   0, //KEY_YEN
   0x5B, //KEY_LEFTMETA
   0x5C, //KEY_RIGHTMETA
-  0, //KEY_COMPOSE
+  0x5D, //KEY_COMPOSE
 };
