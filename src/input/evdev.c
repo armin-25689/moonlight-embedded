@@ -1036,6 +1036,15 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
         if (dev->controllerId < 0)
           dev->controllerId = 0;
 
+        // reset buttons when not initialize
+        dev->buttonFlags = 0;
+        dev->leftTrigger = 0;
+        dev->rightTrigger = 0;
+        dev->leftStickX = 0;
+        dev->leftStickY = 0;
+        dev->rightStickX = 0;
+        dev->rightStickY = 0;
+
         // Send controller arrival event to the host
         send_controller_arrival(dev);
       }
@@ -1298,6 +1307,7 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
         LiSendMouseButtonEvent(ev->value?BUTTON_ACTION_PRESS:BUTTON_ACTION_RELEASE, mouseCode);
         gamepadModified = false;
       } else if (gamepadCode != 0) {
+
         if (ev->value) {
           dev->buttonFlags |= gamepadCode;
           dev->btnDownTime.tv_sec = ev->input_event_sec;
@@ -1306,6 +1316,8 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
           dev->buttonFlags &= ~gamepadCode;
 
         if (mouseEmulationEnabled && gamepadCode == PLAY_FLAG && ev->value == 0) {
+          if (dev->controllerId < 0)
+            break;
           struct timeval eventTime;
           eventTime.tv_sec = ev->input_event_sec;
           eventTime.tv_usec = ev->input_event_usec;
@@ -1578,7 +1590,8 @@ static bool evdev_handle_event(struct input_event *ev, struct input_device *dev)
       write(keyboardpipefd, &quitstate, sizeof(quitstate));
     }
 #endif
-    LiSendMultiControllerEvent(dev->controllerId, assignedControllerIds, 0, 0, 0, 0, 0, 0, 0);
+    if (dev->controllerId >= 0)
+      LiSendMultiControllerEvent(dev->controllerId, assignedControllerIds, 0, 0, 0, 0, 0, 0, 0);
     return false;
   }
 
